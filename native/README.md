@@ -11,7 +11,7 @@
 | Android ARM64 | 安装 CI SDK/NDK → 生成 Android 项目 → `tauri android build --debug --apk --target aarch64 --ci` | 调试 APK，不能作为已完成签名的商店发布包。 |
 | iOS ARM64 模拟器 | 安装模拟器 Rust 目标/XcodeGen → 生成 iOS 项目 → `tauri ios build --debug --target aarch64-sim --no-sign --ci` | 模拟器 `.app` 的 ZIP；不是可以装到 iPhone 的签名 IPA。 |
 
-本机已执行 `npm test`（4 项，包含安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[第二轮构建 37143054800](https://github.com/guoweiyi/treasure-up/actions/runs/37143054800) 已实际通过 Windows、macOS ARM/Intel 安装包及 iOS 模拟器编译；Android 因 SDK 包名称不匹配在安装依赖阶段失败。下述修复和统一锁文件需由下一轮完整构建验证，尚未宣称 Android APK 成功。
+本机已执行 `npm test`（4 项，包含安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[第三轮构建 37147760714](https://github.com/guoweiyi/treasure-up/actions/runs/37147760714) 的 5 个 job 已全部成功，验证代码为 `4c6e9e40cc954c3158eb760685204382c2b90001`：Windows NSIS、macOS ARM/Intel DMG、Android ARM64 调试 APK、iOS ARM64 模拟器 ZIP 均已生成并上传。全部构建使用 `--locked`，桌面另通过 2 项 Rust 导航策略测试；macOS ARM 构建结束后的 Cargo.lock 摘要与入库文件一致。这些结果证明编译与打包通过；各系统实机交互、登录、播放及发布签名仍需下述验收。
 
 npm 与 Cargo 锁均已落盘。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 2026-10-04 通过官方 registry 元数据核实。Cargo.lock 取自第二轮成功的 macOS ARM job `111261288775`，113330 字节、442 个包，SHA-256 为 `8b548b794d163025db6a3f2fa5611a69acebf4367eccb2388b6e4d45e40eb654`；回收后已验证摘要、字节数、TOML、registry 来源和包校验和。生成的 Android/Xcode 工程位于忽略目录 `src-tauri/gen`；发布所需签名材料不得提交。
 
