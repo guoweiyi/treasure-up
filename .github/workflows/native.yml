@@ -47,9 +47,9 @@ jobs:
       - run: npm test
       - run: npm run build
       - name: Compile and test native navigation policy
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
       - name: Compile native application and package installer
-        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
       - name: Record public Cargo dependency lock for audit and recovery
         if: matrix.target == 'aarch64-apple-darwin'
         run: node scripts/emit-lock.mjs
@@ -86,7 +86,9 @@ jobs:
           log-accepted-android-sdk-licenses: 'false'
       - name: Install Android build tools on the disposable CI runner
         run: |
-          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          sdkmanager --list > "$RUNNER_TEMP/android-sdk-packages.txt"
+          grep -E 'platforms;android-36[[:space:]]|build-tools;36.0.0[[:space:]]|ndk;28.2.13676358[[:space:]]' "$RUNNER_TEMP/android-sdk-packages.txt"
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
           echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
           rustup update stable --no-self-update
           rustup default stable
@@ -95,8 +97,10 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run tauri -- android init --ci --skip-targets-install
+      - name: Pin generated Android project to verified stable SDK and wrapper checksum
+        run: npm run android:prepare
       - name: Compile ARM64 debug APK without release credentials
-        run: npm run tauri -- android build --debug --apk --target aarch64 --ci
+        run: npm run tauri -- android build --debug --apk --target aarch64 --ci -- --locked
       - uses: actions/upload-artifact@v4
         with:
           name: treasure-up-android-debug
@@ -127,7 +131,7 @@ jobs:
       - run: npm run build
       - run: npm run tauri -- ios init --ci --skip-targets-install
       - name: Compile simulator application without distribution signing
-        run: npm run tauri -- ios build --debug --target aarch64-sim --no-sign --ci
+        run: npm run tauri -- ios build --debug --target aarch64-sim --no-sign --ci -- --locked
       - name: Archive simulator bundle
         run: |
           python3 - <<'PY'

@@ -11,11 +11,11 @@
 | Android ARM64 | 安装 CI SDK/NDK → 生成 Android 项目 → `tauri android build --debug --apk --target aarch64 --ci` | 调试 APK，不能作为已完成签名的商店发布包。 |
 | iOS ARM64 模拟器 | 安装模拟器 Rust 目标/XcodeGen → 生成 iOS 项目 → `tauri ios build --debug --target aarch64-sim --no-sign --ci` | 模拟器 `.app` 的 ZIP；不是可以装到 iPhone 的签名 IPA。 |
 
-本机已执行 `npm test`（2 个安全边界回归）和 `npm run build`。本机 `tauri info` 确认缺少 Rust/Cargo/MSVC，因此尚未在这里编译原生二进制。以上是工作流包含的真实编译命令，成功与否应以首次 GitHub Actions 结果为准；没有用“矩阵已配置”替代编译通过。
+本机已执行 `npm test`（4 项，包含安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[第二轮构建 37143054800](https://github.com/guoweiyi/treasure-up/actions/runs/37143054800) 已实际通过 Windows、macOS ARM/Intel 安装包及 iOS 模拟器编译；Android 因 SDK 包名称不匹配在安装依赖阶段失败。下述修复和统一锁文件需由下一轮完整构建验证，尚未宣称 Android APK 成功。
 
-npm 锁已落盘。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 2026-10-04 通过官方 registry 元数据核实。当前主机不能生成 Cargo.lock；第一次 CI 会生成并将其连同桌面产物保存，正式发布前应检入锁文件并改用 `--locked`。生成的 Android/Xcode 工程位于忽略目录 `src-tauri/gen`；发布所需签名材料不得提交。
+npm 与 Cargo 锁均已落盘。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 2026-10-04 通过官方 registry 元数据核实。Cargo.lock 取自第二轮成功的 macOS ARM job `111261288775`，113330 字节、442 个包，SHA-256 为 `8b548b794d163025db6a3f2fa5611a69acebf4367eccb2388b6e4d45e40eb654`；回收后已验证摘要、字节数、TOML、registry 来源和包校验和。生成的 Android/Xcode 工程位于忽略目录 `src-tauri/gen`；发布所需签名材料不得提交。
 
-两项 Rust crate 的官方版本元数据均声明 MSRV `1.90`，已写入 Cargo.toml；CI 更新并选用 stable 后构建，避免 runner 预装 Rust 太旧。首次生成的 Cargo.lock 应从成功桌面产物下载至 `native/src-tauri/Cargo.lock`、审核并入库；之后 `cargo test --locked`，Tauri 构建通过尾部 `-- --locked` 传递给 Cargo（移动构建也同样传递）。若不同 job 解析出不同锁，先统一一份再完整回归，不能只因顶层版本固定就宣称依赖树已锁定。
+两项 Rust crate 的官方版本元数据均声明 MSRV `1.90`，已写入 Cargo.toml；CI 更新并选用 stable 后构建，避免 runner 预装 Rust 太旧。CI 现在执行 `cargo test --locked`，Tauri 构建通过尾部 `-- --locked` 传递给 Cargo（移动构建也同样传递）。本地 `dev`、`desktop:build`、`android:build`、`ios:build` 脚本同样自动附加锁定参数，额外 Tauri 选项保持在 Cargo 分隔符之前。
 
 macOS ARM job 另以 `TREASURE_CARGO_LOCK_BEGIN/END` 输出同一个公开依赖锁的 base64 与 SHA-256，便于二进制产物下载桥接失败时经授权的日志接口取回；恢复时必须验证长度、摘要和 TOML 结构。此步骤只读取指定 Cargo.lock，不读取或输出环境变量及签名材料。
 
@@ -52,14 +52,17 @@ npm run desktop:build
 
 Android 构建机需 JDK、Android SDK/Build Tools/NDK，并设置 `ANDROID_HOME`、`NDK_HOME`。工作流在临时 runner 安装这些依赖，生成 ARM64 调试包。其他 ABI 可以显式加入 `--target`，尚未纳入当前矩阵。
 
-已逐项检查发布的 `tauri-cli 2.12.1` crate 模板：compile/target SDK 为 37，AGP 为 9.3.1，Gradle wrapper 为 9.6.1，Kotlin 插件为 2.2.10。依据 [AGP 9.3 官方兼容表](https://developer.android.com/build/releases/agp-9-3-0-release-notes)，CI 使用 JDK 17、SDK Platform 37、Build Tools 36.0.0、NDK 28.2.13676358；SDK Platform 与 Build Tools 的版本号不必相等。模板没有 `libs.versions.toml`，其 `gradle.properties` 已带 `android.builtInKotlin=false`、`android.newDsl=false` 与旧插件 ProGuard 兼容参数；初始化后保留这些设置。
+已逐项检查发布的 `tauri-cli 2.12.1` crate 模板：compile/target SDK 为整数 37，AGP 为 9.3.1，Gradle wrapper 为 9.6.1，Kotlin 插件为 2.2.10。但 [Google SDK 仓库](https://dl.google.com/android/repository/repository2-3.xml) 当前发布的包名是 `platforms;android-37.0`，没有模板期待的 `platforms;android-37`；第二轮 CI 已复现安装失败。`npm run android:prepare` 因此将生成工程的 compile/target SDK 明确固定为已发布的稳定整数 SDK 36，保持 minSDK 26 不变；脚本只接受已核验的模板形状，可重复执行，未知版本拒绝处理。
+
+依据 [AGP 9.3 官方兼容表](https://developer.android.com/build/releases/agp-9-3-0-release-notes)，使用 JDK 17、Build Tools 36.0.0、NDK 28.2.13676358。已实际读取 [AGP 9.3.1 POM](https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/9.3.1/gradle-9.3.1.pom)、上述 SDK XML 和 [Gradle 9.6.1 官方 SHA-256](https://services.gradle.org/distributions/gradle-9.6.1-bin.zip.sha256)，确认精确版本存在，并把 wrapper SHA-256 写入生成工程。发布的 `tauri 2.12.1` crate 内 `mobile/android/build.gradle.kts` 自身使用 compileSDK 36/minSDK 21，本项目未引入额外 Tauri Android 插件；无需改写缓存中的依赖。CI 另记录 `sdkmanager --list` 中所选包。模板没有 `libs.versions.toml`，其 `gradle.properties` 中的 `android.builtInKotlin=false`、`android.newDsl=false` 与旧插件 ProGuard 兼容参数保留。
 
 首次 CI 的 Android job 在安装工具阶段报告 `sdkmanager: command not found`。工作流现显式使用固定提交的 [setup-android](https://github.com/android-actions/setup-android) 配置 command-line tools 22.0（15859902）及 PATH，不依赖 runner 预装 SDK。
 
 ```sh
 rustup target add aarch64-linux-android
 npm run tauri -- android init --ci --skip-targets-install
-npm run tauri -- android build --debug --apk --target aarch64 --ci
+npm run android:prepare
+npm run android:build -- --debug --apk --target aarch64 --ci
 ```
 
 iOS 命令只存在于 macOS CLI。模拟器不需要发布证书；真机、TestFlight 和 App Store 需要开发者账户、有效 team、签名证书与 provisioning profile，并应配置稳定 bundle ID。没有任何这些材料时，只交付模拟器构建，不宣称真机发布完成。
@@ -68,7 +71,7 @@ iOS 命令只存在于 macOS CLI。模拟器不需要发布证书；真机、Tes
 # macOS + Xcode + XcodeGen
 rustup target add aarch64-apple-ios-sim
 npm run tauri -- ios init --ci --skip-targets-install
-npm run tauri -- ios build --debug --target aarch64-sim --no-sign --ci
+npm run ios:build -- --debug --target aarch64-sim --no-sign --ci
 ```
 
 自动更新器没有启用。发布前应建立签名、产物校验和更新密钥管理，不能让远程服务器页面直接替换原生二进制。
