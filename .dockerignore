@@ -13,5 +13,7 @@
 **/dist/**
 **/__pycache__/**
 **/.pytest_cache/**
+**/.npm-cache/
+**/.npm-cache/**
 **/.env
 **/*.db

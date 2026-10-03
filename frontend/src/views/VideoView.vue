@@ -18,27 +18,11 @@ const route = useRoute(),
   busy = ref(false);
 let seq = 0;
 const part = computed(() => video.value?.parts?.find((p) => p.id === partId.value));
-const formats = computed(() => {
-  const properties = (part.value?.variants || []).map(
-    (variant) => video.value?.media_properties?.[variant.id],
-  );
-  return [
-    ...(properties.some((value) => value?.dolby_vision)
-      ? ['杜比视界原档']
-      : properties.some((value) => value?.hdr)
-        ? ['HDR 原档']
-        : []),
-    ...(properties.some((value) => value?.dolby_atmos) ? ['杜比全景声原档'] : []),
-  ];
-});
-const unsupportedHdr = computed(() =>
-  part.value?.variants.some(
-    (variant) =>
-      variant.kind === 'archive' &&
-      video.value?.media_properties?.[variant.id]?.compatibility === 'hdr_conversion_unsupported',
-  ),
-);
 const canEdit = computed(() => ['admin', 'editor'].includes(session.user?.role || ''));
+const description = computed(() => {
+  const text = video.value?.description?.trim();
+  return text && text !== '-' ? text : '';
+});
 async function load() {
   const n = ++seq;
   video.value = null;
@@ -100,13 +84,6 @@ watch(() => route.params.id, load, { immediate: true });
           <UiIcon name="play" /><span>此分 P 还没有可播放的归档</span>
           <p>{{ statusText(video.capture_status) }}</p>
         </div>
-        <div v-if="formats.length" class="format-badges">
-          <span v-for="format in formats" :key="format">{{ format }}</span
-          ><small>归档原始规格 · 实际播放取决于所选版本与设备支持</small>
-        </div>
-        <p v-if="unsupportedHdr" class="inline-notice" role="status">
-          原档已保存，暂不支持生成 HDR 浏览器兼容副本。
-        </p>
         <div class="video-actionbar">
           <div
             class="source-statistics"
@@ -147,18 +124,19 @@ watch(() => route.params.id, load, { immediate: true });
           >
         </div>
         <p v-if="actionError" class="form-error" role="alert">{{ actionError }}</p>
-        <p
+        <details
           v-if="
             video.source_state &&
             !['available', 'normal', 'active', 'unknown'].includes(video.source_state)
           "
-          class="source-state-note"
+          class="source-state-note archive-information"
         >
-          {{ statusText(video.source_state) }}，本地归档保留
-        </p>
-        <details class="video-description" open>
+          <summary>归档信息</summary>
+          <p>{{ statusText(video.source_state) }}，本地归档保留</p>
+        </details>
+        <details v-if="description" class="video-description" open>
           <summary>视频简介</summary>
-          <p class="preserve-lines">{{ video.description || '暂无简介' }}</p>
+          <p class="preserve-lines">{{ description }}</p>
         </details>
         <div v-if="video.tags?.length" class="tags">
           <RouterLink v-for="tag in video.tags" :key="tag" :to="{ path: '/', query: { tag } }">{{

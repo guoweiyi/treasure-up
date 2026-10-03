@@ -302,3 +302,26 @@
   margin-left: auto;
   color: #9499a0;
 }
+.source-public-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: #9499a0;
+  line-height: 1.6;
+}
+.collection-card .source-public-status {
+  margin-top: 10px;
+}
+.creator-subscription {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #61666d;
+}
+.creator-subscription > strong {
+  color: #00a1d6;
+  font-weight: 500;
+}
+.creator-subscription .source-public-status {
+  margin-top: 5px;
+}

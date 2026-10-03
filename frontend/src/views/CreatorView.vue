@@ -6,6 +6,8 @@ import type { Creator, Video, Page } from '../types';
 import VideoCard from '../components/VideoCard.vue';
 import EmptyState from '../components/EmptyState.vue';
 import Pagination from '../components/Pagination.vue';
+import SourceStatus from '../components/SourceStatus.vue';
+import type { CreatorMonitor } from '../components/source-monitor';
 const route = useRoute(),
   creator = ref<Creator | null>(null),
   items = ref<Video[]>([]),
@@ -16,6 +18,8 @@ const route = useRoute(),
   error = ref(''),
   busy = ref(false);
 const tab = ref<'videos' | 'about'>('videos');
+const monitor = ref<CreatorMonitor | null>(null),
+  monitorError = ref('');
 let seq = 0,
   profileSeq = 0;
 async function search(p = 1) {
@@ -43,6 +47,15 @@ watch(
     const n = ++profileSeq;
     seq++;
     creator.value = null;
+    monitor.value = null;
+    monitorError.value = '';
+    void api<CreatorMonitor>(`/creators/${route.params.id}/monitor`)
+      .then((data) => {
+        if (n === profileSeq) monitor.value = data;
+      })
+      .catch((e) => {
+        if (n === profileSeq) monitorError.value = errorText(e);
+      });
     q.value = '';
     error.value = '';
     try {
@@ -77,8 +90,32 @@ watch(
         <div v-if="creator.tags?.length" class="tags">
           <span v-for="tag in creator.tags" :key="tag">{{ tag }}</span>
         </div>
+        <div class="creator-subscription">
+          <strong v-if="monitor?.subscribed">{{
+            monitor.enabled ? '已加入自动备份' : '已订阅 · 自动备份暂停'
+          }}</strong>
+          <span v-else-if="monitor">尚未订阅此 UP 的新投稿</span>
+          <span v-else-if="monitorError">订阅状态暂时无法读取</span>
+          <span v-else>正在读取订阅状态…</span>
+          <SourceStatus
+            v-if="monitor?.subscribed"
+            :monitor="monitor.monitor"
+            :last-scan-at="monitor.last_scan_at"
+            :enabled="monitor.enabled"
+            creator
+          />
+        </div>
       </div>
       <div class="profile-actions">
+        <RouterLink
+          v-if="session.user?.role === 'admin'"
+          :to="{
+            path: '/admin/sources',
+            query: { kind: 'creator', source_id: creator.uid, title: creator.name },
+          }"
+          class="outline-link"
+          >{{ monitor?.subscribed ? '管理自动备份' : '订阅新投稿' }}</RouterLink
+        >
         <span class="profile-saved"
           ><strong>{{ creator.saved_count ?? 0 }}</strong
           >已收藏作品</span

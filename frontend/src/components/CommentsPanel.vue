@@ -43,7 +43,7 @@ watch(
 <template>
   <section class="comments-panel">
     <div class="section-heading">
-      <h2>
+      <h2 title="评论和点赞数为归档时快照。展开回复只读取本地保存的内容。">
         {{ q ? '评论搜索结果' : '已保存的顶层评论' }} <span class="muted">{{ total }}</span>
       </h2>
       <form class="search-form compact" @submit.prevent="load()">
@@ -52,7 +52,6 @@ watch(
         </button>
       </form>
     </div>
-    <p class="muted small">评论和点赞数为归档时快照。展开回复只读取本地保存的内容。</p>
     <p v-if="error" class="form-error" role="alert">
       {{ error }} <button @click="load(page)">重试</button>
     </p>

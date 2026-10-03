@@ -50,6 +50,9 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Compile native application and package installer
         run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Record public Cargo dependency lock for audit and recovery
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: node scripts/emit-lock.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: treasure-up-${{ matrix.target }}
@@ -76,6 +79,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Provision Android command-line tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          cmdline-tools-version: '15859902'
+          log-accepted-android-sdk-licenses: 'false'
       - name: Install Android build tools on the disposable CI runner
         run: |
           sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;36.0.0' 'ndk;28.2.13676358'

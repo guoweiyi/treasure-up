@@ -10,6 +10,7 @@ export const router = createRouter({
     { path: '/creators', component: () => import('./views/CreatorsView.vue') },
     { path: '/creators/:id', component: () => import('./views/CreatorView.vue') },
     { path: '/collections', component: () => import('./views/CollectionsView.vue') },
+    { path: '/account/security', component: () => import('./views/SecurityView.vue') },
     {
       path: '/admin/:section?',
       component: () => import('./views/AdminView.vue'),

@@ -3,10 +3,12 @@ import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { session, display, write, errorText } from './api';
 import UiIcon from './components/UiIcon.vue';
+import { inNativeShell } from './client';
 const route = useRoute(),
   router = useRouter();
 const error = ref('');
 const busy = ref(false);
+const nativeShell = inNativeShell();
 const search = ref('');
 watch(
   () => route.query.q,
@@ -74,16 +76,49 @@ async function logout() {
     <div class="account-nav">
       <RouterLink v-if="isAdmin" to="/admin" :class="{ active: route.path.startsWith('/admin') }"
         >管理中心</RouterLink
-      ><span class="account-avatar" aria-hidden="true">{{
-        session.user.username.slice(0, 1).toUpperCase()
-      }}</span
+      ><RouterLink
+        to="/account/security"
+        class="account-avatar"
+        aria-label="账户安全"
+        title="账户安全"
+        >{{ session.user.username.slice(0, 1).toUpperCase() }}</RouterLink
       ><span class="username">{{ session.user.username }}</span
       ><button class="text-button" :disabled="busy" @click="logout">退出</button>
+      <a v-if="nativeShell" class="text-button" href="https://treasure-up.invalid/connect"
+        >切换服务器</a
+      >
     </div>
   </header>
   <div v-if="error" class="global-error" role="alert">{{ error }}</div>
   <RouterView />
+  <a
+    v-if="nativeShell && route.path === '/login'"
+    class="native-connection-link"
+    href="https://treasure-up.invalid/connect"
+    >切换服务器</a
+  >
   <footer v-if="route.path !== '/login' && !route.path.startsWith('/admin')" class="site-footer">
     {{ display.site_name }} <span>·</span> 私人视频收藏
   </footer>
 </template>
+<style scoped>
+.native-connection-link {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #777;
+  font-size: 13px;
+}
+@media (max-width: 700px) {
+  .account-nav .account-avatar {
+    display: flex;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+  }
+  .account-nav {
+    flex-wrap: wrap;
+  }
+}
+</style>

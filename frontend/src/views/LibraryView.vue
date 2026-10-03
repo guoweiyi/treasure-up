@@ -94,7 +94,7 @@ watch(() => route.fullPath, load, { immediate: true });
           search();
         "
       >
-        全部收藏夹
+        全部来源
       </button>
       <button
         v-for="item in collections"
@@ -105,7 +105,7 @@ watch(() => route.fullPath, load, { immediate: true });
           search();
         "
       >
-        {{ item.title }}
+        {{ item.kind === 'creator' ? 'UP · ' : '' }}{{ item.title }}
       </button>
     </div>
     <div class="library-tools">

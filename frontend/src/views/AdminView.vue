@@ -27,11 +27,12 @@ import { api, write, query, errorText, statusText, date, bytes, session } from '
 import type { Row, Page } from '../types';
 import AdminSettings from '../components/admin/AdminSettings.vue';
 import StorageReplicas from '../components/admin/StorageReplicas.vue';
+import SourceMonitor from '../components/admin/SourceMonitor.vue';
 const route = useRoute();
 const sections = [
   { id: 'overview', name: '总览', group: '运行' },
   { id: 'accounts', name: 'B 站账号', group: '采集' },
-  { id: 'sources', name: '收藏来源', group: '采集' },
+  { id: 'sources', name: '自动备份', group: '采集' },
   { id: 'jobs', name: '任务中心', group: '采集' },
   { id: 'videos', name: '视频标注', group: '内容' },
   { id: 'creators', name: 'UP 主整理', group: '内容' },
@@ -54,7 +55,7 @@ const heading = computed(() => sections.find((s) => s.id === section.value)?.nam
 const descriptions: Record<string, string> = {
   overview: '查看归档运行状态与最近任务。',
   accounts: '授权账号仅用于后台采集，凭据不会返回浏览器。',
-  sources: '管理需要归档的收藏夹及扫描周期。',
+  sources: '关注 UP 主的新投稿和收藏夹更新。',
   jobs: '查看实际进度、错误原因和可恢复的检查点。',
   videos: '本地标注与来源信息分开保存，后续同步保留你的整理。',
   creators: '整理 UP 主的别名、简介、笔记和标签。',
@@ -128,7 +129,7 @@ async function load(p = 1, quiet = false) {
     if (section.value === 'overview') {
       const d = await api<Row>('/admin/overview');
       if (n === sequence) overview.value = d;
-    } else if (['settings', 'replicas'].includes(section.value)) {
+    } else if (['settings', 'replicas', 'sources'].includes(section.value)) {
       settingsRevision.value++;
     } else {
       const d = await api<Page<Row>>(
@@ -203,7 +204,7 @@ async function openEditor(kind = section.value, row?: Row) {
   dialogKind.value = kind;
   dialogTitle.value = `${row ? '编辑' : '添加'}${({ accounts: 'B 站账号', sources: '收藏来源', jobs: '任务', storage: '存储位置', users: '本站用户', videos: '视频标注', creators: 'UP 主资料' } as Row)[kind] || ''}`;
   if (['accounts', 'sources', 'jobs', 'storage', 'users'].includes(kind)) await loadChoices();
-  if (kind === 'accounts') Object.assign(form, { name: '', cookie: '' });
+  if (kind === 'accounts') Object.assign(form, { name: row?.name || '', cookie: '' });
   if (kind === 'sources')
     Object.assign(form, {
       source_id: '',
@@ -293,8 +294,12 @@ async function submit() {
     const kind = dialogKind.value;
     let payload: Row;
     if (kind === 'accounts') {
-      if (!form.name?.trim() || !form.cookie?.trim()) throw new Error('请填写账号名称和 Cookie');
-      payload = { name: form.name.trim(), cookie: form.cookie.trim() };
+      if (!form.name?.trim() || (!editId.value && !form.cookie?.trim()))
+        throw new Error('请填写账号名称和 Cookie');
+      payload = {
+        name: form.name.trim(),
+        ...(form.cookie?.trim() ? { cookie: form.cookie.trim() } : {}),
+      };
     } else if (kind === 'sources') {
       if (!form.source_id?.trim() || !form.account_id || !form.title?.trim())
         throw new Error('请填写收藏夹 ID、显示名称并选择采集账号');
@@ -472,7 +477,7 @@ onBeforeUnmount(() => {
             <h1>{{ heading }}</h1>
             <p class="muted">{{ descriptions[section] }}</p>
           </div>
-          <div class="toolbar-actions">
+          <div v-if="section !== 'sources'" class="toolbar-actions">
             <el-button :loading="busy" @click="load(page)">刷新</el-button
             ><el-button
               v-if="
@@ -581,6 +586,7 @@ onBeforeUnmount(() => {
           >
           <AdminSettings v-else-if="section === 'settings'" :key="settingsRevision" />
           <StorageReplicas v-else-if="section === 'replicas'" :key="settingsRevision" />
+          <SourceMonitor v-else-if="section === 'sources'" />
           <template v-else>
             <div v-if="['videos', 'creators', 'jobs'].includes(section)" class="admin-filter">
               <el-input
@@ -702,13 +708,15 @@ onBeforeUnmount(() => {
                   ><template #default="{ row }">{{
                     date(row.last_verified_at)
                   }}</template></el-table-column
-                ><el-table-column label="操作" width="110"
+                ><el-table-column label="操作" width="200"
                   ><template #default="{ row }"
                     ><el-button
                       size="small"
                       :loading="actionBusy === `/admin/accounts/${row.id}/verify`"
                       @click="action(`/admin/accounts/${row.id}/verify`, '验证账号')"
                       >验证账号</el-button
+                    ><el-button size="small" @click="openEditor('accounts', row)"
+                      >更新凭据</el-button
                     ></template
                   ></el-table-column
                 ></template

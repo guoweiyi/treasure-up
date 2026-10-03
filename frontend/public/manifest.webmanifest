@@ -1,0 +1,13 @@
+{
+  "id": "/",
+  "name": "Treasure Up",
+  "short_name": "Treasure Up",
+  "description": "你的私人视频库",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [{ "src": "/app-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

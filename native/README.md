@@ -17,6 +17,8 @@ npm 锁已落盘。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 
 
 两项 Rust crate 的官方版本元数据均声明 MSRV `1.90`，已写入 Cargo.toml；CI 更新并选用 stable 后构建，避免 runner 预装 Rust 太旧。首次生成的 Cargo.lock 应从成功桌面产物下载至 `native/src-tauri/Cargo.lock`、审核并入库；之后 `cargo test --locked`，Tauri 构建通过尾部 `-- --locked` 传递给 Cargo（移动构建也同样传递）。若不同 job 解析出不同锁，先统一一份再完整回归，不能只因顶层版本固定就宣称依赖树已锁定。
 
+macOS ARM job 另以 `TREASURE_CARGO_LOCK_BEGIN/END` 输出同一个公开依赖锁的 base64 与 SHA-256，便于二进制产物下载桥接失败时经授权的日志接口取回；恢复时必须验证长度、摘要和 TOML 结构。此步骤只读取指定 Cargo.lock，不读取或输出环境变量及签名材料。
+
 ## 连接与权限
 
 应用始终从随包附带的本地连接页开始，只持久化规范化的服务器 origin。地址只接受 HTTPS；HTTP 例外仅限 localhost/IPv4 或 IPv6 回环，用于本机开发。不支持反向代理子路径，不接受 URL 凭据、query、fragment、本地协议或保留的 Tauri/IPC 地址。移动设备的 localhost 指移动设备自己；移动发布版本的 ATS/网络安全策略仍可能拒绝 HTTP，应连接有效 HTTPS 站点，不要通过允许任意明文流量绕过。
@@ -51,6 +53,8 @@ npm run desktop:build
 Android 构建机需 JDK、Android SDK/Build Tools/NDK，并设置 `ANDROID_HOME`、`NDK_HOME`。工作流在临时 runner 安装这些依赖，生成 ARM64 调试包。其他 ABI 可以显式加入 `--target`，尚未纳入当前矩阵。
 
 已逐项检查发布的 `tauri-cli 2.12.1` crate 模板：compile/target SDK 为 37，AGP 为 9.3.1，Gradle wrapper 为 9.6.1，Kotlin 插件为 2.2.10。依据 [AGP 9.3 官方兼容表](https://developer.android.com/build/releases/agp-9-3-0-release-notes)，CI 使用 JDK 17、SDK Platform 37、Build Tools 36.0.0、NDK 28.2.13676358；SDK Platform 与 Build Tools 的版本号不必相等。模板没有 `libs.versions.toml`，其 `gradle.properties` 已带 `android.builtInKotlin=false`、`android.newDsl=false` 与旧插件 ProGuard 兼容参数；初始化后保留这些设置。
+
+首次 CI 的 Android job 在安装工具阶段报告 `sdkmanager: command not found`。工作流现显式使用固定提交的 [setup-android](https://github.com/android-actions/setup-android) 配置 command-line tools 22.0（15859902）及 PATH，不依赖 runner 预装 SDK。
 
 ```sh
 rustup target add aarch64-linux-android

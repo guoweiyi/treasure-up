@@ -4,7 +4,7 @@
 
 技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；Cookie 只在服务端加密保存。
 
-**当前为 0.2 技术预览。** 增加无损 HLS 分片、杜比原档验证、存储节点选路与副本管理、定时统计更新，并重做视频和 UP 页面。真实 S3 / OSS 桶和新一轮 B 站在线采集尚待验收。详细边界见 [实施状态](docs/implementation-status.md)，完整设计见 [技术计划](docs/platform-plan.md)。
+**当前为 0.3 技术预览。** 播放与弹幕设置收进播放器，新增 UP / 收藏夹自动备份、新内容检测、通行密钥、轻量部署模式及独立客户端工程。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
 
 ## 本机启动
 
@@ -13,21 +13,24 @@
 ```bash
 git clone https://github.com/guoweiyi/treasure-up.git
 cd treasure-up
-python deploy/bootstrap.py
-docker compose up -d --build
+python deploy/start.py
 ```
 
-访问 <http://127.0.0.1:8788>。初始账号为 `admin`，随机密码位于本机 `.env` 的 `TREASURE_ADMIN_PASSWORD`。初始化不覆盖已有管理员密码；重复运行 bootstrap 会拒绝覆盖 `.env`。
+访问 <http://localhost:8788>。初始账号为 `admin`，首次初始化会在交互式终端显示随机密码，并保存在本机 `.env` 的 `TREASURE_ADMIN_PASSWORD`。重定向日志与 CI 不打印密码；再次执行不会覆盖已有配置或密码。使用 `localhost` 才与本地通行密钥的站点地址一致。
 
-Compose 默认仅监听回环地址，数据库、Redis 不发布主机端口。所有新收藏来源默认关闭，不会自动采集。登录后台后可添加授权账号、验证账号、配置收藏夹 ID 与采集策略，再手动触发扫描；验证与扫描结果都在任务中心查看。
+资源有限时运行 `python deploy/start.py --light`，合并采集和媒体 Worker；数据库、队列和独立备份 Worker 保留。脚本启动成功后停止上一模式的处理 Worker，不删除数据卷。Compose 默认仅监听回环地址，数据库、Redis 不发布主机端口。
+
+登录后台添加并验证授权账号，在“自动备份”粘贴收藏夹链接 / ID 或 UP 主页 / UID，选择首次全量、最近 N 个或只追踪新增。页面提供明确的自动检查开关；新建表单默认开启，保存后按间隔调度。API 未传 enabled 时仍默认关闭。首次元数据基线尚未完成时，不把发现的历史视频当成新发布。
 
 ## 已提供的功能
 
 - 视频库、收藏夹、UP 主目录和独立主页，支持标题、标签、昵称及历史昵称搜索。
-- 多 P 播放、进度保存、字幕、弹幕字体 / 字号 / 字重 / 描边 / 颜色 / 区域 / 速度配置。
+- 多 P 播放、进度保存、播放器内的画质 / 字幕 / 节点 / 音量平衡；弹幕字体 / 字号 / 字重 / 描边 / 区域 / 速度 / 密度 / 时间偏移，偏好本地保存。
 - 原档优先播放、长视频无损 fMP4 HLS 分片、受限缓冲、可选播放音量平衡；杜比视界 / 全景声按媒体证据标注。
 - 评论与楼中楼、评论作者昵称和头像快照、评论图片；人工标注与来源数据分离。
-- 后台账号、收藏来源、任务暂停 / 继续 / 重试、存储配置 / 探测 / 迁移、备份记录、系统配置、用户权限与审计。
+- 后台账号与凭据轮换、UP / 收藏来源、检查历史和新增统计、任务暂停 / 继续 / 重试、存储配置 / 探测 / 迁移、备份记录、系统配置、用户权限与审计。
+- 通行密钥登录、个人密钥管理、撤销对应登录会话；保留密码登录和本机重置入口。
+- 可安装 Web 应用及 [轻量客户端工程](native/README.md)：Windows / macOS / Android / iOS 共用服务端站点，不在终端执行采集。原生签名、设备适配与商店分发有独立验收要求。
 - 可恢复任务检查点、账号限速、过期任务接管与旧 Worker 提交隔离。
 - 持久化账号请求 / 视频间隔与风控冷却；按小时更新播放、点赞、投币、收藏、分享、评论及弹幕计数，可选重新采集弹幕。
 - 按视频同步完整资产到存储节点、浏览器限额测速选路、播放中有限故障切换；副本停用 / 恢复 / 显式物理删除。
@@ -51,7 +54,9 @@ python -m venv .venv
 python -m pip install -r backend/requirements.lock
 python -m pytest
 npm --prefix frontend ci
+npm --prefix frontend run test
 npm --prefix frontend run build
+python -m pytest deploy/tests -q
 ```
 
 真实 PostgreSQL / FFmpeg 备份恢复测试需显式启用，在已启动的 Docker 环境运行：
