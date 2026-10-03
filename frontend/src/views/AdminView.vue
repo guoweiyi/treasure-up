@@ -23,18 +23,10 @@ import {
 } from 'element-plus';
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
 import 'element-plus/dist/index.css';
-import {
-  api,
-  write,
-  query,
-  errorText,
-  statusText,
-  date,
-  bytes,
-  session,
-  loadDisplaySettings,
-} from '../api';
+import { api, write, query, errorText, statusText, date, bytes, session } from '../api';
 import type { Row, Page } from '../types';
+import AdminSettings from '../components/admin/AdminSettings.vue';
+import StorageReplicas from '../components/admin/StorageReplicas.vue';
 const route = useRoute();
 const sections = [
   { id: 'overview', name: '总览', group: '运行' },
@@ -44,6 +36,7 @@ const sections = [
   { id: 'videos', name: '视频标注', group: '内容' },
   { id: 'creators', name: 'UP 主整理', group: '内容' },
   { id: 'storage', name: '存储位置', group: '维护' },
+  { id: 'replicas', name: '副本与分发', group: '维护' },
   { id: 'backups', name: '备份记录', group: '维护' },
   { id: 'settings', name: '系统配置', group: '维护' },
   { id: 'users', name: '访问权限', group: '维护' },
@@ -66,6 +59,7 @@ const descriptions: Record<string, string> = {
   videos: '本地标注与来源信息分开保存，后续同步保留你的整理。',
   creators: '整理 UP 主的别名、简介、笔记和标签。',
   storage: '配置本地、S3 或原生 OSS。切换默认位置不自动移动已有文件。',
+  replicas: '查看视频在各节点的副本，准备原码流分片，执行同步、停用与恢复。',
   backups: '记录真实备份任务。已完成的备份不等于已经通过恢复演练。',
   settings: '展示设置、采集默认策略与独立备份目录。',
   users: '本站账号与 B 站采集账号相互独立。',
@@ -99,6 +93,14 @@ const jobNames: Record<string, string> = {
   migrate_storage: '迁移存储',
   backup: '创建备份',
   probe_storage: '探测存储能力',
+  refresh_stats: '更新视频统计',
+  sync_storage: '同步存储节点',
+  measure_storage: '测量存储性能',
+  sync_video: '同步视频副本',
+  prepare_media: '准备播放文件',
+  retire_storage_location: '停用媒体副本',
+  restore_storage_location: '恢复媒体副本',
+  purge_storage_location: '永久删除副本',
 };
 const dialog = ref(false),
   dialogTitle = ref(''),
@@ -110,34 +112,7 @@ const dialog = ref(false),
   accounts = ref<Row[]>([]),
   storages = ref<Row[]>([]),
   targets = ref<Row[]>([]);
-const settingsForm = reactive<Row>({
-  display: { site_name: 'Treasure Up', default_danmaku: true },
-  ingest: {
-    quality: 'best',
-    create_compatible_copy: true,
-    prefer_h264: false,
-    request_budget: 100,
-    download_media: true,
-    fetch_comments: true,
-    fetch_danmaku: true,
-    fetch_subtitles: true,
-    include_auto_subtitles: true,
-    max_download_bytes: 30000000000,
-    max_pages: 100,
-  },
-  backup: { destination: '', key_id: '', interval_hours: 12, retention_days: 30, enabled: false },
-});
-const qualityOptions = [
-  { value: 'best', label: '最高可见画质' },
-  { value: '4320p', label: '最高 8K（4320P）' },
-  { value: '2160p', label: '最高 4K（2160P）' },
-  { value: '1440p', label: '最高 1440P' },
-  { value: '1080p', label: '最高 1080P' },
-  { value: '720p', label: '最高 720P' },
-  { value: '480p', label: '最高 480P' },
-  { value: '360p', label: '最高 360P' },
-];
-const settingsOriginal = ref<Row>({});
+const settingsRevision = ref(0);
 let sequence = 0,
   timer: ReturnType<typeof setInterval> | undefined;
 const endpoint = computed(() =>
@@ -153,13 +128,8 @@ async function load(p = 1, quiet = false) {
     if (section.value === 'overview') {
       const d = await api<Row>('/admin/overview');
       if (n === sequence) overview.value = d;
-    } else if (section.value === 'settings') {
-      const d = await api<Row>('/admin/settings');
-      if (n !== sequence) return;
-      settingsOriginal.value = d;
-      for (const k of ['display', 'ingest', 'backup']) Object.assign(settingsForm[k], d[k] || {});
-      if (settingsForm.ingest.quality === '8k') settingsForm.ingest.quality = '4320p';
-      if (settingsForm.ingest.quality === '4k') settingsForm.ingest.quality = '2160p';
+    } else if (['settings', 'replicas'].includes(section.value)) {
+      settingsRevision.value++;
     } else {
       const d = await api<Page<Row>>(
         `${endpoint.value}?${query({ page: p, page_size: 20, q: q.value, status: status.value })}`,
@@ -239,8 +209,8 @@ async function openEditor(kind = section.value, row?: Row) {
       source_id: '',
       title: '',
       account_id: accounts.value[0]?.id || '',
-      enabled: true,
-      interval_minutes: 360,
+      enabled: false,
+      interval_minutes: 1440,
       policy_text: '{}',
       ...row,
       policy_text_override: undefined,
@@ -442,26 +412,6 @@ async function migrate(row: Row) {
   Object.assign(form, { target_profile_id: '', asset_ids: '' });
   dialog.value = true;
 }
-async function saveSettings() {
-  submitting.value = true;
-  formError.value = '';
-  try {
-    const payload = {
-      ...settingsOriginal.value,
-      display: { ...settingsForm.display },
-      ingest: { ...settingsForm.ingest },
-      backup: { ...settingsForm.backup },
-    };
-    await write('/admin/settings', payload, 'PATCH');
-    ElMessage.success('配置已保存');
-    await loadDisplaySettings();
-    await load();
-  } catch (e) {
-    formError.value = errorText(e);
-  } finally {
-    submitting.value = false;
-  }
-}
 const can = (job: Row, action: string) =>
   (
     ({
@@ -629,106 +579,8 @@ onBeforeUnmount(() => {
               </section>
             </div></template
           >
-          <template v-else-if="section === 'settings'"
-            ><el-form class="settings-form" label-position="top" v-loading="busy"
-              ><section class="admin-panel">
-                <h2>展示</h2>
-                <el-form-item label="网站名称"
-                  ><el-input
-                    v-model="settingsForm.display.site_name"
-                    maxlength="60" /></el-form-item
-                ><el-form-item label="默认显示弹幕"
-                  ><el-switch v-model="settingsForm.display.default_danmaku" />
-                  <p class="field-help">
-                    首次使用播放器时生效。浏览器已有的个人弹幕偏好优先。
-                  </p></el-form-item
-                >
-              </section>
-              <section class="admin-panel">
-                <h2>采集默认策略</h2>
-                <div class="form-two-columns">
-                  <el-form-item label="目标画质"
-                    ><el-select v-model="settingsForm.ingest.quality"
-                      ><el-option
-                        v-for="option in qualityOptions"
-                        :key="option.value"
-                        :value="option.value"
-                        :label="option.label" /></el-select></el-form-item
-                  ><el-form-item label="单轮请求预算"
-                    ><el-input-number
-                      v-model="settingsForm.ingest.request_budget"
-                      :min="1"
-                      :max="10000" /></el-form-item
-                  ><el-form-item label="单视频下载上限（字节）"
-                    ><el-input-number
-                      v-model="settingsForm.ingest.max_download_bytes"
-                      :min="1000000"
-                      :max="500000000000"
-                      :step="1000000000"
-                      :controls="false"
-                  /></el-form-item>
-                </div>
-                <div class="settings-switches">
-                  <el-checkbox v-model="settingsForm.ingest.download_media">下载媒体</el-checkbox
-                  ><el-checkbox v-model="settingsForm.ingest.create_compatible_copy"
-                    >生成浏览器兼容副本</el-checkbox
-                  ><el-checkbox v-model="settingsForm.ingest.prefer_h264"
-                    >优先下载 H.264 编码</el-checkbox
-                  ><el-checkbox v-model="settingsForm.ingest.fetch_comments">采集评论</el-checkbox
-                  ><el-checkbox v-model="settingsForm.ingest.fetch_danmaku">采集弹幕</el-checkbox
-                  ><el-checkbox v-model="settingsForm.ingest.fetch_subtitles">采集字幕</el-checkbox
-                  ><el-checkbox v-model="settingsForm.ingest.include_auto_subtitles"
-                    >包括自动字幕</el-checkbox
-                  >
-                </div>
-                <p class="field-help">
-                  画质以账号实际可见且成功归档的版本为准。兼容副本保留原档，并按需生成适合浏览器的播放文件，会额外占用空间和处理时间；并非所有
-                  HDR 格式都能转换。优先 H.264 可能限制可选画质。策略应用于新任务。
-                </p>
-              </section>
-              <section class="admin-panel">
-                <h2>备份</h2>
-                <el-form-item label="启用定期备份"
-                  ><el-switch v-model="settingsForm.backup.enabled" /></el-form-item
-                ><el-form-item label="独立备份目录"
-                  ><el-input
-                    v-model="settingsForm.backup.destination"
-                    placeholder="服务器上的独立备份路径" /></el-form-item
-                ><el-form-item label="密钥标识 key_id"
-                  ><el-input
-                    v-model="settingsForm.backup.key_id"
-                    placeholder="与服务端配置的备份密钥标识一致"
-                /></el-form-item>
-                <div class="form-two-columns">
-                  <el-form-item label="备份周期（小时）"
-                    ><el-input-number
-                      v-model="settingsForm.backup.interval_hours"
-                      :min="1"
-                      :max="720" /></el-form-item
-                  ><el-form-item label="保留天数（策略记录）"
-                    ><el-input-number
-                      v-model="settingsForm.backup.retention_days"
-                      :min="1"
-                      :max="3650"
-                  /></el-form-item>
-                </div>
-                <el-alert
-                  title="备份目录必须独立于主媒体目录。加密密钥通过 TREASURE_BACKUP_KEY 或 TREASURE_BACKUP_KEY_FILE 配置并单独保管。备份目标为独立挂载目录，可使用 NAS；此处不配置云备份目标。当前版本不自动删除备份。"
-                  type="info"
-                  :closable="false"
-                />
-              </section>
-              <el-alert
-                v-if="formError"
-                :title="formError"
-                type="error"
-                :closable="false"
-                class="mb"
-              /><el-button type="primary" :loading="submitting" @click="saveSettings"
-                >保存配置</el-button
-              ></el-form
-            ></template
-          >
+          <AdminSettings v-else-if="section === 'settings'" :key="settingsRevision" />
+          <StorageReplicas v-else-if="section === 'replicas'" :key="settingsRevision" />
           <template v-else>
             <div v-if="['videos', 'creators', 'jobs'].includes(section)" class="admin-filter">
               <el-input
@@ -834,6 +686,18 @@ onBeforeUnmount(() => {
                   ><template #default="{ row }">{{
                     statusText(row.status)
                   }}</template></el-table-column
+                ><el-table-column label="请求与冷却" min-width="220"
+                  ><template #default="{ row }"
+                    ><span v-if="row.cooldown_until">冷却至 {{ date(row.cooldown_until) }}</span
+                    ><span v-else>无冷却记录</span
+                    ><small class="table-subtitle" v-if="row.next_request_at"
+                      >下次请求 {{ date(row.next_request_at) }}</small
+                    ><small class="table-subtitle" v-if="row.next_video_at"
+                      >下个视频 {{ date(row.next_video_at) }}</small
+                    ><small class="table-subtitle" v-if="row.risk_failures"
+                      >风险响应 {{ row.risk_failures }} 次</small
+                    ></template
+                  ></el-table-column
                 ><el-table-column label="最近验证" min-width="180"
                   ><template #default="{ row }">{{
                     date(row.last_verified_at)

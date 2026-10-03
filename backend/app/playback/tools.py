@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+from app.config import settings
+from app.storage.base import StorageError
+
+
+class PlaybackError(StorageError):
+    pass
+
+
+def run_tool(arguments, *, check_active=None, timeout=7200, capture=False):
+    """Poll cancellation while tools run; never expose raw tool diagnostics publicly."""
+    guard = check_active or (lambda: None)
+    guard()
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        try:
+            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                stdout=output if capture else subprocess.DEVNULL, stderr=errors)
+        except OSError:
+            raise PlaybackError("Media processing tool is unavailable") from None
+        started = time.monotonic()
+        try:
+            while process.poll() is None:
+                guard()
+                if time.monotonic() - started > timeout:
+                    raise PlaybackError("Media processing time limit exceeded")
+                time.sleep(0.2)
+            guard()
+            if process.returncode:
+                raise PlaybackError("Media processing failed; original asset remains unchanged")
+            output.seek(0)
+            errors.seek(0)
+            return output.read(8 * 1024**2), errors.read(8 * 1024**2)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def probe_media(path: Path, *, check_active=None):
+    raw, _ = run_tool([str(settings.ffprobe_path), "-v", "error", "-protocol_whitelist", "file,crypto,data",
+        "-show_streams", "-show_format", "-of", "json", str(path)],
+        check_active=check_active, timeout=120, capture=True)
+    try:
+        result = json.loads(raw)
+        if not isinstance(result.get("streams"), list):
+            raise ValueError()
+        return result
+    except (ValueError, TypeError, AttributeError):
+        raise PlaybackError("Invalid media inspection result") from None

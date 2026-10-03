@@ -204,6 +204,35 @@ def test_successful_budget_continuations_preserve_failure_retry_budget(job_sessi
         assert db.get(Job, job_id).attempts == 1
 
 
+def test_account_cooldown_deferrals_honor_deadline_without_using_failure_budget(job_sessions, monkeypatch):
+    from app.ingest.errors import IngestDeferred, IngestError
+    job_id = new_job(job_sessions, max_attempts=2)
+    def real_rejection(db, job):
+        raise IngestError("源站限流", code="rate_limited", blocked=False, retry_after_seconds=1800)
+    monkeypatch.setattr("app.ingest.runner.run_job", real_rejection)
+    assert jobs.run_job_id(job_id)["status"] == "queued"
+    with job_sessions() as db:
+        job = db.get(Job, job_id)
+        assert job.attempts == 1
+        job.available_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+    def waiting_for_account(db, job):
+        raise IngestDeferred("账号冷却中", retry_after_seconds=3600)
+    monkeypatch.setattr("app.ingest.runner.run_job", waiting_for_account)
+    for _ in range(4):
+        assert jobs.run_job_id(job_id)["status"] == "queued"
+        with job_sessions() as db:
+            job = db.get(Job, job_id)
+            assert job.attempts == 1  # Preserve the actual earlier rejection.
+            deadline = job.available_at.replace(tzinfo=utcnow().tzinfo)
+            assert (deadline - utcnow()).total_seconds() >= 3598
+            assert jobs.claim(db, job_id, "premature") is None
+            job.available_at = utcnow() - timedelta(seconds=1)
+            db.commit()
+    monkeypatch.setattr("app.ingest.runner.run_job", lambda db, job: {"stats_updated": True})
+    assert jobs.run_job_id(job_id)["status"] == "succeeded"
+
+
 @pytest.mark.parametrize("requested", ["paused", "cancelled"])
 def test_pause_and_cancel_cannot_be_overwritten_by_worker_success(job_sessions, monkeypatch, requested):
     job_id = new_job(job_sessions)

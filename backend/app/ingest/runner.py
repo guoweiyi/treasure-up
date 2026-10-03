@@ -7,24 +7,27 @@ import json
 import math
 import re
 import tempfile
+import threading
 from copy import deepcopy
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import (AssetRef, CaptureRun, Collection, CollectionItem, Comment,
     CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job, MediaVariant, OutboxEvent,
     PlatformUser, SourceAccount, SourceSubscription, SubtitleTrack, UserSnapshot,
-    Video, VideoCreator, VideoPart)
+    Video, VideoCreator, VideoPart, VideoStatSnapshot)
 from app.security import decrypt_secret
 from app.storage.service import ingest_file
 from .client import BiliClient, clean_raw, safe_source_url
-from .errors import IngestError, PartialCaptureError
+from .errors import IngestDeferred, IngestError, PartialCaptureError
 from .media import archive_media, cleanup_media_scratch, ensure_playback_variant
 from .protobuf import decode_danmaku
+from .throttle import AccountPacer
 
 
 def _now():
@@ -57,7 +60,7 @@ def _lock(db, name):
     key = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big", signed=True)
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
         if not connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}):
-            raise IngestError("相同账号或视频已有采集任务，稍后重试", code="resource_busy")
+            raise IngestDeferred("相同账号或视频已有采集任务，稍后重试", code="resource_busy", retry_after_seconds=30)
         try:
             yield
         finally:
@@ -73,6 +76,7 @@ def _ref(db, asset_id, entity, entity_id, purpose):
 class Context:
     def __init__(self, db, job, client):
         self.db, self.job, self.client = db, job, client
+        self.job_id, self.owner_thread = job.id, threading.get_ident()
         self.policy = job.policy or {}
         self.policy = dict(self.policy)
         for public, internal in {"download_media": "media", "fetch_comments": "comments", "fetch_danmaku": "danmaku", "fetch_subtitles": "subtitles", "include_auto_subtitles": "auto_subtitles"}.items():
@@ -93,6 +97,20 @@ class Context:
         self.run.finished_at = None
 
     def guard(self):
+        if threading.get_ident() != self.owner_thread:
+            # yt-dlp can call progress/URL hooks from fragment threads, even
+            # when separate video/audio downloads each use one fragment worker.
+            # Never share the runner's SQLAlchemy Session across those threads.
+            with Session(self.db.get_bind()) as reader:
+                current = reader.execute(select(Job.status, Job.lease_owner, Job.lease_expires_at).where(Job.id == self.job_id)).first()
+            if current is None:
+                raise IngestError("采集任务已不存在", code="job_stopped", retryable=False)
+            status, owner, expiry = current
+            if expiry and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if status != "running" or (self.owner and owner != self.owner) or (expiry and expiry <= _now()):
+                raise IngestError("任务已暂停、取消或租约失效", code="job_stopped", retryable=False)
+            return
         self.db.flush()
         self.db.refresh(self.job, attribute_names=["status", "lease_owner", "lease_expires_at"])
         expiry = self.job.lease_expires_at
@@ -303,6 +321,8 @@ def _metadata(ctx, video):
     if (video.metadata_json or {}).get("media_properties"):
         source_metadata["media_properties"] = deepcopy(video.metadata_json["media_properties"])
     video.metadata_json, video.source_state = source_metadata, "available"
+    if isinstance(data.get("stat"), dict):
+        _save_stats(ctx, video, data["stat"])
     ctx.image(data.get("pic"), "video", video.id, "cover")
     for role, member in [("owner", data.get("owner"))] + [("staff", x) for x in data.get("staff", [])]:
         user, snapshot, creator = _user(ctx, member, creator=True)
@@ -326,6 +346,49 @@ def _metadata(ctx, video):
     ctx.cp["part_ids"] = current
     ctx.cp["metadata_done"] = True
     ctx.save()
+
+
+def _save_stats(ctx, video, raw):
+    existing = ctx.db.scalar(select(VideoStatSnapshot).where(VideoStatSnapshot.video_id == video.id,
+                                                             VideoStatSnapshot.run_id == ctx.run.id))
+    if existing:
+        return existing
+    counts = {key: value if type(value := raw.get(key)) is int and value >= 0 else None
+              for key in ("view", "like", "coin", "favorite", "share", "reply", "danmaku")}
+    snapshot = VideoStatSnapshot(video_id=video.id, run_id=ctx.run.id, observed_at=_now(), counts=counts)
+    ctx.db.add(snapshot)
+    ctx.db.flush()
+    return snapshot
+
+
+def _refresh_stats(ctx, video):
+    if not ctx.cp.get("stats_done"):
+        ctx.guard()
+        data = ctx.client.view(video.bvid)
+        if data.get("bvid") != video.bvid or not isinstance(data.get("stat"), dict):
+            raise IngestError("稿件统计数据无效", code="invalid_stats")
+        if video.aid and str(data.get("aid")) != video.aid:
+            raise IngestError("统计返回稿件与保存记录不匹配", code="invalid_stats")
+        if ctx.policy.get("refresh_danmaku", False):
+            if not isinstance(data.get("pages"), list):
+                raise IngestError("统计刷新缺少当前分P信息", code="invalid_metadata")
+            cids = {_id(page.get("cid")) for page in data["pages"]}
+            ctx.cp["stats_part_ids"] = list(ctx.db.scalars(select(VideoPart.id).where(
+                VideoPart.video_id == video.id, VideoPart.cid.in_(cids))).all())
+            # This identifies the source, without refreshing titles or people.
+            if not video.aid:
+                video.aid = _id(data.get("aid"))
+        snapshot = _save_stats(ctx, video, data["stat"])
+        ctx.cp["stats_snapshot_id"], ctx.cp["stats_done"] = snapshot.id, True
+        ctx.run.scope = {**(ctx.run.scope or {}), "stats": True,
+                         "danmaku": bool(ctx.policy.get("refresh_danmaku", False)), "media": False}
+        ctx.save()
+    if ctx.policy.get("refresh_danmaku", False):
+        for part_id in ctx.cp.get("stats_part_ids", []):
+            part = ctx.db.get(VideoPart, part_id)
+            if not _danmaku(ctx, video, part):
+                return False
+    return True
 
 
 def _save_comment(ctx, video, raw, expected_root=None):
@@ -650,11 +713,14 @@ def run_job(db, job):
         secret = decrypt_secret(account.secret_encrypted)
     except Exception:
         raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
-    client = BiliClient(secret, interval=settings.source_request_interval)
-    ctx = None
+    client = BiliClient(secret, interval=0)
+    ctx, pacer = None, None
     try:
         with _lock(db, "account:" + account.id):
             ctx = Context(db, job, client)
+            pacer = AccountPacer(db, account, ctx.policy, ctx.guard)
+            pacer.check_cooldown()
+            client.before_request, client.before_video = pacer.before_request, pacer.before_video
             ctx.guard()
             ctx.save()
             # Public endpoints may keep responding after expiry. Verify first so
@@ -666,7 +732,7 @@ def run_job(db, job):
                 done = True
             elif job.kind == "scan_collection":
                 done, result = _scan(ctx), {"collection_id": job.target_id}
-            elif job.kind in ("archive_video", "refresh_comments"):
+            elif job.kind in ("archive_video", "refresh_comments", "refresh_stats"):
                 video = db.get(Video, job.target_id)
                 if video is None and job.kind == "archive_video" and re.fullmatch(r"BV[A-Za-z0-9]{10}", job.target_id):
                     video = db.scalar(select(Video).where(Video.bvid == job.target_id))
@@ -681,6 +747,8 @@ def run_job(db, job):
                 with _lock(db, "video:" + video.id):
                     if job.kind == "archive_video":
                         done = _archive(ctx, video)
+                    elif job.kind == "refresh_stats":
+                        done = _refresh_stats(ctx, video)
                     else:
                         if not video.aid:
                             _metadata(ctx, video)
@@ -695,13 +763,17 @@ def run_job(db, job):
             ctx.run.status = "visible_traversal_complete" if done else "partial"
             ctx.run.end_reason = "normal_end" if done else "page_budget"
             ctx.run.finished_at = _now() if done else None
+            if done:
+                pacer.succeeded()
             ctx.save()
             return {**result, "run_id": ctx.run.id, "continuation": not done}
     except IngestError as error:
+        if pacer:
+            pacer.failed(error)
         if ctx:
             ctx.run.status = "blocked" if error.blocked else "partial"
             ctx.run.end_reason = error.code
-            if ctx.run.video_id:
+            if ctx.run.video_id and job.kind == "archive_video":
                 video = db.get(Video, ctx.run.video_id)
                 if video:
                     video.capture_status = "partial"

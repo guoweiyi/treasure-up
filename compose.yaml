@@ -1,7 +1,7 @@
 name: treasure-up
 
 x-backend: &backend
-  image: treasure-up-backend:0.1.0
+  image: treasure-up-backend:0.2.0
   restart: unless-stopped
   environment: &environment
     TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}@postgres:5432/treasure
@@ -107,7 +107,7 @@ services:
       init:
         condition: service_completed_successfully
   web:
-    image: treasure-up-web:0.1.0
+    image: treasure-up-web:0.2.0
     build:
       context: .
       dockerfile: deploy/Dockerfile.web

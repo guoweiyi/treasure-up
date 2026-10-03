@@ -126,7 +126,9 @@ def test_private_assets_range_playback_and_danmaku_modes(context):
     assert client.head(url).headers["content-length"] == "100"
     assert client.get(url, headers={"Range": "bytes=999-"}).status_code == 416
     playback = client.post("/api/v1/playback-sessions", json={"part_id": part.id})
-    assert playback.json()["url"] == url
+    assert playback.status_code == 200, playback.text
+    assert playback.json()["protocol"] == "file"
+    assert client.get(playback.json()["url"], headers={"Range": "bytes=10-19"}).content == bytes(range(10, 20))
     assert [v["mode"] for v in client.get(playback.json()["danmaku_url"]).json()] == [0, 1, 2]
     result = client.put(f"/api/v1/progress/{part.id}", json={"position": 22.5, "duration": 100})
     assert result.status_code == 200

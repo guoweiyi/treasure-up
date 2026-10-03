@@ -24,7 +24,7 @@ from app.models import (Asset, AssetLocation, AuditLog, BackupSet, Collection, C
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
                           require_admin, require_editor, verify_password)
 
-app = FastAPI(title="Treasure Up", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Treasure Up", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
 P = "/api/v1"
 _DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
@@ -42,7 +42,7 @@ async def response_policy(request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    if request.url.path.startswith(P):
+    if request.url.path.startswith(P) and "Cache-Control" not in response.headers:
         response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -225,27 +225,6 @@ def asset(asset_id: str, request: Request, _=Depends(authenticated), db: Session
     return FileResponse(path, media_type=resolved["mime_type"], headers={"Content-Disposition": "inline"})
 
 
-@app.post(P + "/playback-sessions")
-def playback(body: schemas.PlaybackInput, _=Depends(authenticated), db: Session = Depends(get_db)):
-    from app.storage.service import resolve_asset
-    required(db, VideoPart, body.part_id)
-    stmt = select(MediaVariant).where(MediaVariant.part_id == body.part_id)
-    if body.variant_id:
-        stmt = stmt.where(MediaVariant.id == body.variant_id)
-    variant = db.scalar(stmt.order_by((MediaVariant.kind == "playback").desc(), MediaVariant.created_at.desc()).limit(1))
-    if not variant:
-        raise HTTPException(409, "此分P尚无已保存的播放文件")
-    try:
-        resolved = resolve_asset(db, variant.asset_id)
-    except Exception:
-        raise HTTPException(503, "播放文件暂不可访问") from None
-    return {"asset_id": variant.asset_id, "variant_id": variant.id,
-            "url": catalog.asset_url(variant.asset_id) if resolved["kind"] == "local" else resolved["url"],
-            "expires_at": resolved.get("expires_at"), "danmaku_url": f"{P}/parts/{body.part_id}/danmaku",
-            "subtitles": [{"id": s.id, "label": s.label, "language": s.language, "is_auto": s.is_auto, "url": catalog.asset_url(s.asset_id)}
-                          for s in db.scalars(select(SubtitleTrack).where(SubtitleTrack.part_id == body.part_id))]}
-
-
 @app.get(P + "/parts/{part_id}/danmaku")
 def danmaku(part_id: str, _=Depends(authenticated), db: Session = Depends(get_db)):
     from app.storage.service import read_asset_bytes
@@ -308,7 +287,8 @@ def annotate_creator(creator_id: str, body: schemas.CreatorAnnotation, user=Depe
 
 
 def account_view(a):
-    return {k: getattr(a, k) for k in ["id", "name", "uid", "status", "last_verified_at", "created_at"]}
+    return {k: getattr(a, k) for k in ["id", "name", "uid", "status", "last_verified_at", "created_at",
+                                     "next_request_at", "next_video_at", "cooldown_until", "risk_failures"]}
 
 
 @app.get(P + "/admin/accounts")
@@ -533,17 +513,29 @@ def migrate(profile_id: str, body: schemas.MigrationInput, user=Depends(require_
 
 @app.get(P + "/admin/settings")
 def all_settings(_=Depends(require_admin), db: Session = Depends(get_db)):
-    return {row.key: row.value for row in db.scalars(select(Setting).where(Setting.key.in_(["display", "ingest", "backup"])))}
+    defaults = {"display": schemas.DisplaySettings().model_dump(), "ingest": schemas.IngestPolicy().model_dump(),
+                "backup": schemas.BackupSettings().model_dump(), "playback": schemas.PlaybackSettings().model_dump(),
+                "statistics": schemas.StatisticsSettings().model_dump()}
+    for row in db.scalars(select(Setting).where(Setting.key.in_(list(defaults)))):
+        defaults[row.key] = {**defaults[row.key], **row.value}
+    return defaults
 
 
 @app.patch(P + "/admin/settings")
 def save_settings(body: schemas.SettingsInput, user=Depends(require_admin), db: Session = Depends(get_db)):
-    for key, value in body.model_dump(exclude_unset=True, exclude_none=True).items():
+    for key, value in body.model_dump(exclude_unset=True).items():
+        if value is None:
+            continue
         row = db.get(Setting, key)
+        merged = {**(row.value if row else {}), **value}
+        if key == "statistics":
+            config = schemas.StatisticsSettings.model_validate(merged)
+            if config.enabled and (not config.account_id or not db.get(SourceAccount, config.account_id)):
+                raise HTTPException(422, "定时更新统计需要选择有效采集账号")
         if row is None:
-            db.add(Setting(key=key, value=value))
+            db.add(Setting(key=key, value=merged))
         else:
-            row.value = {**row.value, **value}
+            row.value = merged
     audit(db, user, "update", "settings", details={"keys": list(body.model_fields_set)})
     commit(db)
     return all_settings(user, db)
@@ -611,3 +603,7 @@ def update_user(user_id: str, body: schemas.UserUpdate, user=Depends(require_adm
     audit(db, user, "update", "user", item.id, {"fields": list(values)})
     commit(db)
     return {"id": item.id, "username": item.username, "role": item.role, "disabled": item.disabled}
+
+
+from app.delivery_api import router as delivery_router
+app.include_router(delivery_router)

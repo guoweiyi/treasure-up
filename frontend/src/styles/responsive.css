@@ -1,0 +1,437 @@
+@media (min-width: 1500px) {
+  .video-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .creator-space .video-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1200px) {
+  .topbar {
+    padding: 0 24px;
+    gap: 22px;
+  }
+  .topbar nav {
+    gap: 18px;
+  }
+  .brand {
+    font-size: 19px;
+  }
+  .username {
+    display: none;
+  }
+  .account-nav {
+    gap: 14px;
+  }
+  .content-shell {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+  .video-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 24px 16px;
+  }
+  .creator-grid,
+  .collection-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .watch-layout {
+    grid-template-columns: minmax(0, 1fr) 285px;
+    gap: 24px;
+  }
+  .dm-settings-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .source-statistics {
+    gap: 16px;
+  }
+  .source-statistics .statistics-note {
+    display: none;
+  }
+  .admin-layout {
+    grid-template-columns: 170px minmax(0, 1fr);
+  }
+  .admin-main {
+    padding: 24px;
+  }
+  .overview-bottom {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+@media (max-width: 950px) {
+  .topbar {
+    gap: 20px;
+  }
+  .header-search {
+    max-width: 260px;
+  }
+  .topbar .brand span:last-child {
+    display: none;
+  }
+  .video-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .watch-layout {
+    display: block;
+  }
+  .watch-sidebar {
+    margin-top: 30px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+  .related-videos {
+    grid-column: 1/-1;
+  }
+  .related-card {
+    max-width: 520px;
+  }
+  .watch-sidebar .watch-up-section {
+    margin: 0;
+  }
+  .watch-sidebar .parts-section {
+    margin: 0;
+  }
+  .part-list {
+    max-height: 220px;
+  }
+  .dm-settings-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .comments-panel .section-heading {
+    flex-wrap: wrap;
+  }
+  .form-two-columns {
+    grid-template-columns: 1fr;
+  }
+  .admin-main .page-heading {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+}
+@media (max-width: 700px) {
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'brand account' 'navigation navigation' 'search search';
+    padding: 12px 16px;
+    height: auto;
+    min-height: 62px;
+    gap: 8px 12px;
+    position: relative;
+  }
+  .topbar .brand span:last-child {
+    display: inline;
+    font-size: 18px;
+  }
+  .topbar > .brand {
+    grid-area: brand;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .topbar .brand span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .brand-mark {
+    width: 23px;
+  }
+  .brand-mark .ui-icon {
+    width: 23px;
+  }
+  .topbar nav {
+    grid-area: navigation;
+    min-width: 0;
+    height: 36px;
+    gap: 24px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .topbar nav a {
+    font-size: 13px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .header-search {
+    grid-area: search;
+    width: 100%;
+    height: 36px;
+    margin: 0;
+    max-width: none;
+  }
+  .header-search input {
+    font-size: 12px;
+  }
+  .header-search button {
+    padding: 1px 5px;
+  }
+  .account-nav {
+    grid-area: account;
+    margin-left: auto;
+    gap: 12px;
+    font-size: 12px;
+  }
+  .account-avatar {
+    display: none;
+  }
+  .account-nav .text-button {
+    font-size: 12px;
+  }
+  .content-shell {
+    padding: 24px 16px 36px;
+  }
+  .video-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px 12px;
+  }
+  .video-title {
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 8px 0 5px;
+  }
+  .video-byline {
+    font-size: 11px;
+  }
+  .video-byline > span {
+    display: none;
+  }
+  .cover-statistics {
+    gap: 8px;
+    font-size: 10px;
+  }
+  .cover-statistics .ui-icon {
+    width: 13px;
+    height: 13px;
+  }
+  .duration {
+    font-size: 10px;
+    right: 5px;
+    bottom: 5px;
+  }
+  .cover-statistics > span:nth-child(2) {
+    display: none;
+  }
+  .content-tabs {
+    gap: 24px;
+  }
+  .content-tabs button {
+    font-size: 16px;
+    padding-bottom: 12px;
+  }
+  .collection-chips {
+    gap: 8px;
+  }
+  .collection-chips button {
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+  .library-tools {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .filter-bar {
+    gap: 8px;
+  }
+  .filter-bar .tag-filter {
+    width: 120px;
+  }
+  .page-heading {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .page-heading h1 {
+    font-size: 22px;
+  }
+  .search-form,
+  .search-form.compact {
+    width: 100%;
+  }
+  .creator-grid,
+  .collection-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .creator-card {
+    padding: 18px 0;
+  }
+  .creator-profile {
+    gap: 14px;
+    padding: 0 0 24px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .avatar.profile {
+    width: 64px;
+    height: 64px;
+    font-size: 26px;
+  }
+  .creator-profile h1 {
+    font-size: 21px;
+  }
+  .creator-profile .profile-actions {
+    flex-direction: row;
+    width: 100%;
+    margin: 0;
+    justify-content: flex-end;
+  }
+  .profile-saved {
+    flex-direction: row;
+  }
+  .profile-saved strong {
+    font-size: 15px;
+  }
+  .section-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 15px;
+  }
+  .section-heading h2 {
+    font-size: 17px;
+  }
+  .watch-shell {
+    padding-top: 20px;
+  }
+  .watch-heading h1 {
+    font-size: 18px;
+  }
+  .video-meta {
+    gap: 12px;
+    font-size: 11px;
+  }
+  .watch-sidebar {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .watch-sidebar .related-videos {
+    grid-column: auto;
+  }
+  .video-actionbar {
+    gap: 13px;
+    padding: 14px 0;
+    flex-wrap: wrap;
+  }
+  .source-statistics {
+    gap: 14px;
+    font-size: 12px;
+  }
+  .source-statistics .ui-icon {
+    width: 18px;
+    height: 18px;
+  }
+  .star-button {
+    font-size: 12px;
+  }
+  .player-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .player-selects {
+    flex-wrap: wrap;
+    gap: 12px;
+    width: 100%;
+  }
+  .dm-settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px 14px;
+  }
+  .danmaku-settings summary > span {
+    display: none;
+  }
+  .dm-preview-row {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .dm-preview {
+    width: 100%;
+    flex: auto;
+    font-size: 22px !important;
+  }
+  .treasure-archive-player .dm-fullscreen-panel {
+    right: 10px;
+    top: 10px;
+    width: calc(100% - 20px);
+    padding: 14px;
+  }
+  .comment {
+    gap: 10px;
+  }
+  .comment-avatar {
+    width: 32px;
+    height: 32px !important;
+  }
+  .comment-meta {
+    gap: 12px;
+  }
+  .comment-images img {
+    max-width: 130px;
+    max-height: 140px;
+  }
+  .replies {
+    padding: 0 10px;
+  }
+  .admin-layout {
+    display: block;
+  }
+  .admin-sidebar {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 12px 0;
+  }
+  .admin-sidebar-label,
+  .admin-return {
+    display: none;
+  }
+  .admin-sidebar nav {
+    flex-direction: row;
+    overflow: auto;
+    padding-bottom: 12px;
+    gap: 4px;
+  }
+  .admin-sidebar nav a {
+    padding: 7px 11px;
+    white-space: nowrap;
+  }
+  .admin-sidebar nav a.new-group {
+    margin-top: 0;
+  }
+  .admin-main {
+    padding: 22px 16px;
+  }
+  .admin-panel {
+    padding: 17px;
+  }
+  .toolbar-actions {
+    flex-wrap: wrap;
+  }
+  .admin-filter {
+    max-width: 100%;
+  }
+  .record-detail {
+    padding: 15px;
+  }
+  .admin-pagination .el-pagination__total {
+    display: none;
+  }
+  .overview-summary {
+    gap: 16px;
+    font-size: 12px;
+  }
+  .overview-summary strong {
+    font-size: 16px;
+  }
+  .login-card {
+    padding: 28px;
+  }
+  .player-error {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

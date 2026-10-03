@@ -88,9 +88,9 @@ class Storage:
             while block := source.read(1024 * 1024):
                 target.write(block)
 
-    def read_range(self, key: str, start: int, end: int) -> bytes:
+    def read_range(self, key: str, start: int, end: int, *, version_id: str | None = None) -> bytes:
         if start < 0 or end < start:
             raise StorageError("Invalid byte range")
-        with self.reader(key) as stream:
+        with self.reader(key, version_id=version_id) as stream:
             stream.seek(start)
             return stream.read(end - start + 1)

@@ -114,8 +114,8 @@ class S3Storage(Storage):
             raise StorageError("Playback URL lifetime must be 1 to 3600 seconds")
         return self.signing_client.generate_presigned_url("get_object", Params=self._args(key, version_id), ExpiresIn=expires_in)
 
-    def read_range(self, key, start, end):
-        result = self.client.get_object(**self._args(key), Range=f"bytes={start}-{end}")
+    def read_range(self, key, start, end, *, version_id=None):
+        result = self.client.get_object(**self._args(key, version_id), Range=f"bytes={start}-{end}")
         stream = result["Body"]
         try:
             if result.get("ResponseMetadata", {}).get("HTTPStatusCode") != 206 or not result.get("ContentRange", "").startswith(f"bytes {start}-{end}/"):
@@ -224,8 +224,8 @@ class OssStorage(Storage):
     def delete(self, key, *, version_id=None):
         self.bucket.delete_object(self._key(key), params=self._params(version_id))
 
-    def read_range(self, key, start, end):
-        result = self.bucket.get_object(self._key(key), byte_range=(start, end))
+    def read_range(self, key, start, end, *, version_id=None):
+        result = self.bucket.get_object(self._key(key), byte_range=(start, end), params={"versionId": version_id} if version_id else None)
         try:
             if result.status != 206 or not result.headers.get("Content-Range", "").startswith(f"bytes {start}-{end}/"):
                 raise StorageError("OSS did not honor byte range")

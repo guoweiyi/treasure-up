@@ -8,13 +8,14 @@ import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 
 from app.config import settings
 from app.models import Asset, MediaVariant, Video
 from app.storage.service import ingest_file, materialize_asset, resolve_asset
-from .client import UA
+from .client import UA, retry_after
 from .errors import IngestError
 
 
@@ -37,10 +38,16 @@ def format_selector(policy, *, builder=None):
     if quality not in heights:
         raise IngestError("不支持的画质策略", code="invalid_policy", retryable=False)
     maximum_short_side = heights[quality]
-    expression = "bestvideo+bestaudio/best"
+    videos, audios = ["bestvideo"], ["bestaudio"]
     if policy.get("prefer_h264"):
-        expression = ("bestvideo[vcodec~='^(avc1|h264)']+bestaudio[acodec~='^(mp4a|aac)']/"
-                      "best[vcodec~='^(avc1|h264)'][acodec~='^(mp4a|aac)']/" + expression)
+        videos.insert(0, "bestvideo[vcodec~='^(avc1|h264)']")
+    elif policy.get("prefer_dolby_vision", True):
+        videos.insert(0, "bestvideo[dynamic_range=DV]")
+    if policy.get("prefer_dolby_atmos", True):
+        # E-AC-3 is only a candidate at extraction time. JOC must be verified
+        # from the downloaded elementary stream before recording Atmos=True.
+        audios.insert(0, "bestaudio[acodec~='^(ec-3|eac3)']")
+    expression = "/".join(f"{video}+{audio}" for video in videos for audio in audios) + "/best"
     delegate = builder(expression) if builder else None
 
     def choose(context):
@@ -89,6 +96,8 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
     """Called under the runner's cross-worker video lock; recheck before download."""
     try:
         import yt_dlp
+        from yt_dlp.networking.exceptions import HTTPError
+        from yt_dlp.postprocessor.ffmpeg import FFmpegMergerPP
     except ImportError:
         raise IngestError("媒体下载组件未安装", code="missing_dependency", retryable=False) from None
     settings.scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -108,6 +117,7 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
             raise IngestError("媒体大小预算无效", code="invalid_policy", retryable=False)
 
         started = time.monotonic()
+        merge_evidence = {}
         def hook(state):
             guard()
             if time.monotonic() - started > int(policy.get("download_timeout_seconds", 21600)):
@@ -119,23 +129,76 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
         ffmpeg_location = shutil.which(str(settings.ffmpeg_path))
         if ffmpeg_location is None and Path(settings.ffmpeg_path).is_file():
             ffmpeg_location = str(Path(settings.ffmpeg_path).resolve())
+        class ControlledMerger(FFmpegMergerPP):
+            def run(self, info):
+                destination = Path(info["filepath"])
+                temporary = Path(str(destination) + ".merge")
+                command = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-y"]
+                for source in info["__files_to_merge"]:
+                    command.extend(["-i", str(source)])
+                for index, selected in enumerate(info["requested_formats"]):
+                    if selected.get("vcodec") != "none":
+                        command.extend(["-map", f"{index}:v:0"])
+                    if selected.get("acodec") != "none":
+                        command.extend(["-map", f"{index}:a:0"])
+                command.extend(["-c", "copy", *_merge_options(info), "-f", "mp4", str(temporary)])
+                _run_ffmpeg(command, temporary, maximum, int(policy.get("download_timeout_seconds", 21600)), guard)
+                if any(item.get("dynamic_range") == "DV" or str(item.get("acodec", "")).startswith(("ec-3", "eac3")) for item in info["requested_formats"]):
+                    hashes = {}
+                    for source, selected in zip(info["__files_to_merge"], info["requested_formats"], strict=True):
+                        for kind, codec_key in (("video", "vcodec"), ("audio", "acodec")):
+                            if selected.get(codec_key) == "none":
+                                continue
+                            before = _packet_hash(Path(source), kind, guard)
+                            after = _packet_hash(temporary, kind, guard)
+                            if before != after:
+                                raise IngestError("封装前后媒体码流校验不一致", code="payload_mismatch", retryable=False)
+                            hashes[kind] = before
+                    merge_evidence.update(payload_hashes=hashes, payloads_verified=True)
+                temporary.replace(destination)
+                return info["__files_to_merge"], info
+
+        class PacedDownloader(yt_dlp.YoutubeDL):
+            def urlopen(self, request):
+                guard()
+                url = request if isinstance(request, str) else getattr(request, "url", "")
+                host = urlsplit(url).hostname or ""
+                if (host == "bilibili.com" or host.endswith(".bilibili.com")) and getattr(client, "before_request", None):
+                    client.before_request(url)
+                try:
+                    return super().urlopen(request)
+                except HTTPError as error:
+                    if error.status in (412, 429):
+                        delay = retry_after(error.response.headers.get("retry-after"))
+                        error.close()
+                        raise IngestError("媒体源站限流，暂停并等待冷却", code="rate_limited", retry_after_seconds=delay) from None
+                    raise
+
+            def run_pp(self, pp, info):
+                if isinstance(pp, FFmpegMergerPP) and not isinstance(pp, ControlledMerger):
+                    pp = ControlledMerger(self)
+                return super().run_pp(pp, info)
+
         options = {
             "quiet": True, "no_warnings": True, "logger": _SilentLogger(),
             "cookiefile": str(cookie_path), "noplaylist": True,
             "format": "bestvideo+bestaudio/best", "outtmpl": str(folder / "media.%(ext)s"),
             "merge_output_format": "mp4", "ffmpeg_location": ffmpeg_location,
             "socket_timeout": 30, "retries": 2, "fragment_retries": 2,
-            "concurrent_fragment_downloads": 1, "max_filesize": maximum,
+            "concurrent_fragment_downloads": max(1, min(3, int(policy.get("fragment_concurrency", 1)))), "max_filesize": maximum,
             "http_headers": {"User-Agent": UA, "Referer": "https://www.bilibili.com/"},
-            "progress_hooks": [hook], "continuedl": True,
-            "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
+            "progress_hooks": [hook], "continuedl": True, "keepvideo": True,
+            "skip_unavailable_fragments": False,
+            "postprocessor_args": {"ffmpeg": ["-strict", "unofficial", "-movflags", "+faststart+write_colr"]},
         }
         if policy.get("download_rate_bytes"):
             options["ratelimit"] = max(1, int(policy["download_rate_bytes"]))
         try:
-            with yt_dlp.YoutubeDL(options) as downloader:
+            with PacedDownloader(options) as downloader:
                 downloader.format_selector = format_selector(policy, builder=downloader.build_format_selector)
                 guard()
+                if getattr(client, "before_video", None):
+                    client.before_video()
                 current = client.view(video.bvid)
                 matching = [p for p in current.get("pages", []) if str(p.get("cid")) == part.cid]
                 if len(matching) != 1:
@@ -175,7 +238,9 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
             if any(code in str(error) for code in ("HTTP Error 412", "HTTP Error 429", "code -352", "code -401")):
                 raise IngestError("媒体源站限流或风控，请稍后恢复", code="rate_limited") from None
             raise IngestError("媒体提取或下载失败；请检查账号权限及媒体工具", code="download_failed") from None
-        files = [p for p in folder.glob("media.*") if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".flv")]
+        # keepvideo retains the source streams for verification; only the final
+        # merged basename may be published as the archive.
+        files = [p for p in folder.glob("media.*") if p.name in ("media.mp4", "media.mkv", "media.webm", "media.flv")]
         if len(files) != 1 or files[0].stat().st_size <= 0:
             raise IngestError("下载未生成完整媒体文件", code="download_incomplete")
         path = files[0]
@@ -183,6 +248,11 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
             raise IngestError("媒体超过大小预算", code="media_budget", retryable=False)
         guard()
         vstream, astream, duration = _probe(path)
+        dolby = inspect_dolby(path, vstream, astream, guard=guard)
+        selected = info.get("requested_formats") or [info]
+        dolby["source_dv_candidate"] = any(item.get("dynamic_range") == "DV" for item in selected)
+        if dolby["source_dv_candidate"] and not dolby["dolby_vision"]:
+            raise IngestError("候选杜比视界文件缺少有效 DOVI/RPU 配置，未发布归档", code="dolby_metadata_missing", retryable=False)
         # Metadata duration is rounded to seconds. A percentage tolerance would
         # incorrectly accept long previews or truncated long-form recordings.
         if part.duration and abs(duration - part.duration) > 2:
@@ -202,18 +272,79 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
         variant.duration = duration
         db.add(variant)
         db.flush()
-        _record_source_properties(db, part, variant, vstream)
+        _record_source_properties(db, part, variant, vstream, **dolby, **merge_evidence, archive_stream_copy=True)
         return variant, False
+
+
+def _merge_options(info):
+    formats = info.get("requested_formats") or [info]
+    options = ["-strict", "unofficial", "-movflags", "+faststart+write_colr"]
+    if any(str(item.get("vcodec", "")).startswith(("hvc", "hev", "dvh", "dvhe")) for item in formats):
+        options.extend(["-tag:v", "hvc1"])
+    if any(str(item.get("acodec", "")).startswith(("ec-3", "eac3")) for item in formats):
+        options.extend(["-tag:a", "ec-3"])
+    return options
 
 
 def _colour_properties(stream):
     transfer = str(stream.get("color_transfer") or "unknown").lower()
     side_types = [str(item.get("side_data_type") or "").lower() for item in stream.get("side_data_list", [])]
-    dolby = any("dovi" in name or "dolby vision" in name for name in side_types)
-    hdr = dolby or transfer in {"smpte2084", "arib-std-b67"} or any("mastering display" in name for name in side_types)
+    dovi = _dovi_configuration(stream)
+    dolby = bool(dovi and dovi.get("rpu_present_flag") == 1 and (dovi.get("dv_profile") or 0) > 0)
+    hdr = bool(dovi) or any("dovi" in name or "dolby vision" in name for name in side_types) or transfer in {"smpte2084", "arib-std-b67"} or any("mastering display" in name for name in side_types)
     return {"hdr": hdr, "wide_gamut": stream.get("color_primaries") == "bt2020",
             "dolby_vision": dolby, **{key: stream.get(key) for key in
                 ("codec_name", "pix_fmt", "profile", "color_transfer", "color_primaries", "color_space", "color_range")}}
+
+
+def _dovi_configuration(stream):
+    for item in stream.get("side_data_list", []):
+        if str(item.get("side_data_type", "")).lower() == "dovi configuration record":
+            return {key: item[key] for key in ("dv_version_major", "dv_version_minor", "dv_profile", "dv_level",
+                    "rpu_present_flag", "el_present_flag", "bl_present_flag", "dv_bl_signal_compatibility_id")
+                    if type(item.get(key)) is int}
+    return {}
+
+
+def _packet_hash(path, kind, guard):
+    with tempfile.TemporaryDirectory(prefix="treasure-payload-", dir=settings.scratch_dir) as directory:
+        output = Path(directory) / "payload.sha256"
+        command = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-i", str(path), "-map",
+                   "0:v:0" if kind == "video" else "0:a:0", "-c", "copy", "-f", "hash", "-hash", "sha256", str(output)]
+        _run_ffmpeg(command, output, 4096, 7200, guard)
+        digest = output.read_text(encoding="ascii").strip()
+        if not re.fullmatch(r"SHA256=[0-9a-f]{64}", digest):
+            raise IngestError("媒体码流摘要格式无效", code="payload_verification_failed")
+        return digest.split("=", 1)[1]
+
+
+def inspect_dolby(path, video, audio, *, guard=lambda: None):
+    """Evidence from files, not HEVC/E-AC-3 codec names or source advertisements."""
+    config = _dovi_configuration(video)
+    evidence = {"dolby_vision": bool(config and config.get("rpu_present_flag") == 1 and (config.get("dv_profile") or 0) > 0),
+                "dovi": config, "dolby_atmos": False, "audio_codec": audio.get("codec_name"),
+                "audio_profile": audio.get("profile"), "audio_channels": audio.get("channels"),
+                "atmos_evidence": "not_eac3", "spatial_audio_output_verified": False}
+    if audio.get("codec_name") != "eac3":
+        return evidence
+    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="treasure-joc-", dir=settings.scratch_dir) as directory:
+        sample = Path(directory) / "sample.eac3"
+        # Probe an elementary sample independent of MP4 dec3/container labels.
+        _run_ffmpeg([str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0",
+                     "-t", "10", "-c:a", "copy", "-f", "eac3", str(sample)], sample, 16 * 1024**2, 120, guard)
+        try:
+            guard()
+            result = subprocess.run([str(settings.ffprobe_path), "-v", "error", "-show_streams", "-of", "json", str(sample)],
+                                    capture_output=True, check=True, timeout=120)
+            streams = json.loads(result.stdout)["streams"]
+            raw = next(stream for stream in streams if stream.get("codec_type") == "audio")
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, StopIteration):
+            raise IngestError("音频 JOC 原码流检测失败", code="dolby_verification_failed") from None
+        joc = raw.get("codec_name") == "eac3" and raw.get("profile") == "Dolby Digital Plus + Dolby Atmos"
+        evidence.update(dolby_atmos=joc, atmos_evidence="eac3_joc_bitstream_profile" if joc else "joc_not_reported",
+                        raw_audio_profile=raw.get("profile"), audio_verification_sample_seconds=10)
+    return evidence
 
 
 def _record_source_properties(db, part, variant, stream, **extra):

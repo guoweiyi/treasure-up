@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { session, write, errorText, loadDisplaySettings } from '../api';
+import { session, write, errorText, loadDisplaySettings, display } from '../api';
+import UiIcon from '../components/UiIcon.vue';
 const username = ref(''),
   password = ref(''),
   busy = ref(false),
@@ -30,8 +31,10 @@ async function login() {
 <template>
   <main class="login-page">
     <form class="login-card" @submit.prevent="login">
-      <div class="brand"><span class="brand-mark">T</span><span>Treasure Up</span></div>
-      <h1>回到你的收藏</h1>
+      <div class="brand">
+        <span class="brand-mark"><UiIcon name="play" /></span><span>{{ display.site_name }}</span>
+      </div>
+      <h1>登录视频库</h1>
       <p class="muted">登录后浏览已保存的视频、弹幕和评论。</p>
       <label
         >用户名<input

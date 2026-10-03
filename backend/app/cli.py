@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Setting, StorageProfile, User
-from app.schemas import BackupSettings, DisplaySettings, IngestPolicy
+from app.schemas import BackupSettings, DisplaySettings, IngestPolicy, PlaybackSettings, StatisticsSettings
 from app.security import hash_password
 
 
@@ -31,7 +31,8 @@ def initialize():
             db.add(User(username=settings.admin_username, password_hash=password_hash, role="admin"))
         if not db.scalar(select(StorageProfile.id).limit(1)):
             db.add(StorageProfile(name="本地媒体库", kind="local", config={"root": str(settings.media_root.resolve())}, is_default=True))
-        for key, value in {"display": DisplaySettings().model_dump(), "ingest": IngestPolicy().model_dump(), "backup": BackupSettings().model_dump()}.items():
+        for key, value in {"display": DisplaySettings().model_dump(), "ingest": IngestPolicy().model_dump(), "backup": BackupSettings().model_dump(),
+                           "playback": PlaybackSettings().model_dump(), "statistics": StatisticsSettings().model_dump()}.items():
             if not db.get(Setting, key):
                 db.add(Setting(key=key, value=value))
         db.commit()

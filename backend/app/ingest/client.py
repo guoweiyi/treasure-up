@@ -3,6 +3,8 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
@@ -118,6 +120,22 @@ def clean_raw(value):
     return value
 
 
+def retry_after(value, now=None):
+    """HTTP Retry-After accepts either delay seconds or an HTTP date."""
+    if not value:
+        return None
+    value = str(value).strip()
+    if re.fullmatch(r"\d{1,9}", value):
+        return int(value)
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0, int((parsed - (now or datetime.now(timezone.utc))).total_seconds()))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 class BiliClient:
     def __init__(self, cookie_text="", *, interval=1.5, transport=None, sleep=time.sleep):
         self.cookies = parse_cookies(cookie_text) if cookie_text else []
@@ -126,12 +144,16 @@ class BiliClient:
         self.last_request = 0
         self.images = None
         self.images_at = 0
+        self.before_request = None
+        self.before_video = None
         self.http = httpx.Client(timeout=httpx.Timeout(30, connect=10), follow_redirects=False, transport=transport, headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
 
     def close(self):
         self.http.close()
 
     def _request(self, url, *, params=None, limit=16 * 1024 * 1024, authenticated=False):
+        if self.before_request:
+            self.before_request(url)
         delay = self.interval - (time.monotonic() - self.last_request)
         if delay > 0:
             self.sleep(delay)
@@ -140,7 +162,7 @@ class BiliClient:
         try:
             with self.http.stream("GET", url, params=params, headers=headers) as response:
                 if response.status_code in (412, 429):
-                    raise IngestError("源站限流或风控，请稍后恢复任务", code="rate_limited")
+                    raise IngestError("源站限流或风控，请稍后恢复任务", code="rate_limited", retry_after_seconds=retry_after(response.headers.get("retry-after")))
                 if response.status_code != 200:
                     raise IngestError(f"源站 HTTP 请求失败（{response.status_code}）", code="http_error")
                 output = bytearray()

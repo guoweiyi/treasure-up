@@ -63,54 +63,77 @@ api<Page<Collection>>('/collections?page_size=100')
 watch(() => route.fullPath, load, { immediate: true });
 </script>
 <template>
-  <main class="content-shell">
-    <div class="page-heading">
-      <div>
-        <h1>视频库</h1>
-        <p class="muted">{{ busy ? '正在读取收藏…' : `已保存 ${total} 条视频` }}</p>
+  <main class="content-shell library-shell">
+    <div class="library-heading">
+      <div class="content-tabs">
+        <button
+          :class="{ active: !starred }"
+          @click="
+            starred = false;
+            search();
+          "
+        >
+          全部视频</button
+        ><button
+          :class="{ active: starred }"
+          @click="
+            starred = true;
+            search();
+          "
+        >
+          星标收藏
+        </button>
       </div>
-      <form class="search-form" role="search" @submit.prevent="search()">
-        <input
-          v-model="q"
-          aria-label="搜索视频"
-          placeholder="搜索标题、UP 主、BV 号或标签"
-        /><button class="primary" type="submit">搜索</button>
-      </form>
+      <span class="muted small">{{ busy ? '正在读取…' : total + ' 个视频' }}</span>
     </div>
-    <form class="filter-bar" @submit.prevent="search()">
-      <label
-        ><span class="sr-only">收藏夹</span
-        ><select v-model="collection" @change="search()">
-          <option value="">所有收藏夹</option>
-          <option v-for="item in collections" :key="item.id" :value="item.id">
-            {{ item.title }}
-          </option>
-        </select></label
-      ><label
-        ><span class="sr-only">排序</span
-        ><select v-model="sort" @change="search()">
+    <div v-if="collections.length" class="collection-chips">
+      <button
+        :class="{ selected: !collection }"
+        @click="
+          collection = '';
+          search();
+        "
+      >
+        全部收藏夹
+      </button>
+      <button
+        v-for="item in collections"
+        :key="item.id"
+        :class="{ selected: collection === item.id }"
+        @click="
+          collection = item.id;
+          search();
+        "
+      >
+        {{ item.title }}
+      </button>
+    </div>
+    <div class="library-tools">
+      <p class="search-result-heading">{{ q ? '“' + q + '” 的搜索结果' : '已保存的视频' }}</p>
+      <form class="filter-bar" @submit.prevent="search()">
+        <select v-model="sort" aria-label="排序" @change="search()">
           <option value="newest">最近保存</option>
           <option value="oldest">最早保存</option>
           <option value="title">按标题</option>
           <option value="duration">按时长</option>
-        </select></label
-      ><input
-        v-model="tag"
-        class="tag-filter"
-        placeholder="筛选标签"
-        aria-label="标签筛选"
-        @change="search()"
-      /><label class="check-label"
-        ><input v-model="starred" type="checkbox" @change="search()" />只看星标</label
-      ><button
-        v-if="q || collection || tag || starred"
-        class="text-button"
-        type="button"
-        @click="router.push('/')"
-      >
-        清除筛选
-      </button>
-    </form>
+        </select>
+        <input
+          v-model="tag"
+          class="tag-filter"
+          placeholder="筛选标签"
+          aria-label="标签筛选"
+          @change="search()"
+        />
+        <button
+          v-if="q || collection || tag || starred"
+          class="text-button"
+          type="button"
+          @click="router.push('/')"
+        >
+          清除筛选
+        </button>
+      </form>
+    </div>
     <EmptyState v-if="error" title="视频库暂时无法读取" :text="error" error
       ><button @click="load">重试</button></EmptyState
     >
@@ -120,12 +143,13 @@ watch(() => route.fullPath, load, { immediate: true });
     </div>
     <EmptyState
       v-else
-      :title="q || collection || tag || starred ? '没有匹配的视频' : '收藏，从第一条视频开始'"
+      :title="q || collection || tag || starred ? '没有匹配的视频' : '视频库还是空的'"
       :text="
         q || collection || tag || starred
           ? '试试其他关键词，或调整筛选条件。'
-          : '在管理后台添加收藏来源，归档完成的视频会出现在这里。'
+          : '在管理中心添加收藏来源，归档完成的视频会出现在这里。'
       "
-    /><Pagination :page="page" :total="total" @change="search" />
+    />
+    <Pagination :page="page" :total="total" @change="search" />
   </main>
 </template>

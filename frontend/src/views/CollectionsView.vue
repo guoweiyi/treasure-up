@@ -36,7 +36,7 @@ onMounted(() => load());
     <div class="page-heading">
       <div>
         <h1>收藏夹</h1>
-        <p class="muted">按收藏来源浏览，找回当时想留下的内容</p>
+        <p class="muted">共 {{ total }} 个收藏夹与合集</p>
       </div>
     </div>
     <EmptyState v-if="error" title="收藏夹暂时无法读取" :text="error" error

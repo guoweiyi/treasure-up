@@ -37,7 +37,19 @@ export interface MediaProperties {
   pix_fmt?: string;
   hdr?: boolean;
   wide_gamut?: boolean;
+  dolby_vision?: boolean;
+  dolby_atmos?: boolean;
   compatibility?: string;
+}
+export interface VideoStats {
+  view: number | null;
+  like: number | null;
+  coin: number | null;
+  favorite: number | null;
+  share: number | null;
+  reply: number | null;
+  danmaku: number | null;
+  observed_at?: string | null;
 }
 export interface Part {
   id: string;
@@ -66,6 +78,7 @@ export interface Video {
   source_state?: string;
   parts?: Part[];
   media_properties?: Record<string, MediaProperties>;
+  stats?: VideoStats;
   capture_runs?: Record<string, unknown>[];
 }
 export interface Collection {
@@ -96,11 +109,41 @@ export interface Danmaku {
   size?: number;
 }
 export interface Playback {
+  id?: string;
+  session_id?: string;
   asset_id: string;
   variant_id: string;
+  source_variant_id?: string;
+  protocol?: 'hls' | 'file';
+  routes?: PlaybackRoute[];
+  selected_route_id?: string;
+  media?: MediaProperties;
+  loudness?: Loudness | null;
   url: string;
   expires_at?: string;
   danmaku_url?: string;
   subtitles: { url: string; label: string; language?: string; is_auto?: boolean }[];
+}
+export interface PlaybackRoute {
+  id: string;
+  name: string;
+  status: 'available' | 'unmeasured' | 'unavailable';
+  latency_ms: number | null;
+  throughput_bps: number | null;
+  measurement_scope: 'server_storage' | 'browser_delivery' | null;
+  measured_at: string | null;
+  probe_url?: string;
+  probe_bytes?: number;
+}
+export interface Loudness {
+  status: 'ready' | 'bypassed' | 'silent';
+  gain_db: number;
+  gain_linear: number;
+  target_lufs: number;
+  input_lufs: number | null;
+  true_peak_dbfs: number | null;
+  atmos_bypass: boolean;
+  reason: string | null;
+  analysis_only: boolean;
 }
 export type Row = Record<string, any>;

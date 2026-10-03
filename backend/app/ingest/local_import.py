@@ -109,7 +109,10 @@ def import_local(db, path, metadata, danmaku_path=None):
     key = "local:" + asset.sha256
     variant = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id, MediaVariant.format_key == key, MediaVariant.kind == "archive"))
     if not variant:
-        variant = MediaVariant(part_id=part.id, asset_id=asset.id, kind="archive", format_key=key, quality=str(vstream.get("height") or "local"), width=int(vstream.get("width") or 0), height=int(vstream.get("height") or 0), video_codec=vstream.get("codec_name") or "", audio_codec=astream.get("codec_name") or "", duration=duration)
+        width, height = int(vstream.get("width") or 0), int(vstream.get("height") or 0)
+        variant = MediaVariant(part_id=part.id, asset_id=asset.id, kind="archive", format_key=key,
+            quality=str(min(width, height) or "local"), width=width, height=height,
+            video_codec=vstream.get("codec_name") or "", audio_codec=astream.get("codec_name") or "", duration=duration)
         db.add(variant)
         db.flush()
     _ref(db, asset.id, "media_variant", variant.id, "archive")

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -70,6 +70,7 @@ class Creator(Entity, Base):
 
 class Video(Entity, Base):
     __tablename__ = "videos"
+    __table_args__ = (Index("ix_videos_created_id", "created_at", "id"),)
     bvid: Mapped[str] = mapped_column(String(32), unique=True)
     aid: Mapped[str | None] = mapped_column(String(32), unique=True)
     title: Mapped[str] = mapped_column(Text, default="")
@@ -174,7 +175,8 @@ class AssetRef(Entity, Base):
 
 class MediaVariant(Entity, Base):
     __tablename__ = "media_variants"
-    __table_args__ = (UniqueConstraint("part_id", "format_key", "kind"),)
+    __table_args__ = (UniqueConstraint("part_id", "format_key", "kind"),
+                     Index("ix_media_variants_kind_created_id", "kind", "created_at", "id"))
     part_id: Mapped[str] = mapped_column(ForeignKey("video_parts.id"), index=True)
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"))
     kind: Mapped[str] = mapped_column(String(40), default="archive")
@@ -185,6 +187,7 @@ class MediaVariant(Entity, Base):
     video_codec: Mapped[str] = mapped_column(String(100), default="")
     audio_codec: Mapped[str] = mapped_column(String(100), default="")
     duration: Mapped[float] = mapped_column(Float, default=0)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
 
 
 class DanmakuSnapshot(Entity, Base):
@@ -265,6 +268,10 @@ class SourceAccount(Entity, Base):
     uid: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(40), default="unverified")
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_request_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_video_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    risk_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class SourceSubscription(Entity, Base):
@@ -279,6 +286,7 @@ class SourceSubscription(Entity, Base):
 
 class Job(Entity, Base):
     __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_kind_target_status", "kind", "target_id", "status"),)
     kind: Mapped[str] = mapped_column(String(50), index=True)
     target_id: Mapped[str] = mapped_column(String(200), default="")
     account_id: Mapped[str | None] = mapped_column(ForeignKey("source_accounts.id"))
@@ -344,3 +352,35 @@ class BackupSet(Entity, Base):
     error: Mapped[str | None] = mapped_column(Text)
     snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VideoStatSnapshot(Entity, Base):
+    __tablename__ = "video_stat_snapshots"
+    __table_args__ = (UniqueConstraint("video_id", "run_id"), Index("ix_video_stats_observed", "video_id", "observed_at"))
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    counts: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class PlaybackSession(Entity, Base):
+    __tablename__ = "playback_sessions"
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id"), index=True)
+    variant_id: Mapped[str] = mapped_column(ForeignKey("media_variants.id"), index=True)
+    protocol: Mapped[str] = mapped_column(String(20))
+    profile_id: Mapped[str | None] = mapped_column(ForeignKey("storage_profiles.id"))
+    state: Mapped[dict] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class StorageObservation(Entity, Base):
+    __tablename__ = "storage_observations"
+    profile_id: Mapped[str] = mapped_column(ForeignKey("storage_profiles.id"), index=True)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id"))
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_users.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(30), default="server_storage")
+    latency_ms: Mapped[float] = mapped_column(Float)
+    elapsed_ms: Mapped[float] = mapped_column(Float)
+    bytes_read: Mapped[int] = mapped_column(Integer)
+    succeeded: Mapped[bool] = mapped_column(Boolean)
+    measured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

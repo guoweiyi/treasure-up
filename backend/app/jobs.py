@@ -80,7 +80,7 @@ def enqueue(db: Session, kind: str, target_id: str, account_id=None, policy=None
     if existing:
         return existing
     frozen = deepcopy(policy or {})
-    if kind in {"scan_collection", "archive_video", "refresh_comments", "verify_account"} and not frozen_policy:
+    if kind in {"scan_collection", "archive_video", "refresh_comments", "refresh_stats", "verify_account"} and not frozen_policy:
         from app.schemas import IngestPolicy
         system = db.get(Setting, "ingest")
         frozen = {**IngestPolicy().model_dump(), **(system.value or {} if system else {}), **frozen}
@@ -130,7 +130,7 @@ def run_job_id(job_id: str):
         stop = threading.Event()
         pulse = threading.Thread(target=heartbeat, args=(job.id, owner, stop), daemon=True)
         pulse.start()
-        outcome, result, error = "succeeded", {}, None
+        outcome, result, error, retry_after_seconds, deferred = "succeeded", {}, None, 0, False
         job_id, attempt_count = job.id, job.attempts
 
         def guard_commit(session):
@@ -151,10 +151,31 @@ def run_job_id(job_id: str):
                     raise RuntimeError("备份未完成，请检查备份记录")
             elif job.kind == "migrate_storage":
                 result = migrate_job(db, job, owner=owner)
+            elif job.kind == "sync_video":
+                result = sync_video_job(db, job, owner=owner)
             elif job.kind == "probe_storage":
                 from app.storage.service import probe_profile
                 ensure_active(db, job_id, owner)
                 result = probe_profile(db, job.target_id)
+            elif job.kind in {"retire_storage_location", "restore_storage_location", "purge_storage_location"}:
+                from app.storage.lifecycle import retire_location, restore_location, purge_location
+                ensure_active(db, job_id, owner)
+                operation = {"retire_storage_location": retire_location, "restore_storage_location": restore_location,
+                             "purge_storage_location": purge_location}[job.kind]
+                if job.kind == "purge_storage_location":
+                    result = operation(db, job.target_id, check_active=lambda: ensure_active(db, job_id, owner))
+                else:
+                    location = operation(db, job.target_id)
+                    result = {"location_id": location.id, "state": location.state}
+            elif job.kind == "prepare_media":
+                from app.playback import analyze_variant, package_variant
+                check = lambda: ensure_active(db, job_id, owner)
+                if job.policy.get("analyze_loudness"):
+                    result["loudness"] = analyze_variant(db, job.target_id, check_active=check)
+                if job.policy.get("package"):
+                    packaged = package_variant(db, job.target_id, check_active=check,
+                                               segment_seconds=job.policy.get("segment_seconds", 6))
+                    result["variant_id"] = packaged.id
             else:
                 from app.ingest.runner import run_job
                 result = run_job(db, job) or {}
@@ -165,11 +186,13 @@ def run_job_id(job_id: str):
         except Exception as exc:
             db.rollback()
             # Only explicitly sanitized domain messages are shown to users.
-            safe = exc.__class__.__module__.startswith(("app.ingest", "app.storage", "app.backup"))
+            safe = exc.__class__.__module__.startswith(("app.ingest", "app.storage", "app.backup", "app.playback"))
             error = str(exc)[:1000] if safe else f"任务未完成（{type(exc).__name__}），请检查配置与运行记录"
             blocked = getattr(exc, "blocked", False)
             retryable = getattr(exc, "retryable", False)
-            outcome = "lease_lost" if isinstance(exc, LeaseLost) else "blocked" if blocked else "queued" if retryable and attempt_count < job.max_attempts else "failed"
+            deferred = bool(getattr(exc, "deferred", False))
+            retry_after_seconds = max(0, min(86400, float(getattr(exc, "retry_after_seconds", 0) or 0)))
+            outcome = "lease_lost" if isinstance(exc, LeaseLost) else "queued" if deferred else "blocked" if blocked else "queued" if retryable and attempt_count < job.max_attempts else "failed"
             if exc.__class__.__name__ == "PartialCaptureError" and outcome == "failed":
                 outcome = "partial"
         finally:
@@ -184,10 +207,14 @@ def run_job_id(job_id: str):
             if result:
                 values["result"] = result
             if outcome == "queued":
-                values["available_at"] = now + timedelta(seconds=min(900, 15 * max(1, attempt_count)) if error else 2)
+                values["available_at"] = now + timedelta(seconds=max(retry_after_seconds,
+                    min(900, 15 * max(1, attempt_count)) if error else 2))
                 if not error:
                     # A successful budget slice is not a failed retry attempt.
                     values["attempts"] = 0
+                elif deferred:
+                    # Waiting for a shared account slot is not an upstream failure.
+                    values["attempts"] = max(0, attempt_count - 1)
             changed = None
             if outcome != "lease_lost":
                 changed = final.execute(update(Job).where(*_owned(job_id, owner, _lease_clock(final, now))).values(**values)
@@ -245,6 +272,33 @@ def migrate_job(db, job, *, owner=None):
         uploads.pop(asset_id, None)
         save_checkpoint(db, job_id, owner, {**checkpoint, "uploads": uploads, "completed": sorted(done), "total": len(ids)})
     return {"completed": len(done), "total": len(ids), "old_locations_retained": True}
+
+
+def sync_video_job(db, job, *, owner):
+    from app.storage.service import migrate_asset
+    from app.storage.lifecycle import dependency_asset_ids
+    checkpoint = ensure_active(db, job.id, owner)
+    if "asset_ids" not in checkpoint:
+        ids = sorted(dependency_asset_ids(db, job.policy["asset_ids"]))
+        checkpoint = {**checkpoint, "asset_ids": ids, "total": len(ids)}
+        save_checkpoint(db, job.id, owner, checkpoint)
+    ids, done = checkpoint["asset_ids"], set(checkpoint.get("completed", []))
+    for asset_id in ids:
+        if asset_id in done:
+            continue
+        checkpoint = ensure_active(db, job.id, owner)
+        def save_upload(state):
+            current = ensure_active(db, job.id, owner)
+            current["uploads"] = {**current.get("uploads", {}), asset_id: state}
+            save_checkpoint(db, job.id, owner, current)
+        migrate_asset(db, asset_id, job.policy["target_profile_id"],
+                      checkpoint=checkpoint.get("uploads", {}).get(asset_id), on_checkpoint=save_upload)
+        done.add(asset_id)
+        current = ensure_active(db, job.id, owner)
+        uploads = dict(current.get("uploads", {}))
+        uploads.pop(asset_id, None)
+        save_checkpoint(db, job.id, owner, {**current, "completed": sorted(done), "uploads": uploads})
+    return {"completed": len(done), "total": len(ids), "originals_retained": True}
 
 
 def schedule_due(db):

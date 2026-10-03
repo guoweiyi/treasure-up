@@ -13,7 +13,8 @@ from app.worker import execute
 def queue_for_kind(kind):
     if kind == "backup":
         return "backup"
-    if kind in {"archive_video", "migrate_storage", "probe_storage"}:
+    if kind in {"archive_video", "migrate_storage", "probe_storage", "prepare_media", "sync_video",
+                "retire_storage_location", "restore_storage_location", "purge_storage_location"}:
         return "media"
     return "collector"
 
@@ -42,6 +43,9 @@ def main():
                 with SessionLocal() as db:
                     schedule_due(db)
                     schedule_backup(db)
+                    from app.maintenance import enqueue_statistics, enqueue_media_maintenance
+                    enqueue_statistics(db)
+                    enqueue_media_maintenance(db)
                     recover_and_dispatch(db, lambda job_id, kind: execute.apply_async(args=[job_id],
                         queue=queue_for_kind(kind)))
             except Exception as exc:

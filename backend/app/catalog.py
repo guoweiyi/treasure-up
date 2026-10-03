@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (Asset, CaptureRun, Collection, CollectionItem, Comment, CommentAsset, Creator,
                         Job, MediaVariant, PlatformUser, UserSnapshot, Video, VideoAnnotation,
-                        VideoCreator, VideoPart)
+                        VideoCreator, VideoPart, VideoStatSnapshot)
 
 
 def asset_url(asset_id):
@@ -56,15 +56,25 @@ def video_view(db: Session, video: Video, detail=False):
               "tags": note.tags if note else [], "starred": note.starred if note else False,
               "parts_count": len(parts), "playable": bool(variants), "capture_status": video.capture_status,
               "created_at": video.created_at}
+    latest_stats = db.scalar(select(VideoStatSnapshot).where(VideoStatSnapshot.video_id == video.id)
+                             .order_by(VideoStatSnapshot.observed_at.desc(), VideoStatSnapshot.id.desc()).limit(1))
+    result["stats"] = {**{key: None for key in ("view", "like", "coin", "favorite", "share", "reply", "danmaku")},
+                       **(latest_stats.counts if latest_stats else {}),
+                       "observed_at": latest_stats.observed_at if latest_stats else None}
+    result["published_at"] = video.published_at
+    properties = dict((video.metadata_json or {}).get("media_properties", {}))
+    for variant in variants:
+        properties[variant.id] = {**properties.get(variant.id, {}), **(variant.metadata_json or {})}
+    result["media_properties"] = properties
     if detail:
         result.update(notes=note.notes if note else "", source_state=video.source_state,
-                      media_properties=(video.metadata_json or {}).get("media_properties", {}),
                       title_override=note.title_override if note else None,
                       description_override=note.description_override if note else None,
                       source_description=video.description,
                       parts=[{"id": p.id, "cid": p.cid, "position": p.position, "title": p.title, "duration": p.duration,
                               "variants": [{"id": v.id, "quality": v.quality, "kind": v.kind, "width": v.width,
-                                            "height": v.height, "video_codec": v.video_codec, "audio_codec": v.audio_codec}
+                                            "height": v.height, "video_codec": v.video_codec, "audio_codec": v.audio_codec,
+                                            "metadata": properties.get(v.id, {})}
                                            for v in variants if v.part_id == p.id]} for p in parts],
                       capture_runs=[{"id": r.id, "status": r.status, "counts": r.counts, "end_reason": r.end_reason,
                                      "started_at": r.started_at, "finished_at": r.finished_at}

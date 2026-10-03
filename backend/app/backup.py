@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -27,7 +29,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Asset, AssetLocation, BackupSet, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession
+from app.models import Asset, AssetLocation, BackupSet, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession
 from app.storage.base import IntegrityError, StorageError, content_key, file_digest, safe_key
 from app.storage.local import LocalStorage
 from app.storage.service import copy_asset_to, utcnow
@@ -396,9 +398,19 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
                     connection.commit()
             else:
                 raise BackupError("Unsupported restore database")
+        # A previous release's dump lacks tables used by current ORM cleanup.
+        # Upgrade only this verified recovery target, keeping global settings and
+        # its application engine untouched. create_all test dumps have no version
+        # table and already contain the current schema, so they need no migration.
+        with engine.begin() as connection:
+            if inspect(connection).has_table("alembic_version"):
+                migration = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+                migration.attributes["connection"] = connection
+                command.upgrade(migration, "head")
         with Session(engine) as restored:
             # Old sessions, schedulers, and storage endpoints must not revive on recovery.
             restored.execute(delete(UserSession))
+            restored.execute(delete(PlaybackSession))
             restored.execute(delete(OutboxEvent))
             for job in restored.scalars(select(Job).where(Job.status.in_(["pending", "queued", "running", "retry", "paused"]))):
                 job.status = "paused"
@@ -418,6 +430,16 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             backup_setting = restored.get(Setting, "backup")
             if backup_setting:
                 backup_setting.value = {**backup_setting.value, "enabled": False, "destination": ""}
+            for key, paused in {"statistics": {"enabled": False},
+                                "playback": {"package_long_videos": False, "analyze_loudness": False}}.items():
+                row = restored.get(Setting, key)
+                if row:
+                    row.value = {**row.value, **paused}
+                else:
+                    restored.add(Setting(key=key, value=paused))
+            # A manually started batch resumes even with recurring scheduling off.
+            # Restore must clear those continuations as well as pause old jobs.
+            restored.execute(delete(Setting).where(Setting.key.in_(["statistics_runtime", "media_maintenance_runtime"])))
             recovered_set = restored.get(BackupSet, backup_id)
             if recovered_set:
                 recovered_set.manifest = manifest

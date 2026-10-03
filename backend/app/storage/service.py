@@ -16,6 +16,7 @@ from app.security import decrypt_secret
 from .base import IntegrityError, ObjectMissing, StorageError, content_key, file_digest
 from .cloud import OssStorage, S3Storage
 from .local import LocalStorage
+from .locking import content_lock
 
 
 def utcnow():
@@ -57,6 +58,9 @@ def default_profile(db, profile_id=None):
 
 
 def _register_location(db, asset, profile, key, info):
+    # Keep publication serialized until the caller commits, even after the
+    # content lock exits. Purge/retire take this same row lock before reading state.
+    db.scalar(select(Asset).where(Asset.id == asset.id).with_for_update())
     location = db.scalars(select(AssetLocation).where(AssetLocation.asset_id == asset.id, AssetLocation.storage_profile_id == profile.id, AssetLocation.object_key == key)).first()
     if location is None:
         try:
@@ -79,6 +83,11 @@ def ingest_file(db, path: Path, *, kind: str, mime_type: str, profile_id=None) -
     if not path.is_file() or path.is_symlink():
         raise StorageError("Ingest source must be a regular file")
     sha, size = file_digest(path)
+    with content_lock(db, sha):
+        return _ingest_file_locked(db, path, sha, size, kind=kind, mime_type=mime_type, profile_id=profile_id)
+
+
+def _ingest_file_locked(db, path, sha, size, *, kind, mime_type, profile_id):
     profile = default_profile(db, profile_id)
     adapter = get_adapter(profile)
     key = content_key(sha)
@@ -189,6 +198,11 @@ def migrate_asset(db, asset_id, target_profile_id, *, checkpoint=None, on_checkp
     asset = db.get(Asset, asset_id)
     if not asset:
         raise ObjectMissing("Asset does not exist")
+    with content_lock(db, asset.sha256):
+        return _migrate_asset_locked(db, asset, target_profile_id, checkpoint=checkpoint, on_checkpoint=on_checkpoint)
+
+
+def _migrate_asset_locked(db, asset, target_profile_id, *, checkpoint, on_checkpoint):
     target = default_profile(db, target_profile_id)
     adapter, key = get_adapter(target), content_key(asset.sha256)
     try:
@@ -197,7 +211,7 @@ def migrate_asset(db, asset_id, target_profile_id, *, checkpoint=None, on_checkp
         Path(settings.scratch_dir).mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="migration-", dir=settings.scratch_dir) as directory:
             source = Path(directory) / "asset"
-            copy_asset_to(db, asset_id, source)
+            copy_asset_to(db, asset.id, source)
             info = adapter.put_file(source, key, asset.mime_type, checkpoint=checkpoint, on_checkpoint=on_checkpoint)
             info = adapter.verify(key, asset.sha256, asset.size, version_id=info.version_id)
     return _register_location(db, asset, target, key, info)

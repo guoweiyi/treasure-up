@@ -7,8 +7,16 @@ import artplayerPluginDanmuku, {
   type Mode,
 } from 'artplayer-plugin-danmuku';
 import { api, write, errorText, display } from '../api';
-import type { Part, Playback, Danmaku } from '../types';
-const props = defineProps<{ part: Part; poster?: string | null }>();
+import type { Part, Playback, Danmaku, MediaProperties } from '../types';
+import { createMediaAdapter } from '../player/mediaAdapter';
+import { createPlayback } from '../player/routing';
+import PlaybackOptions from './PlaybackOptions.vue';
+import { qualityLabel } from '../utils/format';
+const props = defineProps<{
+  part: Part;
+  poster?: string | null;
+  mediaProperties?: Record<string, MediaProperties>;
+}>();
 const container = ref<HTMLDivElement>(),
   error = ref(''),
   note = ref(''),
@@ -18,6 +26,18 @@ const container = ref<HTMLDivElement>(),
   subtitle = ref(''),
   playback = ref<Playback | null>(null),
   dmCount = ref<number | null>(null);
+const routeId = ref(''),
+  volumeBalance = ref(false),
+  probing = ref(false),
+  switching = ref(false);
+const playableVariants = computed(() =>
+  props.part.variants.filter((variant) => variant.kind !== 'hls'),
+);
+let playbackController = new AbortController(),
+  userVolume = 0.7,
+  expectedVolume = 0.7;
+let rejectMediaLoad: ((error: Error) => void) | null = null;
+const mediaAdapter = createMediaAdapter(handleMediaFailure);
 const fullscreenHost = ref<HTMLElement | null>(null),
   fullscreenActive = ref(false),
   settingsOpen = ref(false),
@@ -150,9 +170,70 @@ async function saveProgress() {
     progressError.value = `观看进度未保存：${errorText(e)}`;
   }
 }
+function applyVolume() {
+  if (!art) return;
+  const loudness = playback.value?.loudness;
+  const gain =
+    volumeBalance.value && loudness?.status === 'ready' && !loudness.atmos_bypass
+      ? Math.max(0, Math.min(1, loudness.gain_linear))
+      : 1;
+  expectedVolume = Math.max(0, Math.min(1, userVolume * gain));
+  art.volume = expectedVolume;
+}
+watch(volumeBalance, applyVolume);
+function handleMediaFailure(kind: 'network' | 'media', message: string) {
+  if (rejectMediaLoad) {
+    rejectMediaLoad(new Error(message));
+    return;
+  }
+  if (kind === 'media') {
+    error.value = message;
+    return;
+  }
+  if (renewing) return;
+  if (recoveries === 0) {
+    recoveries = 1;
+    void renew();
+  } else error.value = '当前节点暂时无法播放，已更新过一次地址。可手动重试或切换节点。';
+}
+function switchMedia(player: Artplayer, url: string) {
+  return new Promise<void>((resolve, reject) => {
+    const video = player.video;
+    const ready = () => finish();
+    const failed = () => finish(new Error('当前浏览器无法播放此归档版本'));
+    const cancel = (reason: Error) => finish(reason);
+    const timeout = setTimeout(
+      () => finish(new Error('播放加载超时，请重试或选择其他节点')),
+      20000,
+    );
+    function finish(reason?: Error) {
+      clearTimeout(timeout);
+      video.removeEventListener('canplay', ready);
+      video.removeEventListener('error', failed);
+      if (rejectMediaLoad === cancel) rejectMediaLoad = null;
+      if (reason) reject(reason);
+      else resolve();
+    }
+    rejectMediaLoad = cancel;
+    video.addEventListener('canplay', ready, { once: true });
+    video.addEventListener('error', failed, { once: true });
+    player.pause();
+    player.url = url;
+  });
+}
+function selectRoute(value: string) {
+  routeId.value = value;
+  recoveries = 0;
+  void renew();
+}
+function selectVariant() {
+  recoveries = 0;
+  void renew();
+}
 async function renew() {
   if (renewing || !art) return;
   renewing = true;
+  switching.value = true;
   const currentPlayer = art,
     key = request,
     id = activePartId;
@@ -160,23 +241,31 @@ async function renew() {
     position: art.currentTime,
     paused: art.video.paused,
     rate: art.playbackRate,
-    volume: art.volume,
+    volume: userVolume,
     muted: art.muted,
   };
   error.value = '';
   try {
-    const data = await write<Playback>('/playback-sessions', {
-      part_id: id,
-      variant_id: variantId.value || undefined,
-    });
+    const data = await createPlayback(
+      {
+        part_id: id,
+        variant_id: variantId.value || undefined,
+        route_id: routeId.value || undefined,
+      },
+      playbackController.signal,
+      (value) => (probing.value = value),
+      false,
+    );
     if (key !== request || currentPlayer !== art) return;
     if (typeof data.url !== 'string' || !data.url) throw new Error('服务端未返回有效播放地址');
     playback.value = data;
-    await art.switchQuality(data.url);
+    variantId.value = data.source_variant_id || data.variant_id;
+    await switchMedia(currentPlayer, data.url);
     if (key !== request || currentPlayer !== art) return;
     art.currentTime = snapshot.position;
     art.playbackRate = snapshot.rate;
-    art.volume = snapshot.volume;
+    userVolume = snapshot.volume;
+    applyVolume();
     art.muted = snapshot.muted;
     art.template.$player.classList.remove('art-error');
     art.notice.show = '';
@@ -186,6 +275,7 @@ async function renew() {
     if (key === request) error.value = `无法恢复播放：${errorText(e)}`;
   } finally {
     renewing = false;
+    switching.value = false;
   }
 }
 function syncFullscreen() {
@@ -198,6 +288,9 @@ function settingsToggled(event: Event) {
 }
 async function setup() {
   const key = ++request;
+  playbackController.abort();
+  playbackController = new AbortController();
+  rejectMediaLoad?.(new Error('播放内容已切换'));
   busy.value = true;
   error.value = '';
   note.value = '';
@@ -212,18 +305,24 @@ async function setup() {
   await nextTick();
   if (key !== request) return;
   resize?.disconnect();
+  mediaAdapter.destroy();
   art?.destroy(false);
   art = null;
   fullscreenHost.value = null;
   try {
-    const data = await write<Playback>('/playback-sessions', {
-      part_id: props.part.id,
-      variant_id: variantId.value || undefined,
-    });
+    const data = await createPlayback(
+      {
+        part_id: props.part.id,
+        variant_id: variantId.value || undefined,
+        route_id: routeId.value || undefined,
+      },
+      playbackController.signal,
+      (value) => (probing.value = value),
+    );
     if (key !== request) return;
     if (typeof data.url !== 'string' || !data.url) throw new Error('此分 P 尚无有效的播放地址');
     playback.value = data;
-    variantId.value = data.variant_id || '';
+    variantId.value = data.source_variant_id || data.variant_id || '';
     let danmaku: Danmaku[] = [];
     try {
       danmaku = await api<Danmaku[]>(`/parts/${props.part.id}/danmaku`);
@@ -256,10 +355,16 @@ async function setup() {
     art = new Artplayer({
       container: container.value,
       url: data.url,
+      type: 'treasure',
+      customType: {
+        treasure: (video, url) => {
+          void mediaAdapter.attach(video, url, playback.value?.protocol);
+        },
+      },
       poster: props.poster || '',
-      theme: '#3e665a',
+      theme: '#00a1d6',
       lang: 'zh-cn',
-      volume: 0.7,
+      volume: userVolume,
       autoplay: false,
       autoSize: false,
       fullscreen: true,
@@ -282,6 +387,12 @@ async function setup() {
       ],
     });
     fullscreenHost.value = art.template.$player;
+    applyVolume();
+    art.on('video:volumechange', () => {
+      if (!art || Math.abs(art.video.volume - expectedVolume) < 0.0001) return;
+      userVolume = art.video.volume;
+      applyVolume();
+    });
     syncPlayerStyles();
     resize?.observe(art.template.$player);
     art.controls.add({
@@ -345,14 +456,12 @@ async function setup() {
         void saveProgress();
       }
     });
-    art.on('video:error', () => {
-      if (renewing) return;
-      if (recoveries === 0) {
-        recoveries = 1;
-        void renew();
-      } else
-        error.value = '当前媒体无法播放。已尝试更新播放地址，可以手动重试或选择其他已归档版本。';
-    });
+    art.on('video:error', () =>
+      handleMediaFailure(
+        art?.video.error?.code === 3 ? 'media' : 'network',
+        '当前浏览器无法解码此归档版本，可手动选择已保存的兼容版本。',
+      ),
+    );
   } catch (e) {
     if (key === request) error.value = errorText(e);
   } finally {
@@ -372,6 +481,7 @@ watch(
   () => props.part.id,
   () => {
     variantId.value = '';
+    routeId.value = '';
     void setup();
   },
 );
@@ -383,6 +493,9 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   request++;
+  playbackController.abort();
+  rejectMediaLoad?.(new Error('播放器已关闭'));
+  mediaAdapter.destroy();
   void saveProgress();
   resize?.disconnect();
   art?.destroy(false);
@@ -392,7 +505,9 @@ onBeforeUnmount(() => {
 <template>
   <section class="archive-player">
     <div ref="container" class="player-stage"></div>
-    <div v-if="busy" class="player-loading" role="status">正在准备播放…</div>
+    <div v-if="busy" class="player-loading" role="status">
+      {{ probing ? '正在检测可用播放节点…' : '正在准备播放…' }}
+    </div>
     <div v-if="error" class="player-error" role="alert">
       <span>{{ error }}</span
       ><button @click="art ? renew() : setup()">重试播放</button>
@@ -403,12 +518,12 @@ onBeforeUnmount(() => {
         <span v-if="dmCount !== null" class="muted">{{ dmCount }} 条</span></label
       >
       <div class="player-selects">
-        <label v-if="part.variants.length > 1"
+        <label v-if="playableVariants.length > 1"
           >画质
-          <select v-model="variantId" @change="setup">
-            <option v-for="variant in part.variants" :key="variant.id" :value="variant.id">
-              {{ variant.height ? `${variant.height}P` : variant.quality || variant.kind }} ·
-              {{ variant.video_codec || '视频' }}
+          <select v-model="variantId" :disabled="busy || switching" @change="selectVariant">
+            <option v-for="variant in playableVariants" :key="variant.id" :value="variant.id">
+              {{ qualityLabel(variant) }} · {{ variant.video_codec || '视频' }} ·
+              {{ variant.kind === 'playback' ? '兼容副本' : '原档' }}
             </option>
           </select></label
         ><label v-if="playback?.subtitles?.length"
@@ -422,6 +537,14 @@ onBeforeUnmount(() => {
         >
       </div>
     </div>
+    <PlaybackOptions
+      :playback="playback"
+      :route-id="routeId"
+      :balance="volumeBalance"
+      :busy="busy || probing || switching"
+      @route="selectRoute"
+      @balance="volumeBalance = $event"
+    />
     <p v-if="note" class="inline-notice">{{ note }}</p>
     <p v-if="progressError" class="inline-notice" role="status">{{ progressError }}</p>
     <Teleport :to="fullscreenHost || 'body'" :disabled="!fullscreenActive"

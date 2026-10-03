@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { api, query, errorText } from '../api';
+import { api, query, errorText, session } from '../api';
 import type { Creator, Video, Page } from '../types';
 import VideoCard from '../components/VideoCard.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -15,6 +15,7 @@ const route = useRoute(),
   total = ref(0),
   error = ref(''),
   busy = ref(false);
+const tab = ref<'videos' | 'about'>('videos');
 let seq = 0,
   profileSeq = 0;
 async function search(p = 1) {
@@ -57,8 +58,7 @@ watch(
 );
 </script>
 <template>
-  <main class="content-shell">
-    <RouterLink class="back-link" to="/creators">← UP 主目录</RouterLink>
+  <main class="content-shell creator-space">
     <header v-if="creator" class="creator-profile">
       <img v-if="creator.avatar_url" :src="creator.avatar_url" alt="" class="avatar profile" /><span
         v-else
@@ -78,32 +78,66 @@ watch(
           <span v-for="tag in creator.tags" :key="tag">{{ tag }}</span>
         </div>
       </div>
-    </header>
-    <div class="section-heading">
-      <h2>
-        已保存的视频 <span class="muted">{{ total }}</span>
-      </h2>
-      <form class="search-form compact" @submit.prevent="search()">
-        <input v-model="q" placeholder="在这位 UP 的收藏中搜索" aria-label="UP 视频搜索" /><select
-          v-model="sort"
-          aria-label="排序"
-          @change="search()"
+      <div class="profile-actions">
+        <span class="profile-saved"
+          ><strong>{{ creator.saved_count ?? 0 }}</strong
+          >已收藏作品</span
+        ><RouterLink
+          v-if="['admin', 'editor'].includes(session.user?.role || '')"
+          :to="{ path: '/admin/creators', query: { edit: creator.id } }"
+          class="outline-link"
+          >编辑资料</RouterLink
         >
-          <option value="newest">最近保存</option>
-          <option value="oldest">最早保存</option>
-          <option value="title">按标题</option></select
-        ><button>搜索</button>
-      </form>
+      </div>
+    </header>
+    <div class="creator-tabs content-tabs">
+      <button :class="{ active: tab === 'videos' }" @click="tab = 'videos'">
+        作品 <span>{{ creator?.saved_count ?? 0 }}</span></button
+      ><button :class="{ active: tab === 'about' }" @click="tab = 'about'">关于 UP 主</button>
     </div>
-    <EmptyState v-if="error" title="内容暂时无法读取" :text="error" error />
-    <div v-else-if="busy" class="loading-block">正在加载…</div>
-    <div v-else-if="items.length" class="video-grid">
-      <VideoCard v-for="video in items" :key="video.id" :video="video" />
-    </div>
-    <EmptyState v-else title="没有匹配的已保存视频" text="这里仅展示你已归档的作品。" /><Pagination
-      :page="page"
-      :total="total"
-      @change="search"
-    />
+    <section v-if="tab === 'about' && creator" class="creator-about">
+      <h2>个人简介</h2>
+      <p class="preserve-lines">{{ creator.description || '暂无简介' }}</p>
+      <dl>
+        <dt>UID</dt>
+        <dd>{{ creator.uid || '未收录' }}</dd>
+        <dt v-if="creator.source_name">平台昵称</dt>
+        <dd v-if="creator.source_name">{{ creator.source_name }}</dd>
+      </dl>
+      <template v-if="creator.notes"
+        ><h2>收藏笔记</h2>
+        <p class="preserve-lines">{{ creator.notes }}</p></template
+      >
+    </section>
+    <template v-else
+      ><div class="section-heading">
+        <h2>
+          TA 的已收藏作品 <span class="muted">{{ total }}</span>
+        </h2>
+        <form class="search-form compact" @submit.prevent="search()">
+          <input v-model="q" placeholder="在这位 UP 的收藏中搜索" aria-label="UP 视频搜索" /><select
+            v-model="sort"
+            aria-label="排序"
+            @change="search()"
+          >
+            <option value="newest">最近保存</option>
+            <option value="oldest">最早保存</option>
+            <option value="title">按标题</option></select
+          ><button>搜索</button>
+        </form>
+      </div>
+      <EmptyState v-if="error" title="内容暂时无法读取" :text="error" error />
+      <div v-else-if="busy" class="loading-block">正在加载…</div>
+      <div v-else-if="items.length" class="video-grid">
+        <VideoCard v-for="video in items" :key="video.id" :video="video" />
+      </div>
+      <EmptyState
+        v-else
+        title="没有匹配的已保存视频"
+        text="这里仅展示你已归档的作品。" /><Pagination
+        :page="page"
+        :total="total"
+        @change="search"
+    /></template>
   </main>
 </template>

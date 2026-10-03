@@ -55,6 +55,15 @@ class IngestPolicy(Input):
     quality: Literal["best", "4320p", "8k", "2160p", "4k", "1440p", "1080p", "720p", "480p", "360p"] = "best"
     create_compatible_copy: bool = True
     prefer_h264: bool = False
+    prefer_dolby_vision: bool = True
+    prefer_dolby_atmos: bool = True
+    request_interval_seconds: float = Field(default=3, ge=1, le=120)
+    video_interval_seconds: float = Field(default=60, ge=10, le=3600)
+    interval_jitter_seconds: float = Field(default=10, ge=0, le=300)
+    risk_cooldown_seconds: int = Field(default=900, ge=60, le=86400)
+    download_rate_bytes: int | None = Field(default=None, ge=10000, le=1_000_000_000)
+    fragment_concurrency: int = Field(default=1, ge=1, le=3)
+    refresh_danmaku: bool = False
     request_budget: int = Field(default=100, ge=1, le=10000)
     download_media: bool = True
     fetch_comments: bool = True
@@ -83,7 +92,7 @@ class SourceUpdate(Input):
 
 
 class JobInput(Input):
-    kind: Literal["scan_collection", "archive_video", "refresh_comments", "verify_account"]
+    kind: Literal["scan_collection", "archive_video", "refresh_comments", "refresh_stats", "verify_account"]
     target_id: str = Field(min_length=1, max_length=200)
     account_id: str | None = None
     policy: IngestPolicy = Field(default_factory=IngestPolicy)
@@ -106,6 +115,32 @@ class MigrationInput(Input):
 class PlaybackInput(Input):
     part_id: str
     variant_id: str | None = None
+    route_id: str | None = None
+    protocol: Literal["auto", "hls", "file"] = "auto"
+
+
+class PlaybackObservationInput(Input):
+    route_id: str
+    latency_ms: float = Field(ge=0, le=120000, allow_inf_nan=False)
+    elapsed_ms: float = Field(gt=0, le=120000, allow_inf_nan=False)
+    bytes_read: int = Field(ge=0, le=131072)
+    succeeded: bool
+
+
+class VideoSyncInput(Input):
+    target_profile_id: str
+
+
+class PurgeLocationInput(Input):
+    confirm: Literal["DELETE"]
+
+
+class PlaybackSettings(Input):
+    package_long_videos: bool = True
+    min_duration_seconds: int = Field(default=300, ge=0, le=86400)
+    segment_seconds: int = Field(default=6, ge=2, le=20)
+    analyze_loudness: bool = True
+    probe_bytes: int = Field(default=65536, ge=16384, le=131072)
 
 
 class ProgressInput(Input):
@@ -126,7 +161,16 @@ class BackupSettings(Input):
     enabled: bool = False
 
 
+class StatisticsSettings(Input):
+    enabled: bool = False
+    account_id: str | None = None
+    interval_hours: int = Field(default=6, ge=1, le=720)
+    refresh_danmaku: bool = False
+
+
 class SettingsInput(Input):
     display: DisplaySettings | None = None
     ingest: IngestPolicy | None = None
     backup: BackupSettings | None = None
+    statistics: StatisticsSettings | None = None
+    playback: PlaybackSettings | None = None

@@ -44,7 +44,7 @@ watch(() => route.fullPath, load, { immediate: true });
     <div class="page-heading">
       <div>
         <h1>UP 主</h1>
-        <p class="muted">从创作者，找到值得重看的内容</p>
+        <p class="muted">已收录 {{ total }} 位 UP 主</p>
       </div>
       <form class="search-form" @submit.prevent="search()">
         <input
