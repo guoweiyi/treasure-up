@@ -1,0 +1,23 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Create isolated deployment configuration
+        run: python3 deploy/bootstrap.py
+      - name: Build and start the application
+        run: docker compose up -d --build
+      - name: Unit and PostgreSQL recovery tests
+        run: docker compose exec -T -e TREASURE_RUN_POSTGRES_TESTS=1 backup-worker python -m pytest tests -q
+      - name: Verify web readiness
+        run: curl --fail --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8788/health
+      - name: Stop services
+        if: always()
+        run: docker compose down

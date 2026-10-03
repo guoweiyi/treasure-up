@@ -1,0 +1,128 @@
+name: treasure-up
+
+x-backend: &backend
+  image: treasure-up-backend:0.1.0
+  restart: unless-stopped
+  environment: &environment
+    TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}@postgres:5432/treasure
+    TREASURE_REDIS_URL: redis://redis:6379/0
+    TREASURE_MEDIA_ROOT: /data/media
+    TREASURE_SCRATCH_DIR: /data/scratch
+    TREASURE_DATA_DIR: /data
+    TREASURE_SECRET_KEY: ${TREASURE_SECRET_KEY:?Set encryption key}
+    TREASURE_COOKIE_SECURE: ${TREASURE_COOKIE_SECURE:-true}
+    TREASURE_ALLOWED_HOSTS: ${TREASURE_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    TREASURE_X_ACCEL_PREFIX: /protected-media
+  volumes:
+    - media:/data/media
+    - scratch:/data/scratch
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  stop_grace_period: 60s
+
+services:
+  postgres:
+    image: postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: treasure
+      POSTGRES_DB: treasure
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U treasure -d treasure"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    restart: unless-stopped
+    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
+    volumes:
+      - queue:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  init:
+    <<: *backend
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    restart: "no"
+    command: [python, -m, app.cli, init]
+    environment:
+      <<: *environment
+      TREASURE_ADMIN_USERNAME: ${TREASURE_ADMIN_USERNAME:-admin}
+      TREASURE_ADMIN_PASSWORD: ${TREASURE_ADMIN_PASSWORD:?Set initial admin password}
+  api:
+    <<: *backend
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - media:/data/media:ro
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  scheduler:
+    <<: *backend
+    command: [python, -m, app.scheduler]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  collector:
+    <<: *backend
+    command: [celery, -A, app.worker:celery, worker, -Q, collector, --concurrency=1, --loglevel=WARNING]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  media-worker:
+    <<: *backend
+    command: [celery, -A, app.worker:celery, worker, -Q, media, --concurrency=1, --loglevel=WARNING]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  backup-worker:
+    <<: *backend
+    command: [celery, -A, app.worker:celery, worker, -Q, backup, --concurrency=1, --loglevel=WARNING]
+    environment:
+      <<: *environment
+      TREASURE_BACKUP_KEY: ${TREASURE_BACKUP_KEY:?Set independent backup key}
+    volumes:
+      - media:/data/media:ro
+      - scratch:/data/scratch
+      - backup:/backups
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  web:
+    image: treasure-up-web:0.1.0
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TREASURE_PORT:-8788}:80"
+    volumes:
+      - media:/data/media:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  database:
+  media:
+  scratch:
+  queue:
+  backup:

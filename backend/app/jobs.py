@@ -1,0 +1,287 @@
+"""Database task ledger. Redis messages are disposable delivery hints."""
+import threading
+from datetime import timedelta
+from copy import deepcopy
+from uuid import uuid4
+
+from sqlalchemy import event, func, or_, select, update
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.db import SessionLocal
+from app.models import Job, JobAttempt, OutboxEvent, Setting, SourceSubscription, utcnow
+
+
+class LeaseLost(RuntimeError):
+    """The worker must stop without publishing any more database mutations."""
+
+
+def _owned(job_id, owner, now=None):
+    return (Job.id == job_id, Job.lease_owner == owner, Job.status == "running",
+            Job.lease_expires_at > (now if now is not None else utcnow()))
+
+
+def _lease_clock(db, fallback=None):
+    # CURRENT_TIMESTAMP is the transaction start in PostgreSQL; use the live clock
+    # so a long-running transaction cannot commit against an already expired lease.
+    return func.clock_timestamp() if db.get_bind().dialect.name == "postgresql" else (fallback or utcnow())
+
+
+def ensure_active(db, job_id, owner):
+    """Fresh ownership check; identity-map state is not lease evidence."""
+    if not owner:
+        raise LeaseLost("Task lease is no longer owned")
+    with db.no_autoflush:
+        row = db.execute(select(Job.checkpoint).where(*_owned(job_id, owner, _lease_clock(db)))).first()
+    if row is None:
+        raise LeaseLost("Task lease expired, changed, or was cancelled")
+    return deepcopy(row[0] or {})
+
+
+def fence_transaction(db, job_id, owner, *, checkpoint=None):
+    """Acquire a job-row lock with a CAS immediately before transaction commit.
+
+    Holding this lock over network work would block the independent heartbeat, so
+    it is intentionally acquired only at the commit/checkpoint boundary.
+    """
+    if not owner:
+        raise LeaseLost("Task lease is no longer owned")
+    values = {"lease_expires_at": Job.lease_expires_at}
+    if checkpoint is not None:
+        values["checkpoint"] = deepcopy(checkpoint)
+    with db.no_autoflush:
+        result = db.execute(update(Job).where(*_owned(job_id, owner, _lease_clock(db))).values(**values)
+                            .execution_options(synchronize_session=False))
+    if result.rowcount != 1:
+        raise LeaseLost("Task lease expired, changed, or was cancelled")
+
+
+def save_checkpoint(db, job_id, owner, checkpoint):
+    try:
+        fence_transaction(db, job_id, owner, checkpoint=checkpoint)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def renew_lease(db, job_id, owner):
+    now = utcnow()
+    changed = db.execute(update(Job).where(*_owned(job_id, owner, _lease_clock(db, now)))
+                         .values(lease_expires_at=now + timedelta(seconds=settings.lease_seconds))
+                         .execution_options(synchronize_session=False))
+    db.commit()
+    return changed.rowcount == 1
+
+
+def enqueue(db: Session, kind: str, target_id: str, account_id=None, policy=None, dedupe_key=None, *, frozen_policy=False) -> Job:
+    key = dedupe_key or f"{kind}:{uuid4()}"
+    existing = db.scalar(select(Job).where(Job.dedupe_key == key))
+    if existing:
+        return existing
+    frozen = deepcopy(policy or {})
+    if kind in {"scan_collection", "archive_video", "refresh_comments", "verify_account"} and not frozen_policy:
+        from app.schemas import IngestPolicy
+        system = db.get(Setting, "ingest")
+        frozen = {**IngestPolicy().model_dump(), **(system.value or {} if system else {}), **frozen}
+        # Validate public fields, while preserving trusted internal task options.
+        public = IngestPolicy.model_validate({key: value for key, value in frozen.items() if key in IngestPolicy.model_fields})
+        frozen.update(public.model_dump())
+    job = Job(kind=kind, target_id=target_id, account_id=account_id, policy=frozen, dedupe_key=key)
+    db.add(job)
+    db.flush()
+    db.add(OutboxEvent(job_id=job.id))
+    db.flush()
+    return job
+
+
+def claim(db: Session, job_id: str, owner: str):
+    now = utcnow()
+    result = db.execute(update(Job).where(Job.id == job_id, Job.status == "queued", Job.available_at <= now)
+                        .values(status="running", lease_owner=owner, lease_expires_at=now + timedelta(seconds=settings.lease_seconds),
+                                started_at=now, attempts=Job.attempts + 1, error=None)
+                        .execution_options(synchronize_session=False))
+    db.commit()
+    db.expire_all()
+    return db.get(Job, job_id) if result.rowcount == 1 else None
+
+
+def heartbeat(job_id, owner, stop):
+    while not stop.wait(max(5, settings.lease_seconds // 3)):
+        try:
+            with SessionLocal() as db:
+                if not renew_lease(db, job_id, owner):
+                    return
+        except Exception:
+            # A failed heartbeat never claims success; expired leases are recovered by the scheduler.
+            pass
+
+
+def run_job_id(job_id: str):
+    owner = str(uuid4())
+    with SessionLocal() as db:
+        job = claim(db, job_id, owner)
+        if job is None:
+            return {"claimed": False}
+        attempt = JobAttempt(job_id=job.id)
+        db.add(attempt)
+        db.commit()
+        attempt_id = attempt.id
+        stop = threading.Event()
+        pulse = threading.Thread(target=heartbeat, args=(job.id, owner, stop), daemon=True)
+        pulse.start()
+        outcome, result, error = "succeeded", {}, None
+        job_id, attempt_count = job.id, job.attempts
+
+        def guard_commit(session):
+            # Releasing a savepoint does not publish the outer transaction. Locking
+            # here would keep the job row locked over later network operations and
+            # prevent the separate heartbeat from renewing the lease.
+            if not session.in_nested_transaction():
+                fence_transaction(session, job_id, owner)
+
+        # Covers commits made inside ingestion and backup modules as well as jobs.py.
+        event.listen(db, "before_commit", guard_commit)
+        try:
+            if job.kind == "backup":
+                from app.backup import create_backup
+                backup = create_backup(db, check_active=lambda: ensure_active(db, job_id, owner))
+                result = {"backup_id": backup.id, "status": backup.status}
+                if backup.status != "complete":
+                    raise RuntimeError("备份未完成，请检查备份记录")
+            elif job.kind == "migrate_storage":
+                result = migrate_job(db, job, owner=owner)
+            elif job.kind == "probe_storage":
+                from app.storage.service import probe_profile
+                ensure_active(db, job_id, owner)
+                result = probe_profile(db, job.target_id)
+            else:
+                from app.ingest.runner import run_job
+                result = run_job(db, job) or {}
+            if result.get("continuation"):
+                outcome = "queued"
+            # Do not leave uncommitted module writes to an unfenced session close.
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            # Only explicitly sanitized domain messages are shown to users.
+            safe = exc.__class__.__module__.startswith(("app.ingest", "app.storage", "app.backup"))
+            error = str(exc)[:1000] if safe else f"任务未完成（{type(exc).__name__}），请检查配置与运行记录"
+            blocked = getattr(exc, "blocked", False)
+            retryable = getattr(exc, "retryable", False)
+            outcome = "lease_lost" if isinstance(exc, LeaseLost) else "blocked" if blocked else "queued" if retryable and attempt_count < job.max_attempts else "failed"
+            if exc.__class__.__name__ == "PartialCaptureError" and outcome == "failed":
+                outcome = "partial"
+        finally:
+            event.remove(db, "before_commit", guard_commit)
+            stop.set()
+            pulse.join(timeout=2)
+        with SessionLocal() as final:
+            record = final.get(JobAttempt, attempt_id)
+            now = utcnow()
+            values = {"status": outcome, "error": error, "finished_at": None if outcome == "queued" else now,
+                      "lease_owner": None, "lease_expires_at": None}
+            if result:
+                values["result"] = result
+            if outcome == "queued":
+                values["available_at"] = now + timedelta(seconds=min(900, 15 * max(1, attempt_count)) if error else 2)
+                if not error:
+                    # A successful budget slice is not a failed retry attempt.
+                    values["attempts"] = 0
+            changed = None
+            if outcome != "lease_lost":
+                changed = final.execute(update(Job).where(*_owned(job_id, owner, _lease_clock(final, now))).values(**values)
+                                        .execution_options(synchronize_session=False))
+            if changed is not None and changed.rowcount == 1:
+                record.status = outcome
+                if outcome == "queued":
+                    final.add(OutboxEvent(job_id=job_id))
+            else:
+                # A cancel/pause retains its requested state; a newer owner is never touched.
+                stopped = final.execute(update(Job).where(Job.id == job_id, Job.lease_owner == owner,
+                                        Job.status.in_(["paused", "cancelled"]))
+                                        .values(lease_owner=None, lease_expires_at=None)
+                                        .execution_options(synchronize_session=False))
+                current_status = final.scalar(select(Job.status).where(Job.id == job_id))
+                record.status = current_status if stopped.rowcount == 1 else "lease_lost"
+            record.error, record.finished_at = error, utcnow()
+            final_status = record.status
+            final.commit()
+        return {"status": final_status, "result": result if final_status not in {"lease_lost", "cancelled", "paused"} else {}}
+
+
+def migrate_job(db, job, *, owner=None):
+    from app.models import AssetLocation
+    from app.storage.service import migrate_asset
+    owner, job_id = owner or job.lease_owner, job.id
+    checkpoint = ensure_active(db, job_id, owner)
+    if "asset_ids" in checkpoint:
+        ids = checkpoint["asset_ids"]
+    else:
+        requested = job.policy.get("asset_ids")
+        stmt = select(AssetLocation.asset_id).where(AssetLocation.storage_profile_id == job.target_id,
+                                                   AssetLocation.state == "ready").distinct().order_by(AssetLocation.asset_id)
+        if requested is not None:
+            stmt = stmt.where(AssetLocation.asset_id.in_(requested))
+        ids = list(db.scalars(stmt))
+        checkpoint = {**checkpoint, "asset_ids": ids, "total": len(ids)}
+        save_checkpoint(db, job_id, owner, checkpoint)
+    done = set(checkpoint.get("completed", []))
+    for asset_id in ids:
+        checkpoint = ensure_active(db, job_id, owner)
+        if asset_id in done:
+            continue
+        def save_upload(state):
+            checkpoints = ensure_active(db, job_id, owner)
+            uploads = dict(checkpoints.get("uploads", {}))
+            uploads[asset_id] = state
+            checkpoints["uploads"] = uploads
+            save_checkpoint(db, job_id, owner, checkpoints)
+        migrate_asset(db, asset_id, job.policy["target_profile_id"],
+                      checkpoint=checkpoint.get("uploads", {}).get(asset_id), on_checkpoint=save_upload)
+        done.add(asset_id)
+        checkpoint = ensure_active(db, job_id, owner)
+        uploads = dict(checkpoint.get("uploads", {}))
+        uploads.pop(asset_id, None)
+        save_checkpoint(db, job_id, owner, {**checkpoint, "uploads": uploads, "completed": sorted(done), "total": len(ids)})
+    return {"completed": len(done), "total": len(ids), "old_locations_retained": True}
+
+
+def schedule_due(db):
+    now = utcnow()
+    for source in db.scalars(select(SourceSubscription).where(SourceSubscription.enabled.is_(True),
+                            or_(SourceSubscription.next_run_at.is_(None), SourceSubscription.next_run_at <= now))
+                            .with_for_update(skip_locked=True)):
+        active = db.scalar(select(Job.id).where(Job.kind == "scan_collection", Job.target_id == source.collection_id,
+                           Job.status.in_(["queued", "running", "paused", "blocked"])).limit(1))
+        if not active:
+            enqueue(db, "scan_collection", source.collection_id, source.account_id, source.policy)
+        source.next_run_at = now + timedelta(minutes=source.interval_minutes)
+    db.commit()
+
+
+def recover_and_dispatch(db, send):
+    now = utcnow()
+    expired = db.scalars(select(Job).where(Job.status == "running", or_(Job.lease_expires_at <= now,
+                         Job.lease_expires_at.is_(None))).with_for_update(skip_locked=True)).all()
+    for job in expired:
+        job.status = "queued" if job.attempts < job.max_attempts else "failed"
+        job.error = "执行进程租约到期，已保存检查点"
+        job.lease_owner = None
+        job.lease_expires_at = None
+        if job.status == "queued":
+            db.add(OutboxEvent(job_id=job.id))
+    db.commit()
+    # Republish queued work even after Redis was emptied. A conditional DB claim rejects duplicates.
+    last_publication = select(func.max(OutboxEvent.published_at)).where(OutboxEvent.job_id == Job.id).correlate(Job).scalar_subquery()
+    eligible = select(Job).where(Job.status == "queued", Job.available_at <= now,
+                                or_(last_publication.is_(None), last_publication <= now - timedelta(seconds=60)))
+    for job in db.scalars(eligible.order_by(Job.available_at, Job.created_at, Job.id).limit(100)):
+        send(job.id, job.kind)
+        pending = db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job.id, OutboxEvent.published_at.is_(None))).all()
+        if not pending:
+            pending = [OutboxEvent(job_id=job.id)]
+            db.add_all(pending)
+        for event in pending:
+            event.published_at = now
+        db.commit()
