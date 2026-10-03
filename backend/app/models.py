@@ -33,12 +33,47 @@ class UserSession(Entity, Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     csrf_token: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    passkey_credential_id: Mapped[str | None] = mapped_column(ForeignKey("passkey_credentials.id", ondelete="SET NULL", use_alter=True, name="fk_sessions_passkey_credential"), index=True)
 
 
 class LoginAttempt(Entity, Base):
     __tablename__ = "login_attempts"
     client_hash: Mapped[str] = mapped_column(String(64), index=True)
     succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class PasskeyCredential(Entity, Base):
+    __tablename__ = "passkey_credentials"
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
+    credential_id: Mapped[str] = mapped_column(Text, unique=True)
+    public_key: Mapped[str] = mapped_column(Text)
+    sign_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    name: Mapped[str] = mapped_column(String(100), default="通行密钥")
+    transports: Mapped[list] = mapped_column(JSON, default=list)
+    aaguid: Mapped[str | None] = mapped_column(String(36))
+    device_type: Mapped[str] = mapped_column(String(32), default="single_device")
+    backed_up: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PasskeyChallenge(Entity, Base):
+    __tablename__ = "passkey_challenges"
+    challenge: Mapped[str] = mapped_column(String(128))
+    purpose: Mapped[str] = mapped_column(String(20))
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"))
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"))
+    binding_hash: Mapped[str] = mapped_column(String(64))
+    origin: Mapped[str] = mapped_column(String(500))
+    rp_id: Mapped[str] = mapped_column(String(253))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PasskeyAttempt(Entity, Base):
+    __tablename__ = "passkey_attempts"
+    client_hash: Mapped[str] = mapped_column(String(64), index=True)
+    purpose: Mapped[str] = mapped_column(String(20))
 
 
 class PlatformUser(Entity, Base):
@@ -121,6 +156,7 @@ class Collection(Entity, Base):
     owner_uid: Mapped[str | None] = mapped_column(String(32))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    monitor_state: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
 
 
 class CollectionItem(Entity, Base):
@@ -132,6 +168,7 @@ class CollectionItem(Entity, Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     source_state: Mapped[str] = mapped_column(String(40), default="available")
     seen_run_id: Mapped[str | None] = mapped_column(String(36))
+    observation: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
 
 
 class Asset(Entity, Base):

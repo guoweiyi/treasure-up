@@ -46,10 +46,11 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def create_session(db: Session, user: User):
+def create_session(db: Session, user: User, *, passkey_credential_id=None):
     token = secrets.token_urlsafe(48)
     session = UserSession(user_id=user.id, token_hash=hashlib.sha256(token.encode()).hexdigest(),
-                          csrf_token=secrets.token_urlsafe(32), expires_at=utcnow() + timedelta(hours=settings.session_hours))
+                          csrf_token=secrets.token_urlsafe(32), expires_at=utcnow() + timedelta(hours=settings.session_hours),
+                          passkey_credential_id=passkey_credential_id)
     db.add(session)
     db.flush()
     return session, token

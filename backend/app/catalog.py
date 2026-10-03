@@ -2,7 +2,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (Asset, CaptureRun, Collection, CollectionItem, Comment, CommentAsset, Creator,
-                        Job, MediaVariant, PlatformUser, UserSnapshot, Video, VideoAnnotation,
+                        Job, MediaVariant, PlatformUser, SourceSubscription, UserSnapshot, Video, VideoAnnotation,
                         VideoCreator, VideoPart, VideoStatSnapshot)
 
 
@@ -99,8 +99,11 @@ def comment_view(db, comment: Comment):
 
 
 def collection_view(db, collection):
+    subscription = db.scalar(select(SourceSubscription).where(SourceSubscription.collection_id == collection.id))
     return {"id": collection.id, "title": collection.title, "kind": collection.kind,
-            "source_id": collection.source_id, "enabled": collection.enabled,
+            "source_id": collection.source_id, "enabled": subscription.enabled if subscription else collection.enabled,
+            "subscribed": subscription is not None, "next_run_at": subscription.next_run_at if subscription else None,
+            "monitor": collection.monitor_state or {}, "last_scan_at": collection.last_scan_at,
             "saved_count": db.scalar(select(func.count()).select_from(CollectionItem)
                                      .where(CollectionItem.collection_id == collection.id, CollectionItem.video_id.is_not(None)))}
 

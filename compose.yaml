@@ -1,7 +1,7 @@
 name: treasure-up
 
 x-backend: &backend
-  image: treasure-up-backend:0.2.0
+  image: treasure-up-backend:0.3.0
   restart: unless-stopped
   environment: &environment
     TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}@postgres:5432/treasure
@@ -13,6 +13,10 @@ x-backend: &backend
     TREASURE_COOKIE_SECURE: ${TREASURE_COOKIE_SECURE:-true}
     TREASURE_ALLOWED_HOSTS: ${TREASURE_ALLOWED_HOSTS:-localhost,127.0.0.1}
     TREASURE_X_ACCEL_PREFIX: /protected-media
+    TREASURE_PASSKEY_RP_ID: ${TREASURE_PASSKEY_RP_ID:-localhost}
+    TREASURE_PASSKEY_ORIGIN: ${TREASURE_PASSKEY_ORIGIN:-http://localhost:8788}
+    TREASURE_PASSKEY_RP_NAME: ${TREASURE_PASSKEY_RP_NAME:-Treasure Up}
+    TREASURE_PASSKEYS_ENABLED: ${TREASURE_PASSKEYS_ENABLED:-true}
   volumes:
     - media:/data/media
     - scratch:/data/scratch
@@ -107,7 +111,7 @@ services:
       init:
         condition: service_completed_successfully
   web:
-    image: treasure-up-web:0.2.0
+    image: treasure-up-web:0.3.0
     build:
       context: .
       dockerfile: deploy/Dockerfile.web

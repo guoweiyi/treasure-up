@@ -1,8 +1,9 @@
 import json
+from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -42,6 +43,52 @@ class FakeClient:
     def __init__(self, *args, **kwargs): pass
     def close(self): pass
     def nav(self): return {"isLogin": True, "mid": "123", "vip": {"status": 1}}
+
+
+def test_account_rotation_is_read_after_acquiring_account_lock(db, monkeypatch):
+    job = setup(db, "verify_account", "unused")
+    account = db.get(SourceAccount, job.account_id)
+    observed = []
+
+    @contextmanager
+    def rotate_before_lock(_db, key):
+        assert key == "account:" + account.id
+        # Simulate another session's completed rotation while this job waited;
+        # leave the ORM identity map stale, as it is in a real concurrent job.
+        db.execute(update(SourceAccount).where(SourceAccount.id == account.id)
+                   .values(secret_encrypted="rotated-ciphertext")
+                   .execution_options(synchronize_session=False))
+        db.commit()
+        observed.append("locked")
+        yield
+
+    def decrypt(value):
+        assert observed == ["locked"]
+        observed.append(value)
+        return "rotated-test-cookie"
+
+    class Source(FakeClient):
+        def __init__(self, secret, **kwargs):
+            assert secret == "rotated-test-cookie"
+        def close(self):
+            observed.append("closed")
+
+    monkeypatch.setattr(runner, "_lock", rotate_before_lock)
+    monkeypatch.setattr(runner, "decrypt_secret", decrypt)
+    monkeypatch.setattr(runner, "BiliClient", Source)
+    assert runner.run_job(db, job)["logged_in"] is True
+    assert observed == ["locked", "rotated-ciphertext", "closed"]
+
+
+def test_decryption_failure_before_client_creation_keeps_safe_error(db, monkeypatch):
+    job = setup(db, "verify_account", "unused")
+    def broken_decrypt(_value):
+        raise ValueError("sensitive internal detail")
+    monkeypatch.setattr(runner, "decrypt_secret", broken_decrypt)
+    with pytest.raises(IngestError, match="账号凭据无法解密") as caught:
+        runner.run_job(db, job)
+    assert caught.value.code == "invalid_cookie"
+    assert "sensitive" not in str(caught.value)
 
 
 def comment(identity, *, root="0", parent="0", replies=0, member=True):
@@ -109,6 +156,8 @@ def test_collection_checkpoint_does_not_remove_unseen_until_terminal(db, monkeyp
     job = setup(db, "scan_collection", collection.id, {"archive": False, "request_budget": 1})
     assert runner.run_job(db, job)["continuation"] is True
     assert old.source_state == "available"
+    assert runner.run_job(db, job)["continuation"] is True
+    assert old.source_state == "available"  # Terminal page alone is not a consistency check.
     assert runner.run_job(db, job)["continuation"] is False
     assert old.source_state == "not_observed"
     failed = db.scalar(select(CollectionItem).where(CollectionItem.source_resource_id == "2:999"))

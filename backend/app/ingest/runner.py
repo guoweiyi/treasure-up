@@ -235,78 +235,39 @@ def _images(ctx):
     return True
 
 
+def _capture_policy(policy):
+    defaults = {"quality": "best", "media": True, "comments": True, "danmaku": True, "subtitles": True,
+                "auto_subtitles": True, "create_compatible_copy": True, "prefer_h264": False,
+                "prefer_dolby_vision": True, "prefer_dolby_atmos": True}
+    return {key: policy.get(key, value) for key, value in defaults.items()}
+
+
 def _enqueue_archive(ctx, video):
     # Cross-folder tasks share the video lock and media demand key; an active
     # archive can serve both collections without another full ingestion task.
-    active = ctx.db.scalar(select(Job.id).where(Job.kind == "archive_video", Job.target_id == video.id, Job.status.in_(["queued", "running"])))
+    if video.capture_status == "complete" and (video.metadata_json or {}).get("capture_policy") == _capture_policy(ctx.policy):
+        return "reused"
+    active = ctx.db.scalar(select(Job.id).where(Job.kind == "archive_video", Job.target_id == video.id,
+                          Job.status.in_(["queued", "running", "paused", "blocked"])))
     if active:
-        return
+        return "active"
+    # Exhausted or cancelled work needs an explicit retry; a recurring source
+    # scan must not silently reset its failure budget or undo the user's stop.
+    stopped = ctx.db.scalar(select(Job.id).where(Job.kind == "archive_video", Job.target_id == video.id,
+                           Job.status.in_(["failed", "cancelled", "partial"])))
+    if stopped:
+        return "needs_attention"
     key = f"archive:{video.id}:{ctx.run.id}"
     if not ctx.db.scalar(select(Job.id).where(Job.dedupe_key == key)):
         from app.jobs import enqueue
         enqueue(ctx.db, "archive_video", video.id, ctx.job.account_id, dict(ctx.policy), key, frozen_policy=True)
+        return "queued"
+    return "active"
 
 
 def _scan(ctx):
-    collection = ctx.db.get(Collection, ctx.job.target_id)
-    if not collection or collection.kind != "favorite":
-        raise IngestError("收藏来源不存在或类型未支持", code="invalid_source", retryable=False)
-    ctx.run.collection_id = collection.id
-    if ctx.cp.get("collection_done"):
-        return True
-    page = int(ctx.cp.get("page", 1))
-    fingerprints = list(ctx.cp.get("page_fingerprints", []))
-    while ctx.request_slot():
-        data = ctx.client.favorite_page(collection.source_id, page)
-        if not isinstance(data, dict) or not isinstance(data.get("has_more"), (bool, int)) or data.get("has_more") not in (0, 1, True, False):
-            raise IngestError("收藏分页缺少合法结束标记", code="invalid_pagination")
-        items = data.get("medias")
-        if items is None and not data["has_more"]:
-            items = []
-        if not isinstance(items, list) or (not items and data["has_more"]):
-            raise IngestError("收藏分页提前返回空页", code="invalid_pagination")
-        fingerprint = hashlib.sha256(json.dumps([(x.get("id"), x.get("type")) for x in items]).encode()).hexdigest()
-        if items and fingerprint in fingerprints:
-            raise IngestError("收藏分页重复，已保留检查点", code="pagination_loop")
-        info = data.get("info") or {}
-        collection.title = str(info.get("title") or collection.title)
-        if (info.get("upper") or {}).get("mid"):
-            collection.owner_uid = _id(info["upper"]["mid"])
-        for index, raw in enumerate(items):
-            rid = f"{raw.get('type', 2)}:{_id(raw.get('id'))}"
-            item = ctx.db.scalar(select(CollectionItem).where(CollectionItem.collection_id == collection.id, CollectionItem.source_resource_id == rid))
-            if not item:
-                item = CollectionItem(collection_id=collection.id, source_resource_id=rid)
-                ctx.db.add(item)
-            item.position = (page - 1) * 20 + index
-            item.seen_run_id = ctx.run.id
-            bvid = raw.get("bvid")
-            if raw.get("type", 2) == 2 and re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid or ""):
-                video = ctx.db.scalar(select(Video).where(Video.bvid == bvid))
-                if not video:
-                    video = Video(bvid=bvid, aid=_id(raw.get("id")), title=str(raw.get("title") or ""), capture_status="pending")
-                    ctx.db.add(video)
-                    ctx.db.flush()
-                item.video_id, item.source_state = video.id, "available"
-                if ctx.policy.get("archive", True):
-                    _enqueue_archive(ctx, video)
-            else:
-                item.source_state = "unavailable" if raw.get("type", 2) == 2 else "unsupported"
-        fingerprints.append(fingerprint)
-        ctx.cp.update(page=page + 1, page_fingerprints=fingerprints)
-        ctx.run.counts = {"pages": page, "observed": int((ctx.run.counts or {}).get("observed", 0)) + len(items)}
-        # Results, child tasks and continuation position commit together.
-        if not data["has_more"]:
-            for item in ctx.db.scalars(select(CollectionItem).where(CollectionItem.collection_id == collection.id)):
-                if item.seen_run_id != ctx.run.id:
-                    item.source_state = "not_observed"
-            collection.last_scan_at = _now()
-            ctx.cp["collection_done"] = True
-            ctx.save()
-            return True
-        ctx.save()
-        page += 1
-    return False
+    from app.source_monitoring import scan_source
+    return scan_source(ctx, user_snapshot=_user, enqueue_archive=_enqueue_archive, now=_now)
 
 
 def _metadata(ctx, video):
@@ -709,14 +670,17 @@ def run_job(db, job):
     account = db.get(SourceAccount, job.account_id) if job.account_id else None
     if not account:
         raise IngestError("采集任务缺少可用账号", code="login_required", retryable=False)
-    try:
-        secret = decrypt_secret(account.secret_encrypted)
-    except Exception:
-        raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
-    client = BiliClient(secret, interval=0)
-    ctx, pacer = None, None
+    client, ctx, pacer = None, None, None
     try:
         with _lock(db, "account:" + account.id):
+            # Account updates use this same lock. Reload only after acquiring it
+            # so a waiting job cannot use credentials rotated while it waited.
+            db.refresh(account)
+            try:
+                secret = decrypt_secret(account.secret_encrypted)
+            except Exception:
+                raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
+            client = BiliClient(secret, interval=0)
             ctx = Context(db, job, client)
             pacer = AccountPacer(db, account, ctx.policy, ctx.guard)
             pacer.check_cooldown()
@@ -731,7 +695,12 @@ def run_job(db, job):
                 result = {"uid": account.uid, "logged_in": True, "vip": bool((nav.get("vip") or {}).get("status"))}
                 done = True
             elif job.kind == "scan_collection":
-                done, result = _scan(ctx), {"collection_id": job.target_id}
+                with _lock(db, "source:" + job.target_id):
+                    done = _scan(ctx)
+                    if done:
+                        done = _images(ctx)
+                result = {"collection_id": job.target_id,
+                          "monitor_state": dict((db.get(Collection, job.target_id).monitor_state or {}))}
             elif job.kind in ("archive_video", "refresh_comments", "refresh_stats"):
                 video = db.get(Video, job.target_id)
                 if video is None and job.kind == "archive_video" and re.fullmatch(r"BV[A-Za-z0-9]{10}", job.target_id):
@@ -757,11 +726,21 @@ def run_job(db, job):
                             done = _images(ctx)
                     if job.kind == "archive_video":
                         video.capture_status = "complete" if done else "partial"
+                        if done:
+                            video.metadata_json = {**(video.metadata_json or {}), "capture_policy": _capture_policy(ctx.policy)}
                 result = {"video_id": video.id}
             else:
                 raise IngestError("采集任务类型未支持", code="unsupported_job", retryable=False)
             ctx.run.status = "visible_traversal_complete" if done else "partial"
             ctx.run.end_reason = "normal_end" if done else "page_budget"
+            if job.kind == "scan_collection" and done:
+                scan = ctx.cp.get("source_scan", {})
+                ctx.run.status = "visible_traversal_complete" if scan.get("status") == "complete" else scan.get("status", "partial")
+                ctx.run.end_reason = scan.get("end_reason", "normal_end")
+                collection = db.get(Collection, job.target_id)
+                collection.monitor_state = {**(collection.monitor_state or {}), "status": scan.get("status", "partial"),
+                                            "end_reason": ctx.run.end_reason}
+                result["monitor_state"] = dict(collection.monitor_state)
             ctx.run.finished_at = _now() if done else None
             if done:
                 pacer.succeeded()
@@ -771,6 +750,9 @@ def run_job(db, job):
         if pacer:
             pacer.failed(error)
         if ctx:
+            if job.kind == "scan_collection":
+                from app.source_monitoring import scan_error
+                scan_error(ctx, error)
             ctx.run.status = "blocked" if error.blocked else "partial"
             ctx.run.end_reason = error.code
             if ctx.run.video_id and job.kind == "archive_video":
@@ -785,4 +767,5 @@ def run_job(db, job):
         db.rollback()
         raise IngestError("采集处理发生内部错误，已保留最后提交的检查点", code="internal_ingest_error") from None
     finally:
-        client.close()
+        if client is not None:
+            client.close()

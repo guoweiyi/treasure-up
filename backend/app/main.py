@@ -5,7 +5,7 @@ from datetime import timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from sqlalchemy import String, cast, delete, func, or_, select
@@ -17,14 +17,14 @@ from app import catalog, schemas
 from app.config import settings
 from app.db import get_db
 from app.jobs import enqueue
-from app.models import (Asset, AssetLocation, AuditLog, BackupSet, Collection, CollectionItem, Comment, Creator,
+from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, Collection, CollectionItem, Comment, Creator,
                         DanmakuSnapshot, Job, LoginAttempt, MediaVariant, OutboxEvent, PlatformUser, Setting,
                         SourceAccount, SourceSubscription, StorageProfile, SubtitleTrack, User, UserSession,
                         UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart, WatchProgress, utcnow)
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
                           require_admin, require_editor, verify_password)
 
-app = FastAPI(title="Treasure Up", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Treasure Up", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
 P = "/api/v1"
 _DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
@@ -76,10 +76,25 @@ def health(db: Session = Depends(get_db)):
     return {"status": "ok", "version": app.version}
 
 
+@app.get(P + "/server")
+def server_capabilities():
+    return {"application": "treasure-up", "api_version": 1, "version": app.version,
+            "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring"],
+            "authentication": ["session-cookie", "webauthn"] if settings.passkeys_enabled else ["session-cookie"]}
+
+
 @app.post(P + "/auth/login")
 def login(body: schemas.Login, request: Request, response: Response, db: Session = Depends(get_db)):
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+    accepted_origins = {str(request.base_url).rstrip("/")}
+    # External TLS terminators may forward HTTP internally. Only the explicit
+    # configured origin is accepted in addition to this request's trusted host.
+    from app.passkeys import site_policy
+    try:
+        accepted_origins.add(site_policy()[0])
+    except HTTPException:
+        pass
+    if origin and origin.rstrip("/") not in accepted_origins:
         raise HTTPException(403, "登录来源不匹配")
     ip = request.client.host if request.client else "unknown"
     key = hashlib.sha256(ip.encode()).hexdigest()
@@ -291,6 +306,28 @@ def account_view(a):
                                      "next_request_at", "next_video_at", "cooldown_until", "risk_failures"]}
 
 
+@app.patch(P + "/admin/accounts/{account_id}")
+def update_account(account_id: str, body: schemas.AccountUpdate, user=Depends(require_admin), db: Session = Depends(get_db)):
+    from app.ingest.runner import _lock
+    from app.ingest.errors import IngestDeferred
+    account = required(db, SourceAccount, account_id)
+    try:
+        with _lock(db, "account:" + account.id):
+            if body.name is not None:
+                account.name = body.name
+            if body.cookie is not None:
+                try:
+                    account.secret_encrypted = encrypt_secret(body.cookie)
+                except ValueError:
+                    raise HTTPException(503, "采集凭据加密密钥未正确配置") from None
+                account.status, account.uid, account.last_verified_at = "unverified", None, None
+            audit(db, user, "update_credentials" if body.cookie else "rename", "source_account", account.id)
+            commit(db)
+    except IngestDeferred:
+        raise HTTPException(409, "该账号正在采集，请暂停相关任务并等待停止后更新凭据") from None
+    return account_view(account)
+
+
 @app.get(P + "/admin/accounts")
 def accounts(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100), _=Depends(require_admin), db: Session = Depends(get_db)):
     return catalog.page(db, select(SourceAccount).order_by(SourceAccount.created_at.desc(), SourceAccount.id), page, page_size, account_view)
@@ -319,24 +356,47 @@ def verify_account(account_id: str, user=Depends(require_admin), db: Session = D
     return catalog.job_view(job)
 
 
-def source_view(db, s):
-    c = required(db, Collection, s.collection_id)
+def source_view(db, s, collection=None):
+    c = collection if collection is not None else required(db, Collection, s.collection_id)
     return {"id": s.id, "collection_id": s.collection_id, "source_id": c.source_id, "title": c.title,
             "account_id": s.account_id, "enabled": s.enabled, "interval_minutes": s.interval_minutes,
-            "policy": s.policy, "next_run_at": s.next_run_at, "last_scan_at": c.last_scan_at}
+            "policy": s.policy, "next_run_at": s.next_run_at, "last_scan_at": c.last_scan_at,
+            "kind": c.kind, "monitor": c.monitor_state or {}}
+
+
+@app.post(P + "/admin/sources/resolve")
+def resolve_source(body: schemas.SourceResolve, _=Depends(require_admin)):
+    from app.source_links import resolve_source as parse_source
+    try:
+        return parse_source(body.value, body.kind)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
 
 
 @app.get(P + "/admin/sources")
-def sources(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100), _=Depends(require_admin), db: Session = Depends(get_db)):
-    return catalog.page(db, select(SourceSubscription).order_by(SourceSubscription.created_at.desc(), SourceSubscription.id), page, page_size, lambda s: source_view(db, s))
+def sources(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100),
+            kind: str = Query("", pattern="^(favorite|creator)?$"), source_id: str = Query("", max_length=32),
+            _=Depends(require_admin), db: Session = Depends(get_db)):
+    statement = select(SourceSubscription, Collection).join(Collection, Collection.id == SourceSubscription.collection_id)
+    if kind:
+        statement = statement.where(Collection.kind == kind)
+    if source_id:
+        statement = statement.where(Collection.source_id == source_id)
+    total = db.scalar(select(func.count()).select_from(statement.subquery()))
+    rows = db.execute(statement.order_by(SourceSubscription.created_at.desc(), SourceSubscription.id)
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [source_view(db, s, c) for s, c in rows], "total": total, "page": page, "page_size": page_size}
 
 
 @app.post(P + "/admin/sources", status_code=201)
 def new_source(body: schemas.SourceInput, user=Depends(require_admin), db: Session = Depends(get_db)):
     required(db, SourceAccount, body.account_id)
-    collection = db.scalar(select(Collection).where(Collection.kind == "favorite", Collection.source_id == body.source_id))
+    collection = db.scalar(select(Collection).where(Collection.kind == body.kind, Collection.source_id == body.source_id))
+    if collection and db.scalar(select(SourceSubscription.id).where(SourceSubscription.collection_id == collection.id)):
+        raise HTTPException(409, "该来源已添加，请编辑已有来源")
     if not collection:
-        collection = Collection(source_id=body.source_id, title=body.title)
+        collection = Collection(source_id=body.source_id, title=body.title, kind=body.kind,
+                                owner_uid=body.source_id if body.kind == "creator" else None)
         db.add(collection)
         db.flush()
     source = SourceSubscription(collection_id=collection.id, account_id=body.account_id, enabled=body.enabled,
@@ -365,12 +425,41 @@ def edit_source(source_id: str, body: schemas.SourceUpdate, user=Depends(require
 
 
 @app.post(P + "/admin/sources/{source_id}/scan")
-def scan_source(source_id: str, user=Depends(require_admin), db: Session = Depends(get_db)):
-    source = required(db, SourceSubscription, source_id)
-    job = enqueue(db, "scan_collection", source.collection_id, source.account_id, source.policy)
+def scan_source(source_id: str, body: schemas.SourceScan = Body(default=schemas.SourceScan()), user=Depends(require_admin), db: Session = Depends(get_db)):
+    source = db.scalar(select(SourceSubscription).where(SourceSubscription.id == source_id).with_for_update())
+    if not source:
+        raise HTTPException(404, "来源不存在")
+    active = db.scalar(select(Job.id).where(Job.kind == "scan_collection", Job.target_id == source.collection_id,
+                       Job.status.in_(["queued", "running", "paused", "blocked"])).limit(1))
+    if active:
+        raise HTTPException(409, "该来源已有未结束的检查，请在任务中心查看或恢复")
+    job = enqueue(db, "scan_collection", source.collection_id, source.account_id,
+                  {**source.policy, "force_full_scan": body.full})
     audit(db, user, "scan", "source", source_id)
     commit(db)
     return catalog.job_view(job)
+
+
+@app.get(P + "/admin/sources/{source_id}/history")
+def source_history(source_id: str, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+                   _=Depends(require_admin), db: Session = Depends(get_db)):
+    source = required(db, SourceSubscription, source_id)
+    return catalog.page(db, select(CaptureRun).where(CaptureRun.collection_id == source.collection_id)
+                        .order_by(CaptureRun.started_at.desc(), CaptureRun.id), page, page_size,
+                        lambda row: {k: getattr(row, k) for k in ["id", "status", "counts", "end_reason", "started_at", "finished_at"]})
+
+
+@app.get(P + "/creators/{creator_id}/monitor")
+def creator_monitor(creator_id: str, _=Depends(authenticated), db: Session = Depends(get_db)):
+    creator = required(db, Creator, creator_id)
+    person = required(db, PlatformUser, creator.user_id)
+    row = db.execute(select(Collection, SourceSubscription).join(SourceSubscription, SourceSubscription.collection_id == Collection.id)
+                     .where(Collection.kind == "creator", Collection.source_id == person.uid)).first()
+    if not row:
+        return {"subscribed": False}
+    collection, source = row
+    return {"subscribed": True, "enabled": source.enabled, "next_run_at": source.next_run_at,
+            "last_scan_at": collection.last_scan_at, "monitor": collection.monitor_state or {}}
 
 
 @app.get(P + "/admin/jobs")
@@ -607,3 +696,5 @@ def update_user(user_id: str, body: schemas.UserUpdate, user=Depends(require_adm
 
 from app.delivery_api import router as delivery_router
 app.include_router(delivery_router)
+from app.passkeys import router as passkeys_router
+app.include_router(passkeys_router)

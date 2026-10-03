@@ -29,7 +29,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Asset, AssetLocation, BackupSet, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession
+from app.models import Asset, AssetLocation, BackupSet, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession, PasskeyChallenge, PasskeyAttempt
 from app.storage.base import IntegrityError, StorageError, content_key, file_digest, safe_key
 from app.storage.local import LocalStorage
 from app.storage.service import copy_asset_to, utcnow
@@ -409,6 +409,8 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
                 command.upgrade(migration, "head")
         with Session(engine) as restored:
             # Old sessions, schedulers, and storage endpoints must not revive on recovery.
+            restored.execute(delete(PasskeyChallenge))
+            restored.execute(delete(PasskeyAttempt))
             restored.execute(delete(UserSession))
             restored.execute(delete(PlaybackSession))
             restored.execute(delete(OutboxEvent))

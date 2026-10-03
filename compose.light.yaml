@@ -1,0 +1,12 @@
+# Optional: docker compose -f compose.yaml -f compose.light.yaml up -d --build
+# PostgreSQL, Redis, scheduler and the isolated backup worker remain unchanged.
+services:
+  collector:
+    profiles: [full-workers]
+  media-worker:
+    profiles: [full-workers]
+  worker:
+    extends:
+      file: compose.yaml
+      service: collector
+    command: [celery, -A, "app.worker:celery", worker, -Q, "collector,media", "--concurrency=1", "--loglevel=WARNING"]

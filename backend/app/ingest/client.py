@@ -161,7 +161,7 @@ class BiliClient:
         headers = {"Cookie": cookie_header(self.cookies, url)} if authenticated and self.cookies else {}
         try:
             with self.http.stream("GET", url, params=params, headers=headers) as response:
-                if response.status_code in (412, 429):
+                if response.status_code in (403, 412, 429):
                     raise IngestError("源站限流或风控，请稍后恢复任务", code="rate_limited", retry_after_seconds=retry_after(response.headers.get("retry-after")))
                 if response.status_code != 200:
                     raise IngestError(f"源站 HTTP 请求失败（{response.status_code}）", code="http_error")
@@ -217,6 +217,10 @@ class BiliClient:
 
     def favorite_page(self, source_id, page):
         return self.json("/x/v3/fav/resource/list", {"media_id": source_id, "pn": page, "ps": 20, "order": "mtime", "type": 0, "tid": 0})
+
+    def creator_page(self, uid, page):
+        return self.json("/x/space/wbi/arc/search", {"mid": uid, "pn": page, "ps": 30, "order": "pubdate",
+            "order_avoided": "true", "platform": "web", "web_location": "1550101"}, wbi=True)
 
     def comment_page(self, aid, offset=""):
         return self.json("/x/v2/reply/wbi/main", {"oid": aid, "type": 1, "mode": 2, "pagination_str": json.dumps({"offset": offset}, separators=(",", ":"))}, wbi=True)

@@ -1,0 +1,137 @@
+name: Native clients
+on:
+  workflow_dispatch:
+  push:
+    paths: ['native/**', '.github/workflows/native.yml']
+  pull_request:
+    paths: ['native/**', '.github/workflows/native.yml']
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  desktop:
+    name: ${{ matrix.target }} compile and package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+      - name: Prepare Rust target
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
+      - name: Compile and test native navigation policy
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - name: Compile native application and package installer
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: treasure-up-${{ matrix.target }}
+          path: |
+            native/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            native/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            native/src-tauri/Cargo.lock
+          if-no-files-found: error
+  android:
+    name: Android debug APK compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android build tools on the disposable CI runner
+        run: |
+          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-linux-android
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
+      - run: npm run tauri -- android init --ci --skip-targets-install
+      - name: Compile ARM64 debug APK without release credentials
+        run: npm run tauri -- android build --debug --apk --target aarch64 --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: treasure-up-android-debug
+          path: native/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+  ios-simulator:
+    name: iOS unsigned simulator compile
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+      - name: Prepare simulator toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-ios-sim
+          brew install xcodegen
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
+      - run: npm run tauri -- ios init --ci --skip-targets-install
+      - name: Compile simulator application without distribution signing
+        run: npm run tauri -- ios build --debug --target aarch64-sim --no-sign --ci
+      - name: Archive simulator bundle
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess
+          apps = [p for p in pathlib.Path('src-tauri/gen/apple').glob('**/*.app') if p.is_dir()]
+          if not apps:
+              raise SystemExit('No iOS simulator app produced')
+          app = apps[0]
+          subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), 'ios-simulator.zip'], check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: treasure-up-ios-simulator-unsigned
+          path: native/ios-simulator.zip
+          if-no-files-found: error

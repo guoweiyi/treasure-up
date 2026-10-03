@@ -51,7 +51,26 @@ class AccountInput(Input):
     cookie: str = Field(min_length=1, max_length=65536)
 
 
+class AccountUpdate(Input):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    cookie: str | None = Field(default=None, min_length=1, max_length=65536)
+
+
+class SourceResolve(Input):
+    value: str = Field(min_length=1, max_length=2000)
+    kind: Literal["favorite", "creator"] = "favorite"
+
+
+class SourceScan(Input):
+    full: bool = False
+
+
 class IngestPolicy(Input):
+    initial_strategy: Literal["all", "latest", "new_only"] = "all"
+    initial_limit: int = Field(default=100, ge=1, le=10000)
+    incremental_pages: int = Field(default=3, ge=1, le=100)
+    full_scan_interval_hours: int = Field(default=24, ge=1, le=720)
+    force_full_scan: bool = False
     quality: Literal["best", "4320p", "8k", "2160p", "4k", "1440p", "1080p", "720p", "480p", "360p"] = "best"
     create_compatible_copy: bool = True
     prefer_h264: bool = False
@@ -75,6 +94,7 @@ class IngestPolicy(Input):
 
 
 class SourceInput(Input):
+    kind: Literal["favorite", "creator"] = "favorite"
     source_id: str = Field(pattern=r"^\d{1,32}$")
     title: str = Field(min_length=1, max_length=500)
     account_id: str

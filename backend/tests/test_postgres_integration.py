@@ -28,7 +28,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app import backup, jobs
 from app.config import settings
 from app.models import (Asset, AssetLocation, Job, JobAttempt, Setting, StorageProfile, User, Video, VideoPart,
-                        MediaVariant, SourceAccount, PlaybackSession, utcnow)
+                        MediaVariant, SourceAccount, PlaybackSession, PasskeyCredential, PasskeyChallenge,
+                        PasskeyAttempt, UserSession, utcnow)
 from app.storage.service import ingest_file, migrate_asset, read_asset_bytes, resolve_asset
 
 pytestmark = pytest.mark.skipif(os.environ.get("TREASURE_RUN_POSTGRES_TESTS") != "1",
@@ -106,7 +107,7 @@ def _command(arguments):
         pytest.fail(f"Synthetic media validation command failed: {Path(arguments[0]).name}")
 
 
-@pytest.mark.parametrize("source_revision", ["head", "39052d216250"], ids=["current", "v01"])
+@pytest.mark.parametrize("source_revision", ["head", "8f240c645d02", "39052d216250"], ids=["current", "v02", "v01"])
 def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres_workspace, monkeypatch, source_revision):
     space = postgres_workspace
     video = space.root / "synthetic.mp4"
@@ -134,6 +135,17 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
         db.add(variant); db.flush()
         db.add(PlaybackSession(user_id=viewer.id, variant_id=variant.id, protocol="file", state={},
                                expires_at=utcnow() + timedelta(hours=4)))
+        key = PasskeyCredential(user_id=viewer.id, credential_id="test-public-id", public_key="test-public-key",
+                                name="preserved passkey", device_type="single_device")
+        db.add(key); db.flush()
+        login_session = UserSession(user_id=viewer.id, token_hash="a" * 64, csrf_token="test-csrf",
+                                    passkey_credential_id=key.id, expires_at=utcnow() + timedelta(hours=4))
+        db.add(login_session); db.flush()
+        db.add(PasskeyChallenge(challenge="pending-challenge", purpose="register", user_id=viewer.id,
+                               session_id=login_session.id, binding_hash="b" * 64, origin="https://archive.example",
+                               rp_id="archive.example", expires_at=utcnow() + timedelta(minutes=5)))
+        db.add(PasskeyAttempt(client_hash="c" * 64, purpose="login_verify"))
+        passkey_id = key.id
         db.commit()
         original = resolve_asset(db, asset_id)["path"]
         replica = StorageProfile(name="test-replica", kind="local", enabled=True, is_default=False,
@@ -154,7 +166,9 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
                 migration.attributes["connection"] = connection
                 command.downgrade(migration, source_revision)
             migration.attributes.pop("connection")
-            assert "playback_sessions" not in inspect(space.engine).get_table_names()
+            assert "passkey_credentials" not in inspect(space.engine).get_table_names()
+            if source_revision == "39052d216250":
+                assert "playback_sessions" not in inspect(space.engine).get_table_names()
 
         original_runner = backup._run_postgres
         injected = []
@@ -198,6 +212,13 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
         assert restored.get(SourceAccount, account_id).cooldown_until is None
         assert restored.scalar(select(func.count()).select_from(Asset)) == 1
         assert restored.scalar(select(func.count()).select_from(PlaybackSession)) == 0
+        assert restored.scalar(select(func.count()).select_from(UserSession)) == 0
+        assert restored.scalar(select(func.count()).select_from(PasskeyChallenge)) == 0
+        assert restored.scalar(select(func.count()).select_from(PasskeyAttempt)) == 0
+        if source_revision == "head":
+            assert restored.get(PasskeyCredential, passkey_id).name == "preserved passkey"
+        else:
+            assert restored.scalar(select(func.count()).select_from(PasskeyCredential)) == 0
         assert restored.get(Setting, "statistics").value["enabled"] is False
         assert restored.get(Setting, "playback").value["package_long_videos"] is False
         assert restored.get(Setting, "playback").value["analyze_loudness"] is False

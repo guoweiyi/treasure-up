@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-connection"
+description = "Read/forget the selected origin and connect through the validated server probe."
+commands.allow = ["load_connection", "connect_server", "forget_connection"]

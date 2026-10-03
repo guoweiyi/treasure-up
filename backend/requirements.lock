@@ -1,4 +1,9 @@
 alembic==1.20.0
+cbor2==6.1.5
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pyOpenSSL==26.4.0
+webauthn==3.0.1
 aliyun-python-sdk-core==2.16.1
 aliyun-python-sdk-kms==2.16.5
 amqp==5.4.0

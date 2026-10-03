@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     lease_seconds: int = 180
     login_limit: int = 10
     login_window_seconds: int = 300
+    passkeys_enabled: bool = True
+    passkey_rp_id: str = "localhost"
+    passkey_origin: str = "http://localhost:8788"
+    passkey_rp_name: str = "Treasure Up"
+    passkey_challenge_seconds: int = 300
+    passkey_limit: int = 10
+    passkey_window_seconds: int = 300
 
     def encryption_key(self) -> str:
         if self.secret_key_file:
