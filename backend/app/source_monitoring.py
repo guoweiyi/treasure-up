@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_, select, update
 
 from app.ingest.errors import IngestError
-from app.models import Collection, CollectionItem, Video, VideoCreator
+from app.models import Collection, CollectionItem, SourceSubscription, Video, VideoCreator
 
 
 COUNTS = ("observed", "new_items", "new_videos", "newly_published", "newly_favorited",
@@ -100,6 +100,10 @@ def _fetch(ctx, collection, page):
 
 def _publish(ctx, collection, scan, *, status="running", reason=None):
     state = dict(collection.monitor_state or {})
+    # Persist the monitoring start before the first request, including scans
+    # which later fail or finish unstable and cannot complete their baseline.
+    if _date(state.get("baseline_started_at")) is None:
+        state["baseline_started_at"] = scan["baseline_started_at"]
     state.update(version=1, status=status, scan_mode=scan["mode"], run_id=ctx.run.id,
                  last_started_at=scan["started_at"], next_page=scan["page"], counts=dict(scan["counts"]),
                  end_reason=reason)
@@ -117,6 +121,14 @@ def scan_error(ctx, error):
 
 def _initial_scan(ctx, collection, now):
     state = collection.monitor_state or {}
+    baseline_started = _date(state.get("baseline_started_at"))
+    if baseline_started is None:
+        # "From now" starts when the subscription is saved, not when a queued
+        # collector eventually acquires its account/source locks. Direct scan
+        # jobs without a subscription start when their first scan begins.
+        subscribed_at = ctx.db.scalar(select(SourceSubscription.created_at).where(
+            SourceSubscription.collection_id == collection.id))
+        baseline_started = _date(subscribed_at) or now
     initial = not state.get("baseline_completed_at")
     last_full = _date(state.get("last_full_scan_at"))
     full_due = last_full is None or last_full + timedelta(hours=ctx.policy.get("full_scan_interval_hours", 24)) <= now
@@ -125,7 +137,7 @@ def _initial_scan(ctx, collection, now):
             "counts": {key: 0 for key in COUNTS}, "fingerprints": [], "first_fingerprint": None,
             "expected_total": None, "count_changed": False, "duplicates": False, "initial_selected": 0,
             "initial_strategy": ctx.policy.get("initial_strategy", "all"),
-            "baseline_started_at": state.get("baseline_started_at") or now.isoformat()}
+            "baseline_started_at": baseline_started.isoformat()}
     ctx.cp["source_scan"] = scan
     return scan
 
@@ -148,10 +160,22 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
     favorited = _timestamp(raw.get("fav_time")) if collection.kind == "favorite" else None
     event_time = favorited if collection.kind == "favorite" else published
     baseline = _date(scan["baseline_started_at"])
-    old_event = observation.get("favorited_at" if collection.kind == "favorite" else "published_at")
-    new_event = scan["mode"] != "initial" and event_time and _date(event_time) > baseline and (new_item or not old_event or _date(event_time) > _date(old_event))
+    event_date = _date(event_time)
+    # Keep the greatest known source event independently of the latest response:
+    # an omitted timestamp or a stale page must not make the same event new again.
+    # Existing observations predate this watermark, so retain their valid time.
+    previous_times = [value for value in (
+        _date(observation.get("event_time_watermark")),
+        _date(observation.get("favorited_at" if collection.kind == "favorite" else "published_at")),
+    ) if value is not None]
+    old_event = max(previous_times, default=None)
+    after_baseline = event_date is not None and event_date > baseline
+    new_event = after_baseline and (new_item or old_event is None or event_date > old_event)
     if new_event:
         scan["counts"]["newly_favorited" if collection.kind == "favorite" else "newly_published"] += 1
+    watermark = max(previous_times + ([event_date] if event_date is not None else []), default=None)
+    if watermark is not None:
+        observation["event_time_watermark"] = watermark.isoformat()
     observation.update(first_seen_at=observation.get("first_seen_at") or now.isoformat(), last_seen_at=now.isoformat(),
                        first_run_id=observation.get("first_run_id") or ctx.run.id,
                        published_at=published, favorited_at=favorited)
@@ -178,17 +202,22 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
                 VideoCreator.creator_id == scan["creator_id"], VideoCreator.role == "owner")):
         ctx.db.add(VideoCreator(video_id=video.id, creator_id=scan["creator_id"], role="owner"))
 
-    eligible = new_item or observation.get("archive_decision") in (None, "queued", "active", "retry_pending")
     decision = observation.get("archive_decision", "existing")
-    if scan["mode"] == "initial" and scan["initial_strategy"] == "new_only":
-        eligible, decision = False, "initial_baseline"
+    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending")
+    if scan["initial_strategy"] == "new_only":
+        if not after_baseline:
+            eligible = False
+            decision = ("unknown_source_time" if not event_time else
+                        "initial_baseline" if scan["mode"] == "initial" else "before_monitoring")
+        elif decision in ("initial_baseline", "before_monitoring", "unknown_source_time"):
+            # Also recover items skipped by an earlier initial scan, without
+            # counting an unchanged, previously observed event a second time.
+            eligible = True
     elif scan["mode"] == "initial" and scan["initial_strategy"] == "latest":
         if scan["initial_selected"] >= ctx.policy.get("initial_limit", 100):
             eligible, decision = False, "initial_limit"
         else:
             scan["initial_selected"] += 1
-    elif new_item and scan["initial_strategy"] == "new_only" and (not event_time or _date(event_time) <= baseline):
-        eligible, decision = False, "before_monitoring" if event_time else "unknown_source_time"
     if not ctx.policy.get("archive", True):
         eligible, decision = False, "scan_only"
     if eligible:
@@ -212,7 +241,7 @@ def _finish(ctx, collection, scan, now, *, stable, full):
     if full and stable:
         state["last_full_scan_at"] = now.isoformat()
         state.setdefault("baseline_completed_at", now.isoformat())
-        state.setdefault("baseline_started_at", scan["started_at"])
+        state.setdefault("baseline_started_at", scan["baseline_started_at"])
     collection.monitor_state = state
     collection.last_scan_at = now
     scan.update(phase="done", end_reason=reason, status=status)

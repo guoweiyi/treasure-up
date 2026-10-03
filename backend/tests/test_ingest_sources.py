@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from app.ingest import runner
 from app.ingest.errors import IngestError
-from app.models import CaptureRun, Collection, CollectionItem, Creator, Job, Video, VideoCreator
+from app.models import CaptureRun, Collection, CollectionItem, Creator, Job, SourceSubscription, Video, VideoCreator
 from test_ingest_runner import FakeClient, db, setup
 
 
@@ -80,12 +80,206 @@ def test_initial_strategy_always_builds_full_baseline(db, monkeypatch, strategy,
         def favorite_page(self, _, number):
             return page([favorite(index) for index in range(1, 6)])
     monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: NOW)
     collection, job = source_job(db, policy={"initial_strategy": strategy, "initial_limit": limit})
     complete(db, job)
     assert len(children(db)) == expected
     assert db.scalar(select(func.count()).select_from(CollectionItem)) == 5
     assert collection.monitor_state["baseline_completed_at"]
     assert collection.monitor_state["counts"]["newly_favorited"] == 0
+
+
+def test_new_only_initial_scan_captures_events_after_durable_start_across_pages(db, monkeypatch):
+    clock, calls = [NOW], []
+    class Client(FakeClient):
+        def favorite_page(self, _, number):
+            calls.append(number)
+            # This SQL read verifies the baseline was saved before network I/O.
+            state = db.scalar(select(Collection.monitor_state).where(Collection.id == collection.id))
+            assert state["baseline_started_at"] == NOW.isoformat()
+            if number == 1:
+                return page([favorite(1, added=int((NOW - timedelta(days=1)).timestamp())),
+                             favorite(2, fav_time=None)], more=True, total=4)
+            return page([favorite(3, added=int((NOW + timedelta(minutes=30)).timestamp())),
+                         favorite(4, added=int(NOW.timestamp()))], total=4)
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: clock[0])
+    collection, job = source_job(db, policy={"initial_strategy": "new_only", "request_budget": 1})
+    assert runner.run_job(db, job)["continuation"] and not children(db)
+    clock[0] = NOW + timedelta(hours=1)
+    complete(db, job)
+    assert calls == [1, 2, 1]
+    archived = children(db)
+    assert len(archived) == 1 and db.get(Video, archived[0].target_id).aid == "3"
+    assert collection.monitor_state["baseline_started_at"] == NOW.isoformat()
+    assert collection.monitor_state["counts"]["newly_favorited"] == 1
+    assert collection.monitor_state["counts"]["queued"] == 1
+    assert collection.monitor_state["counts"]["skipped"] == 3
+    assert collection.monitor_state["status"] == "complete"
+
+
+def test_new_only_creator_includes_publication_while_first_scan_waited_in_queue(db, monkeypatch):
+    class Client(FakeClient):
+        def profile(self, uid):
+            return {"mid": uid, "name": "creator"}
+        def creator_page(self, uid, number):
+            return {"page": {"pn": number, "ps": 30, "count": 3}, "list": {"vlist": [
+                {"aid": identity, "bvid": f"BV{identity:010d}", "created": published}
+                for identity, published in [(1, int((NOW - timedelta(minutes=1)).timestamp())),
+                                             (2, int((NOW + timedelta(minutes=30)).timestamp())),
+                                             (3, None)]]}}
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: NOW + timedelta(hours=1))
+    collection, job = source_job(db, kind="creator", policy={"initial_strategy": "new_only"})
+    db.add(SourceSubscription(collection_id=collection.id, account_id=job.account_id, created_at=NOW))
+    db.commit()
+    complete(db, job)
+    archived = children(db)
+    assert len(archived) == 1 and db.get(Video, archived[0].target_id).aid == "2"
+    assert collection.monitor_state["baseline_started_at"] == NOW.isoformat()
+    assert collection.monitor_state["last_started_at"] == (NOW + timedelta(hours=1)).isoformat()
+    assert collection.monitor_state["counts"]["newly_published"] == 1
+    assert collection.monitor_state["counts"]["newly_favorited"] == 0
+
+
+def test_new_only_unstable_initial_scan_does_not_move_start_on_rescan(db, monkeypatch):
+    clock, calls = [NOW], []
+    old = favorite(1, added=int((NOW - timedelta(days=1)).timestamp()))
+    new = favorite(2, added=int((NOW + timedelta(hours=1)).timestamp()))
+    class Client(FakeClient):
+        def favorite_page(self, _, number):
+            calls.append(number)
+            return page([old] if len(calls) == 1 else [old, new])
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: clock[0])
+    policy = {"initial_strategy": "new_only", "request_budget": 1}
+    collection, first = source_job(db, policy=policy)
+    assert runner.run_job(db, first)["continuation"]
+    clock[0] = NOW + timedelta(hours=2)
+    complete(db, first)
+    assert collection.monitor_state["status"] == "unstable"
+    assert collection.monitor_state["baseline_started_at"] == NOW.isoformat()
+    assert not collection.monitor_state.get("baseline_completed_at")
+    assert not children(db)
+    _, second = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, second)
+    assert second.checkpoint["source_scan"]["mode"] == "initial"
+    assert second.checkpoint["source_scan"]["baseline_started_at"] == NOW.isoformat()
+    assert collection.monitor_state["baseline_started_at"] == NOW.isoformat()
+    assert collection.monitor_state["counts"]["newly_favorited"] == 1
+    assert collection.monitor_state["status"] == "complete"
+    assert len(children(db)) == 1
+    _, third = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, third)
+    assert collection.monitor_state["counts"]["newly_favorited"] == 0
+    assert len(children(db)) == 1
+
+
+@pytest.mark.parametrize("initial_event", [None, int((NOW - timedelta(days=1)).timestamp())])
+def test_new_only_existing_item_new_event_is_eligible_without_resetting_cancelled_work(db, monkeypatch, initial_event):
+    clock, event = [NOW], [initial_event]
+    class Client(FakeClient):
+        def favorite_page(self, *_):
+            return page([favorite(1, fav_time=event[0])])
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: clock[0])
+    policy = {"initial_strategy": "new_only"}
+    collection, first = source_job(db, policy=policy)
+    complete(db, first)
+    assert not children(db)
+    clock[0] = NOW + timedelta(hours=1)
+    event[0] = int((NOW + timedelta(minutes=30)).timestamp())
+    _, second = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, second)
+    assert collection.monitor_state["counts"]["new_items"] == 0
+    assert collection.monitor_state["counts"]["new_videos"] == 0
+    assert collection.monitor_state["counts"]["newly_favorited"] == 1
+    assert len(children(db)) == 1
+    _, third = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, third)
+    assert collection.monitor_state["counts"]["newly_favorited"] == 0
+    assert len(children(db)) == 1
+    children(db)[0].status = "cancelled"
+    db.commit()
+    event[0] = int((NOW + timedelta(minutes=45)).timestamp())
+    _, fourth = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, fourth)
+    item = db.scalar(select(CollectionItem).where(CollectionItem.collection_id == collection.id))
+    assert collection.monitor_state["counts"]["newly_favorited"] == 1
+    assert item.observation["archive_decision"] == "needs_attention"
+    assert len(children(db)) == 1
+
+
+def test_new_only_recovers_post_start_item_previously_marked_as_initial_baseline(db, monkeypatch):
+    event = NOW + timedelta(minutes=30)
+    class Client(FakeClient):
+        def favorite_page(self, *_):
+            return page([favorite(1, added=int(event.timestamp()))])
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: NOW + timedelta(hours=1))
+    collection, job = source_job(db, policy={"initial_strategy": "new_only"})
+    collection.monitor_state = {"baseline_started_at": NOW.isoformat(), "baseline_completed_at": NOW.isoformat()}
+    video = Video(bvid="BV0000000001", aid="1")
+    db.add(video); db.flush()
+    db.add(CollectionItem(collection_id=collection.id, source_resource_id="2:1", video_id=video.id,
+                          observation={"favorited_at": event.isoformat(), "archive_decision": "initial_baseline"}))
+    db.commit()
+    complete(db, job)
+    assert len(children(db)) == 1
+    assert collection.monitor_state["counts"]["newly_favorited"] == 0
+    assert collection.monitor_state["counts"]["queued"] == 1
+
+
+@pytest.mark.parametrize("kind", ["favorite", "creator"])
+@pytest.mark.parametrize("intermediate_event", [None, int((NOW - timedelta(days=1)).timestamp())])
+def test_event_watermark_survives_missing_or_stale_timestamp(db, monkeypatch, kind, intermediate_event):
+    first_event = NOW + timedelta(minutes=30)
+    current = [int(first_event.timestamp())]
+    clock = [NOW + timedelta(hours=1)]
+    class Client(FakeClient):
+        def profile(self, uid):
+            return {"mid": uid, "name": "creator"}
+        def favorite_page(self, *_):
+            return page([favorite(1, fav_time=current[0])])
+        def creator_page(self, uid, number):
+            return {"page": {"pn": number, "ps": 30, "count": 1}, "list": {"vlist": [
+                {"aid": 1, "bvid": "BV0000000001", "created": current[0]}]}}
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: clock[0])
+    policy = {"initial_strategy": "new_only"}
+    collection, first = source_job(db, kind=kind, policy=policy)
+    db.add(SourceSubscription(collection_id=collection.id, account_id=first.account_id, created_at=NOW))
+    db.commit()
+    complete(db, first)
+    count_key = "newly_favorited" if kind == "favorite" else "newly_published"
+    time_key = "favorited_at" if kind == "favorite" else "published_at"
+    assert collection.monitor_state["counts"][count_key] == 1
+    assert len(children(db)) == 1
+    item = db.scalar(select(CollectionItem).where(CollectionItem.collection_id == collection.id))
+    assert item.observation["event_time_watermark"] == first_event.isoformat()
+    # Simulate a historical observation: its last valid event must seed the new
+    # watermark even if the first response after upgrade omits/regresses time.
+    item.observation = {key: value for key, value in item.observation.items() if key != "event_time_watermark"}
+    db.commit()
+    for event, hour in [(intermediate_event, 2), (int(first_event.timestamp()), 3)]:
+        current[0], clock[0] = event, NOW + timedelta(hours=hour)
+        _, job = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+        complete(db, job)
+        assert collection.monitor_state["counts"][count_key] == 0
+        assert collection.monitor_state["counts"]["queued"] == 0
+        assert len(children(db)) == 1
+        assert item.observation["event_time_watermark"] == first_event.isoformat()
+        expected_time = datetime.fromtimestamp(event, timezone.utc).isoformat() if event else None
+        assert item.observation[time_key] == expected_time
+        if event is None:
+            assert item.observation["archive_decision"] == "unknown_source_time"
+    # A genuinely later event still counts exactly once after the stale cycle.
+    current[0] = int((first_event + timedelta(minutes=30)).timestamp())
+    _, later = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, later)
+    assert collection.monitor_state["counts"][count_key] == 1
+    assert item.observation["event_time_watermark"] == (first_event + timedelta(minutes=30)).isoformat()
+    assert len(children(db)) == 1
 
 
 def test_incremental_window_does_not_stop_on_old_known_or_out_of_order_items(db, monkeypatch):

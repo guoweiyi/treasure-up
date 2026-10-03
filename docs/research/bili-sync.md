@@ -103,17 +103,19 @@
 
 源码接口依据：[favorite_list.rs](https://github.com/amtoaer/bili-sync/blob/c900777e78796653fdfb00421879b6a802d1eedd/crates/bili_sync/src/bilibili/favorite_list.rs)、[submission.rs](https://github.com/amtoaer/bili-sync/blob/c900777e78796653fdfb00421879b6a802d1eedd/crates/bili_sync/src/bilibili/submission.rs)、[dynamic.rs](https://github.com/amtoaer/bili-sync/blob/c900777e78796653fdfb00421879b6a802d1eedd/crates/bili_sync/src/bilibili/dynamic.rs)。上游 UP 资料使用 card 接口；本项目的 acc/info 是已有适配，不将二者写成同一个接口。
 
-`Collection.monitor_state` 保存 version、status、scan_mode、run_id、last_started_at、last_completed_at、last_full_scan_at、baseline_started_at、baseline_completed_at、next_page、counts 和 end_reason。日期是 UTC ISO 字符串；未知字段不伪造时间。`CollectionItem.observation` 保存 first/last_seen、first_run_id、published_at、favorited_at 和 archive_decision。
+`Collection.monitor_state` 保存 version、status、scan_mode、run_id、last_started_at、last_completed_at、last_full_scan_at、baseline_started_at、baseline_completed_at、next_page、counts 和 end_reason。日期是 UTC ISO 字符串；未知字段不伪造时间。`CollectionItem.observation` 保存 first/last_seen、first_run_id、published_at、favorited_at、event_time_watermark 和 archive_decision。
 
 | 配置 | 默认 | 实际语义 |
 | --- | --- | --- |
-| `initial_strategy` | `all` | all 归档首轮发现的全部可用稿件；latest 归档返回顺序中前 N 个；new_only 只建立首轮基线 |
+| `initial_strategy` | `all` | all 归档首轮发现的全部可用稿件；latest 归档返回顺序中前 N 个；new_only 跳过监测起点之前的历史项，仍建立完整基线 |
 | `initial_limit` | 100 | latest 的 N，1–10000；不是跳过剩余来源分页 |
 | `incremental_pages` | 3 | 增量最多读 3 页，1–100；窗口内不遇旧即停 |
 | `full_scan_interval_hours` | 24 | 到期执行全量遍历，1–720 小时；受任务排队、源订阅间隔与账号冷却影响 |
 | `force_full_scan` | false | 手动完整检查；仍遵循同一请求预算、续采和风控规则 |
 
 首轮即使选择 latest/new_only 也要完整建立来源基线，所以大收藏夹第一次仍有列表请求成本。latest 的含义是**当前接口返回顺序前 N 项**，没有按全量发布时间二次排序；不能宣传为跨乱序列表的严格“最新 N 个”。new_only 对缺少有效源时间的条目记录 unknown_source_time 并跳过，避免把旧视频当成新发布。
+
+监测起点首次采用订阅创建时间；没有订阅的直接扫描任务采用首次开始时间。起点在第一次来源请求前持久化，排队、续扫、失败或不稳定重扫都不将其推后。new_only 在首轮也接收明确晚于起点的新发布 / 新收藏事件；旧条目再次收藏或补齐了晚于起点的有效时间可重新进入归档判断，但不恢复已取消任务，也不重置失败任务预算。
 
 检查点包含模式、下一页、当前阶段、页面指纹、首屏指纹、预期总量、累计计数和首轮选择数量。请求预算用尽返回 continuation，队列继续相同作业。终止页后额外复查首屏与总量，只有稳定、没有跨页重复、已知总量相符时，才推进全量/基线完成时间。
 
@@ -126,7 +128,9 @@
 | unstable | 遍历中首屏/总量/重复情况不一致，不推进全量水位，不标记缺席 |
 | complete | 已到可见结束边界且一致性检查通过；CaptureRun 对应 visible_traversal_complete |
 
-计数分开记录 `observed/new_items/new_videos/newly_published/newly_favorited/queued/reused/skipped/not_observed`。new_items 是该来源第一次看到的记录；new_videos 是全库新增稿件；只有非首轮且源时间晚于基线时，才计为新发布/新收藏。旧视频重新收藏可能是新收藏事件，不等于全库新视频。
+计数分开记录 `observed/new_items/new_videos/newly_published/newly_favorited/queued/reused/skipped/not_observed`。new_items 是该来源第一次看到的记录；new_videos 是全库新增稿件；所有扫描中，源事件时间明确晚于固定监测起点，且首次发现或时间较上次增长，才计为新发布 / 新收藏。未变化的事件不重复计数。旧视频重新收藏可能是新收藏事件，不等于全库新视频。
+
+事件水位单独保存最大已见有效时间，并兼容旧记录中的来源时间；接口短暂缺失或时间回退后恢复原值，不重复计新。当前返回时间未知时，new_only 仍跳过归档判断，不用水位伪装当前响应时间。
 
 全库 Video 按 BVID 复用，多来源通过 CollectionItem 关联。同一有效归档策略已完整完成则不重复派发；策略变化允许重新评估，但底层仍复用已有合适媒体。正在排队/运行/暂停/阻塞的作业不重复新增；失败、取消或部分结束的历史任务标为 needs_attention，不借每次扫描重置用户停止或重试次数。
 
