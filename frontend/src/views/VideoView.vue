@@ -2,7 +2,7 @@
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api, write, errorText, statusText, session, date } from '../api';
-import { compactSpecification, type VideoDetail } from '../player/mediaInfo';
+import { compactSpecification, measuredVariant, type VideoDetail } from '../player/mediaInfo';
 import {
   playlistScope,
   playlistQuery,
@@ -53,7 +53,9 @@ let seq = 0,
   controller = new AbortController();
 let pendingNavigation: { id: string; start: boolean; resume: boolean } | null = null;
 const part = computed(() => video.value?.parts?.find((p) => p.id === partId.value));
-const measured = computed(() => video.value?.media_properties?.[activeVariantId.value]);
+const measured = computed(() =>
+  measuredVariant(video.value?.media_properties, activeVariantId.value),
+);
 const archivedVariant = computed(() =>
   part.value?.variants.find((variant) => variant.id === activeVariantId.value),
 );
@@ -285,7 +287,11 @@ onBeforeUnmount(() => {
           <UiIcon name="play" /><span>此分 P 还没有可播放的归档</span>
           <p>{{ statusText(video.capture_status) }}</p>
         </div>
-        <div v-if="archivedVariant" class="video-specification" aria-label="当前播放规格">
+        <div
+          v-if="archivedVariant && archiveSpecification"
+          class="video-specification"
+          aria-label="当前播放规格"
+        >
           <span>{{ archiveSpecification }}</span>
         </div>
         <PlaybackQueue

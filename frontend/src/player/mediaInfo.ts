@@ -13,6 +13,7 @@ export interface SourceFormat {
   total_bitrate_bps?: number | null;
 }
 export interface MeasuredMedia extends MediaProperties {
+  source_variant_id?: string;
   mime_type?: string | null;
   width?: number | null;
   height?: number | null;
@@ -53,14 +54,28 @@ export type VideoDetail = Video & {
   media_properties?: Record<string, MeasuredMedia>;
 };
 export function compactSpecification(format?: SourceFormat | null) {
-  if (!format) return '—';
+  if (!format) return '';
   const resolution =
     format.width && format.height
       ? `${format.width} × ${format.height}`
       : format.height
         ? `${format.height}P`
-        : '—';
-  return `${resolution} · ${format.fps && format.fps > 0 ? `${Number(format.fps.toFixed(2))} fps` : '— fps'} · ${format.total_bitrate_bps ? bitrate(format.total_bitrate_bps) : format.video_bitrate_bps ? bitrate(format.video_bitrate_bps) : '— Mbps'}`;
+        : '';
+  const rate = bitrate(format.total_bitrate_bps || format.video_bitrate_bps);
+  return [
+    resolution,
+    format.fps && Number.isFinite(format.fps) && format.fps > 0
+      ? `${Number(format.fps.toFixed(2))} fps`
+      : '',
+    rate === '未记录' ? '' : rate,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+export function measuredVariant(properties: Record<string, MeasuredMedia> | undefined, id: string) {
+  const current = properties?.[id];
+  const source = current?.source_variant_id ? properties?.[current.source_variant_id] : undefined;
+  return { ...source, ...current };
 }
 export type VideoCreator = Creator & { role_title?: string | null };
 

@@ -1,6 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bitrate, formatSpecification } from './mediaInfo.ts';
+import {
+  bitrate,
+  formatSpecification,
+  compactSpecification,
+  measuredVariant,
+} from './mediaInfo.ts';
+
+test('compact HLS information inherits only its recorded source and omits unknown values', () => {
+  const properties = {
+    original: { fps: 59.94, total_bitrate_bps: 5_410_000 },
+    hls: { source_variant_id: 'original' },
+    other: { fps: 24, total_bitrate_bps: 9_000_000 },
+  };
+  assert.equal(
+    compactSpecification({ width: 3840, height: 2160, ...measuredVariant(properties, 'hls') }),
+    '3840 × 2160 · 59.94 fps · 5.41 Mbps',
+  );
+  assert.equal(
+    compactSpecification({ width: 3840, height: 2160, ...measuredVariant(properties, 'missing') }),
+    '3840 × 2160',
+  );
+  assert.equal(compactSpecification({ fps: NaN, total_bitrate_bps: -1 }), '');
+});
 
 test('unknown rates and numeric source quality IDs are never displayed as measured media', () => {
   for (const value of [undefined, null, 0, -1, NaN, Infinity])
