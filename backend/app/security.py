@@ -103,6 +103,28 @@ def authenticated(request: Request, db: Session = Depends(get_db)) -> tuple[User
     return user, session
 
 
+def optional_identity(request: Request, db: Session = Depends(get_db)):
+    """Public reads permit guests; a valid user's writes retain CSRF protection."""
+    try:
+        return authenticated(request, db)
+    except HTTPException as error:
+        if error.status_code != 401:
+            raise
+        return None
+
+
+def same_origin(request: Request):
+    origin = request.headers.get("origin")
+    allowed = {str(request.base_url).rstrip("/")}
+    from app.passkeys import site_policy
+    try:
+        allowed.add(site_policy()[0])
+    except HTTPException:
+        pass
+    if request.headers.get("sec-fetch-site") == "cross-site" or (origin and origin.rstrip("/") not in allowed):
+        raise HTTPException(403, "请求来源不匹配")
+
+
 def require_admin(identity=Depends(authenticated)) -> User:
     user, _ = identity
     if user.role != "admin":

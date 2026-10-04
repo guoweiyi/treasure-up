@@ -1,4 +1,9 @@
-"""Authenticated playback sessions and explicit replica lifecycle operations."""
+"""Browser-bound playback sessions and authenticated replica lifecycle operations."""
+import hashlib
+import hmac
+import re
+import secrets
+from types import SimpleNamespace
 from datetime import timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -15,9 +20,27 @@ from app.jobs import enqueue
 from app.models import (Asset, AssetLocation, AuditLog, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot,
                         MediaVariant, PlaybackSession, Setting, StorageObservation, StorageProfile,
                         SubtitleTrack, PlatformUser, UserSnapshot, Video, VideoCreator, VideoPart, VideoStatSnapshot, utcnow)
-from app.security import authenticated, require_admin
+from app.security import authenticated, require_admin, optional_identity, same_origin
 
 router = APIRouter(prefix="/api/v1")
+
+GUEST_COOKIE = "treasure_viewer"
+
+
+def playback_identity(request: Request, response: Response, identity=Depends(optional_identity)):
+    if request.method not in {"GET", "HEAD"}:
+        same_origin(request)
+    token = request.cookies.get(GUEST_COOKIE, "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+        token = ""
+    if not identity and request.method == "POST" and request.url.path.rstrip("/").endswith("/playback-sessions"):
+        # Keep existing guest sessions usable while extending the browser binding
+        # to cover the full lifetime of this newly created session.
+        token = token or secrets.token_urlsafe(32)
+        response.set_cookie(GUEST_COOKIE, token, httponly=True, secure=settings.cookie_secure,
+                            samesite="strict", max_age=4 * 3600, path="/api/v1/playback-sessions")
+    return (SimpleNamespace(id=identity[0].id if identity else None,
+                            guest_hash=hashlib.sha256(token.encode()).hexdigest() if token else ""), None)
 
 
 def required(db, model, identifier):
@@ -42,7 +65,9 @@ def session_assets(db, session):
 
 def owned_session(db, session_id, user):
     session = required(db, PlaybackSession, session_id)
-    if session.user_id != user.id or session.expires_at.replace(tzinfo=timezone.utc) <= utcnow():
+    owned = session.user_id == user.id if session.user_id else bool(
+        getattr(user, "guest_hash", "") and hmac.compare_digest(session.state.get("guest_hash", ""), user.guest_hash))
+    if not owned or session.expires_at.replace(tzinfo=timezone.utc) <= utcnow():
         raise HTTPException(403, "播放会话已过期，请重新获取播放地址")
     return session
 
@@ -65,7 +90,7 @@ def media_response(resolved, request):
 
 
 @router.post("/playback-sessions")
-def create_playback(body: schemas.PlaybackInput, identity=Depends(authenticated), db: Session = Depends(get_db)):
+def create_playback(body: schemas.PlaybackInput, identity=Depends(playback_identity), db: Session = Depends(get_db)):
     from app.storage.routing import playback_routes, select_route
     user = identity[0]
     required(db, VideoPart, body.part_id)
@@ -108,7 +133,7 @@ def create_playback(body: schemas.PlaybackInput, identity=Depends(authenticated)
             route["probe_url"] = f"/api/v1/playback-sessions/{session.id}/probe/{route['id']}"
             route["probe_bytes"] = config.probe_bytes
             probe_ids.append(route["id"])
-    session.state = {"failed_profile_ids": [], "switch_count": 0, "probe_route_ids": probe_ids,
+    session.state = {"guest_hash": user.guest_hash if user.id is None else "", "failed_profile_ids": [], "switch_count": 0, "probe_route_ids": probe_ids,
                      "probe_asset_id": probe_asset_id, "reported_routes": []}
     db.commit()
     metadata = dict(selected.metadata_json or {})
@@ -125,7 +150,7 @@ def create_playback(body: schemas.PlaybackInput, identity=Depends(authenticated)
 
 
 @router.get("/playback-sessions/{session_id}/manifest.m3u8")
-def manifest(session_id: str, identity=Depends(authenticated), db: Session = Depends(get_db)):
+def manifest(session_id: str, identity=Depends(playback_identity), db: Session = Depends(get_db)):
     from app.playback import render_manifest
     session = owned_session(db, session_id, identity[0])
     _, _, index = session_assets(db, session)
@@ -136,7 +161,7 @@ def manifest(session_id: str, identity=Depends(authenticated), db: Session = Dep
 
 
 @router.api_route("/playback-sessions/{session_id}/assets/{asset_id}", methods=["GET", "HEAD"])
-def playback_asset(session_id: str, asset_id: str, request: Request, identity=Depends(authenticated), db: Session = Depends(get_db)):
+def playback_asset(session_id: str, asset_id: str, request: Request, identity=Depends(playback_identity), db: Session = Depends(get_db)):
     from app.storage.routing import resolve_session_asset
     from app.storage.base import StorageError
     session = owned_session(db, session_id, identity[0])
@@ -155,7 +180,7 @@ def playback_asset(session_id: str, asset_id: str, request: Request, identity=De
 
 
 @router.get("/playback-sessions/{session_id}/probe/{profile_id}")
-def playback_probe(session_id: str, profile_id: str, identity=Depends(authenticated), db: Session = Depends(get_db)):
+def playback_probe(session_id: str, profile_id: str, identity=Depends(playback_identity), db: Session = Depends(get_db)):
     from app.storage.routing import resolve_on_profile
     session = owned_session(db, session_id, identity[0])
     if profile_id not in session.state.get("probe_route_ids", []):
@@ -180,7 +205,7 @@ def playback_probe(session_id: str, profile_id: str, identity=Depends(authentica
 
 
 @router.post("/playback-sessions/{session_id}/observations")
-def observation(session_id: str, body: schemas.PlaybackObservationInput, identity=Depends(authenticated), db: Session = Depends(get_db)):
+def observation(session_id: str, body: schemas.PlaybackObservationInput, identity=Depends(playback_identity), db: Session = Depends(get_db)):
     session = owned_session(db, session_id, identity[0])
     db.scalar(select(PlaybackSession).where(PlaybackSession.id == session.id)
               .with_for_update().execution_options(populate_existing=True))
@@ -191,10 +216,13 @@ def observation(session_id: str, body: schemas.PlaybackObservationInput, identit
         raise HTTPException(409, "此会话已记录该节点测量")
     if body.latency_ms > body.elapsed_ms or (body.succeeded and body.bytes_read == 0):
         raise HTTPException(422, "测量字段不一致")
-    db.add(StorageObservation(profile_id=body.route_id, asset_id=session.state.get("probe_asset_id"), user_id=identity[0].id,
-                             scope="browser_delivery", latency_ms=body.latency_ms, elapsed_ms=body.elapsed_ms,
-                             bytes_read=body.bytes_read, succeeded=body.succeeded))
-    session.state = {**session.state, "reported_routes": [*reported, body.route_id]}
+    if identity[0].id:
+        db.add(StorageObservation(profile_id=body.route_id, asset_id=session.state.get("probe_asset_id"), user_id=identity[0].id,
+                                 scope="browser_delivery", latency_ms=body.latency_ms, elapsed_ms=body.elapsed_ms,
+                                 bytes_read=body.bytes_read, succeeded=body.succeeded))
+    # Guest observations stay in their own short-lived session, never global routing data.
+    session.state = {**session.state, "reported_routes": [*reported, body.route_id],
+                     "measurements": {**session.state.get("measurements", {}), body.route_id: body.model_dump()}}
     db.commit()
     return {"recorded": True}
 
@@ -297,7 +325,7 @@ def prepare(variant_id: str, user=Depends(require_admin), db: Session = Depends(
 
 @router.get("/videos/{video_id}/statistics")
 def statistics(video_id: str, page: int = Query(1, ge=1), page_size: int = Query(30, ge=1, le=100),
-               identity=Depends(authenticated), db: Session = Depends(get_db)):
+               db: Session = Depends(get_db)):
     required(db, Video, video_id)
     return catalog.page(db, select(VideoStatSnapshot).where(VideoStatSnapshot.video_id == video_id)
                         .order_by(VideoStatSnapshot.observed_at.desc()), page, page_size,

@@ -5,6 +5,7 @@ import { ElButton, ElDialog, ElSwitch, ElPagination } from 'element-plus';
 import { api, write, date, errorText } from '../../api';
 import type { Page, Row } from '../../types';
 import { createScopedInterval } from '../../utils/scopedInterval';
+import SourcePicker from './SourcePicker.vue';
 
 const route = useRoute();
 const items = ref<Row[]>([]),
@@ -20,6 +21,8 @@ const editId = ref(''),
   selected = ref<Row | null>(null),
   history = ref<Row[]>([]);
 const form = reactive<Row>({});
+const selectedSource = ref('');
+const selectedSourceKey = ref('');
 const startPolling = createScopedInterval(onBeforeUnmount);
 let generation = 0;
 const labels: Record<string, string> = {
@@ -101,6 +104,8 @@ async function edit(item?: Row) {
     const settings = await api<Row>('/admin/settings');
     accounts.value = (await api<Page<Row>>('/admin/accounts?page_size=100')).items;
     Object.keys(form).forEach((key) => delete form[key]);
+    selectedSource.value = '';
+    selectedSourceKey.value = '';
     editId.value = item?.id || '';
     Object.assign(form, {
       kind: item?.kind || String(route.query.kind || 'favorite'),
@@ -125,6 +130,28 @@ async function resolve() {
   });
   form.source_id = parsed.source_id;
   form.kind = parsed.kind;
+  if (
+    form.title === selectedSource.value &&
+    selectedSourceKey.value !== `${parsed.kind}:${parsed.source_id}`
+  )
+    form.title = '';
+  if (!form.title.trim() && form.account_id) {
+    const named = await api<Row>(
+      `/admin/source-discovery/resolve?${new URLSearchParams({
+        account_id: form.account_id,
+        value: parsed.source_id,
+        kind: parsed.kind,
+      })}`,
+    );
+    form.title = named.title;
+  }
+}
+function chooseSource(choice: { kind: string; source_id: string; title: string }) {
+  form.kind = choice.kind;
+  form.source_id = choice.source_id;
+  if (!form.title.trim() || form.title === selectedSource.value) form.title = choice.title;
+  selectedSource.value = choice.title;
+  selectedSourceKey.value = `${choice.kind}:${choice.source_id}`;
 }
 async function save() {
   saving.value = true;
@@ -225,8 +252,7 @@ onBeforeUnmount(() => {
       <div class="source-main">
         <span class="source-kind">{{ item.kind === 'creator' ? 'UP 主' : '收藏夹' }}</span>
         <h3>{{ item.title }}</h3>
-        <span class="muted">{{ item.kind === 'creator' ? 'UID' : 'ID' }} {{ item.source_id }}</span
-        ><el-switch
+        <el-switch
           :model-value="item.enabled"
           :aria-label="`${item.title} 自动检查`"
           @change="toggle(item, $event)"
@@ -295,8 +321,15 @@ onBeforeUnmount(() => {
           请先在
           <RouterLink to="/admin/accounts" @click="open = false">B 站账号</RouterLink> 中添加授权。
         </p>
+        <SourcePicker
+          v-if="!editId && open"
+          :account-id="form.account_id"
+          :kind="form.kind"
+          :source-id="form.source_id"
+          @select="chooseSource"
+        />
         <label
-          >{{ form.kind === 'creator' ? 'UP 主链接或 UID' : '收藏夹链接或 ID'
+          >{{ form.kind === 'creator' ? '或手动填写 UP 主链接 / UID' : '或手动填写收藏夹链接 / ID'
           }}<input
             v-model="form.source_id"
             :disabled="!!editId"
@@ -304,7 +337,10 @@ onBeforeUnmount(() => {
             placeholder="粘贴链接或填写数字 ID"
         /></label>
         <label
-          >显示名称<input v-model="form.title" maxlength="500" placeholder="留空使用来源 ID"
+          >显示名称<input
+            v-model="form.title"
+            maxlength="500"
+            placeholder="留空自动读取真实名称，也可填写自定义名称"
         /></label>
         <div class="source-grid">
           <label

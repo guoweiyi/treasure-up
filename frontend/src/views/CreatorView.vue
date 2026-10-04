@@ -81,16 +81,15 @@ watch(
       <div>
         <h1>{{ creator.name }}</h1>
         <p class="muted small">
-          UID {{ creator.uid }}
           <span v-if="creator.source_name && creator.source_name !== creator.name"
-            >· 平台昵称 {{ creator.source_name }}</span
+            >平台昵称 {{ creator.source_name }}</span
           >
         </p>
         <p class="preserve-lines">{{ creator.description || '暂无简介' }}</p>
         <div v-if="creator.tags?.length" class="tags">
           <span v-for="tag in creator.tags" :key="tag">{{ tag }}</span>
         </div>
-        <div class="creator-subscription">
+        <div v-if="session.user?.role === 'admin'" class="creator-subscription">
           <strong v-if="monitor?.subscribed">{{
             monitor.enabled ? '已加入自动备份' : '已订阅 · 自动备份暂停'
           }}</strong>
@@ -136,8 +135,6 @@ watch(
       <h2>个人简介</h2>
       <p class="preserve-lines">{{ creator.description || '暂无简介' }}</p>
       <dl>
-        <dt>UID</dt>
-        <dd>{{ creator.uid || '未收录' }}</dd>
         <dt v-if="creator.source_name">平台昵称</dt>
         <dd v-if="creator.source_name">{{ creator.source_name }}</dd>
       </dl>

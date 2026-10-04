@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { validateOrigin } from '../src/policy.js';
 
 test('only explicit HTTPS and loopback development HTTP roots are accepted', () => {
-  for (const input of ['https://example.com', 'https://example.com:8443/', 'http://localhost:8788/', 'http://127.0.0.1:8788', 'http://[::1]:8788']) {
+  for (const input of ['https://example.com', 'https://example.com:8443/', 'http://localhost:8788/', 'http://127.0.0.1:8788', 'http://[::1]:8788', 'https://example.com/api/v1', 'https://example.com/api/v1/', 'https://example.com/api']) {
     assert.equal(validateOrigin(input), new URL(input).origin);
   }
   for (const input of ['http://server.lan', 'http://192.168.1.5', 'http://localhost.evil.invalid', 'file:///tmp/a', 'data:text/html,a', 'javascript:alert(1)', 'https://user:password@example.com', 'https://@example.com', 'https://example.com/path', 'https://example.com?', 'https://example.com#', 'https://example.com\\@evil.com', 'http://localhost:99999', 'https://tauri.localhost', 'https://ipc.localhost', 'https://treasure-up.invalid']) {

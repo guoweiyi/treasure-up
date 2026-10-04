@@ -97,6 +97,12 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
+  download-worker:
+    <<: *backend
+    command: [celery, -A, app.worker:celery, worker, -Q, download, --concurrency=1, --loglevel=WARNING]
+    depends_on:
+      init:
+        condition: service_completed_successfully
   backup-worker:
     <<: *backend
     command: [celery, -A, app.worker:celery, worker, -Q, backup, --concurrency=1, --loglevel=WARNING]

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { api, errorText } from '../api';
+import { api, errorText, session } from '../api';
 import type { Collection, Page } from '../types';
 import EmptyState from '../components/EmptyState.vue';
 import Pagination from '../components/Pagination.vue';
@@ -56,12 +56,20 @@ onMounted(() => load());
         :key="item.id"
         :to="{ path: '/', query: { collection_id: item.id } }"
         class="collection-card"
-        ><div class="folder-icon" aria-hidden="true">▤</div>
+        ><img
+          v-if="item.cover_url"
+          :src="item.cover_url"
+          alt=""
+          class="collection-cover"
+          loading="lazy"
+        />
+        <div v-else class="folder-icon" aria-hidden="true">▤</div>
         <div>
           <p class="muted small">{{ kinds[item.kind] || '视频集合' }}</p>
           <h2>{{ item.title }}</h2>
           <p class="muted">已保存 {{ item.saved_count }} 条视频</p>
           <SourceStatus
+            v-if="session.user?.role === 'admin'"
             :monitor="item.monitor"
             :last-scan-at="item.last_scan_at"
             :creator="item.kind === 'creator'"
@@ -77,3 +85,18 @@ onMounted(() => load());
     /><Pagination :page="page" :total="total" @change="load" />
   </main>
 </template>
+<style scoped>
+.collection-cover {
+  width: 112px;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border-radius: 7px;
+  align-self: center;
+  flex-shrink: 0;
+}
+@media (max-width: 480px) {
+  .collection-cover {
+    width: 88px;
+  }
+}
+</style>

@@ -1,12 +1,12 @@
 # Optional: docker compose -f compose.yaml -f compose.light.yaml up -d --build
-# PostgreSQL, Redis, scheduler and the isolated backup worker remain unchanged.
+# Keep metadata responsive; only download and media processing share a worker.
 services:
-  collector:
-    profiles: [full-workers]
   media-worker:
+    profiles: [full-workers]
+  download-worker:
     profiles: [full-workers]
   worker:
     extends:
       file: compose.yaml
       service: collector
-    command: [celery, -A, "app.worker:celery", worker, -Q, "collector,media", "--concurrency=1", "--loglevel=WARNING"]
+    command: [celery, -A, "app.worker:celery", worker, -Q, "download,media", "--concurrency=1", "--loglevel=WARNING"]

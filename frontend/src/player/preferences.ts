@@ -42,7 +42,7 @@ export function defaultPreferences(visible = true): DanmakuPreferences {
     opacity: 100,
     fontSize: 25,
     area: 75,
-    speed: 5,
+    speed: 7.5,
     density: 100,
     offset: 0,
     fontFamily: 'Microsoft YaHei',

@@ -9,10 +9,12 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 from copy import deepcopy
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -24,11 +26,11 @@ from app.models import (AssetRef, CaptureRun, Collection, CollectionItem, Commen
     Video, VideoCreator, VideoPart, VideoStatSnapshot)
 from app.security import decrypt_secret
 from app.storage.service import ingest_file
-from .client import BiliClient, clean_raw, safe_source_url
+from .client import BiliClient, clean_raw, safe_source_url, parse_cookies
 from .errors import IngestDeferred, IngestError, PartialCaptureError
 from .media import archive_media, cleanup_media_scratch, ensure_playback_variant
 from .protobuf import decode_danmaku
-from .throttle import AccountPacer
+from .throttle import AccountPacer, utc
 
 
 def _now():
@@ -74,6 +76,53 @@ def _ref(db, asset_id, entity, entity_id, purpose):
         db.add(AssetRef(asset_id=asset_id, entity_type=entity, entity_id=entity_id, purpose=purpose))
 
 
+def _halt(error):
+    return error.blocked or getattr(error, "deferred", False) or error.code in {"job_stopped", "rate_limited"}
+
+
+@contextmanager
+def account_request_scope(db, account, client, pacer, url, *, decryptor=None):
+    """Wait outside the shared account lock, then recheck before a real request.
+
+    Both background ingestion and foreground source discovery use this scope.
+    Another lane can reserve a slot during our wait; in that case we release
+    the lock and wait for the new deadline, rather than holding it while idle.
+    """
+    host = (urlsplit(url).hostname or "").lower()
+    if host != "bilibili.com" and not host.endswith(".bilibili.com"):
+        db.refresh(account, attribute_names=["cooldown_until", "risk_failures"])
+        try:
+            yield
+        except IngestError as error:
+            if error.code == "rate_limited":
+                pacer.failed(error)
+                error.account_backoff_applied = True
+            raise
+        return
+    while True:
+        db.refresh(account, attribute_names=["next_request_at", "cooldown_until", "risk_failures"])
+        pacer.check_cooldown()
+        pacer._wait_until(account.next_request_at)
+        with _lock(db, "account:" + account.id):
+            db.refresh(account)
+            pacer.check_cooldown()
+            deadline = utc(account.next_request_at)
+            if deadline and deadline > pacer.clock():
+                continue
+            try:
+                client.cookies = parse_cookies((decryptor or decrypt_secret)(account.secret_encrypted))
+            except Exception:
+                raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
+            try:
+                yield
+            except IngestError as error:
+                if error.code == "rate_limited":
+                    pacer.failed(error)
+                    error.account_backoff_applied = True
+                raise
+            return
+
+
 class Context:
     def __init__(self, db, job, client):
         self.db, self.job, self.client = db, job, client
@@ -88,6 +137,8 @@ class Context:
         self.pages = 0
         self.budget = max(1, min(10000, int(self.policy.get("max_pages", 10000)), int(self.policy.get("request_budget", self.policy.get("page_budget", 50)))))
         self.owner = job.lease_owner
+        self.started = time.monotonic()
+        self.progress_lock, self.last_progress = threading.Lock(), 0
         self.run = db.get(CaptureRun, self.cp.get("run_id")) if self.cp.get("run_id") else None
         if not self.run:
             self.run = CaptureRun(scope={"kind": job.kind, "account_id": job.account_id}, status="running")
@@ -127,10 +178,31 @@ class Context:
 
     def request_slot(self):
         self.guard()
-        if self.pages >= self.budget:
+        if self.pages >= self.budget or (self.job.kind == "archive_video" and (self.pages >= 8 or time.monotonic() - self.started >= 45)):
             return False
         self.pages += 1
         return True
+
+    def stage(self, phase, **details):
+        self.cp["progress"] = {"phase": phase, "updated_at": _now().isoformat(), **details}
+        self.save()
+
+    def media_progress(self, values):
+        if not self.owner:
+            return
+        # Fragment workers use separate Sessions; never share the runner's
+        # mutable transaction across yt-dlp's callback threads.
+        with self.progress_lock:
+            if time.monotonic() - self.last_progress < 5:
+                return
+            self.last_progress = time.monotonic()
+            from app.jobs import ensure_active, fence_transaction
+            with Session(self.db.get_bind()) as progress_db:
+                ensure_active(progress_db, self.job_id, self.owner)
+                current = progress_db.get(Job, self.job_id)
+                current.result = {**(current.result or {}), "progress": {**values, "updated_at": _now().isoformat()}}
+                fence_transaction(progress_db, self.job_id, self.owner)
+                progress_db.commit()
 
     def image(self, url, entity, entity_id, purpose="avatar"):
         if not url or not self.policy.get("images", True):
@@ -148,7 +220,7 @@ class Context:
             return ingest_file(self.db, path, kind=kind, mime_type=mime, profile_id=self.policy.get("storage_profile_id"))
 
 
-def _user(ctx, raw, *, creator=False):
+def _user(ctx, raw, *, creator=False, full_profile=False):
     if not isinstance(raw, dict):
         return None, None, None
     uid = _id(raw.get("mid"), required=False)
@@ -160,15 +232,19 @@ def _user(ctx, raw, *, creator=False):
         user = PlatformUser(uid=uid, display_name="", signature="", raw={})
         db.add(user)
         db.flush()
-    name = raw.get("uname", raw.get("name", user.display_name))
-    signature = raw.get("sign", user.signature)
-    avatar = raw.get("avatar", raw.get("face", (user.raw or {}).get("avatar_url")))
+    name = raw.get("uname") or raw.get("name") or user.display_name
+    # Comment members and view.owner often include sign="" and face="".
+    # Only an authoritative profile response may clear a previously saved bio.
+    signature = raw.get("sign", user.signature) if full_profile else raw.get("sign") or user.signature
+    avatar = raw.get("avatar") or raw.get("face") or (user.raw or {}).get("avatar_url")
     avatar = safe_source_url("https:" + avatar if avatar.startswith("//") else avatar) if avatar else None
     changed = name != user.display_name or signature != user.signature or avatar != (user.raw or {}).get("avatar_url")
     user.display_name, user.signature = str(name or ""), str(signature or "")
     if avatar != (user.raw or {}).get("avatar_url"):
         user.avatar_asset_id = None
-    user.raw = {"avatar_url": avatar}
+    user.raw = {**(user.raw or {}), "avatar_url": avatar}
+    if full_profile:
+        user.raw = {**user.raw, "profile_fetched_at": _now().isoformat(), "public_profile": clean_raw(raw)}
     snapshot = None if changed else db.scalar(select(UserSnapshot).where(UserSnapshot.user_id == user.id).order_by(UserSnapshot.observed_at.desc()))
     if not snapshot:
         snapshot = UserSnapshot(user_id=user.id, display_name=user.display_name, signature=user.signature, avatar_asset_id=user.avatar_asset_id, observed_at=_now())
@@ -191,9 +267,9 @@ def _images(ctx):
     """Independent durable queue; a failed asset doesn't discard comment bodies."""
     pending, failed = list(ctx.cp["images"]), []
     cache = {}
-    maximum = max(1, min(1000, int(ctx.policy.get("image_budget", 100))))
+    maximum = max(1, min(100, int(ctx.policy.get("image_budget", 50))))
     for index, task in enumerate(pending):
-        if index >= maximum:
+        if index >= maximum or (index and ctx.job.kind == "archive_video" and time.monotonic() - ctx.started >= 60):
             ctx.cp["images"] = failed + pending[index:]
             ctx.save()
             return False
@@ -202,7 +278,12 @@ def _images(ctx):
             if task["url"] in cache:
                 asset = cache[task["url"]]
             else:
-                body, mime = ctx.client.asset(task["url"], limit=10 * 1024 * 1024)
+                url = task["url"]
+                if task["purpose"] == "avatar":
+                    # CDN thumbnail transformations preserve the source URL in
+                    # observations while archiving a display-sized raster.
+                    url = url.split("@", 1)[0] + "@160w_160h_1c.webp"
+                body, mime = ctx.client.asset(url, limit=10 * 1024 * 1024)
                 # Never serve HTML/SVG under a trusted origin as an image.
                 if body.startswith(b"\x89PNG\r\n\x1a\n"):
                     mime = "image/png"
@@ -226,7 +307,7 @@ def _images(ctx):
                     ctx.db.add(CommentAsset(comment_id=task["id"], asset_id=asset.id, kind=task["purpose"], position=task.get("position", 0)))
             _ref(ctx.db, asset.id, task["entity"], task["id"], task["purpose"])
         except IngestError as error:
-            if error.blocked:
+            if _halt(error):
                 raise
             failed.append(task)
         ctx.cp["images"] = failed + pending[index + 1:]
@@ -248,13 +329,13 @@ def _enqueue_archive(ctx, video):
     # archive can serve both collections without another full ingestion task.
     if video.capture_status == "complete" and (video.metadata_json or {}).get("capture_policy") == _capture_policy(ctx.policy):
         return "reused"
-    active = ctx.db.scalar(select(Job.id).where(Job.kind == "archive_video", Job.target_id == video.id,
+    active = ctx.db.scalar(select(Job.id).where(Job.kind.in_(["archive_video", "download_media"]), Job.target_id == video.id,
                           Job.status.in_(["queued", "running", "paused", "blocked"])))
     if active:
         return "active"
     # Exhausted or cancelled work needs an explicit retry; a recurring source
     # scan must not silently reset its failure budget or undo the user's stop.
-    stopped = ctx.db.scalar(select(Job.id).where(Job.kind == "archive_video", Job.target_id == video.id,
+    stopped = ctx.db.scalar(select(Job.id).where(Job.kind.in_(["archive_video", "download_media"]), Job.target_id == video.id,
                            Job.status.in_(["failed", "cancelled", "partial"])))
     if stopped:
         return "needs_attention"
@@ -280,8 +361,9 @@ def _metadata(ctx, video):
     video.duration = float(data.get("duration") or 0)
     video.published_at = _timestamp(data.get("pubdate"))
     source_metadata = clean_raw(data)
-    if (video.metadata_json or {}).get("media_properties"):
-        source_metadata["media_properties"] = deepcopy(video.metadata_json["media_properties"])
+    for key in ("media_properties", "source_quality", "ingest_state", "capture_policy"):
+        if key in (video.metadata_json or {}):
+            source_metadata[key] = deepcopy(video.metadata_json[key])
     video.metadata_json, video.source_state = source_metadata, "available"
     if isinstance(data.get("stat"), dict):
         _save_stats(ctx, video, data["stat"])
@@ -611,121 +693,241 @@ def _raise_capture_errors(ctx, errors):
                                   blocked=any(error.blocked for error in errors))
 
 
+def _ingest_state(ctx, video, **values):
+    metadata = dict(video.metadata_json or {})
+    metadata["ingest_state"] = {**metadata.get("ingest_state", {}), **values, "updated_at": _now().isoformat()}
+    video.metadata_json = metadata
+
+
+def _playback_state(ctx, video, archive, job, status=None):
+    state = (video.metadata_json or {}).get("ingest_state", {})
+    children = dict(state.get("playback_jobs", {}))
+    status = status or ("complete" if job.status == "succeeded" else job.status)
+    children[archive.id] = {"job_id": job.id, "part_id": archive.part_id, "status": status}
+    statuses = {item["status"] for item in children.values()}
+    aggregate = next((value for value in ("failed", "partial", "blocked", "cancelled", "paused", "running", "queued") if value in statuses), "complete")
+    _ingest_state(ctx, video, playback=aggregate, playback_job_id=job.id, playback_jobs=children)
+
+
+def _profiles(ctx, video):
+    if not ctx.policy.get("profiles", True) or ctx.cp.get("profiles_done"):
+        return True
+    ids = ctx.db.scalars(select(PlatformUser.uid).join(Creator, Creator.user_id == PlatformUser.id)
+        .join(VideoCreator, VideoCreator.creator_id == Creator.id).where(VideoCreator.video_id == video.id)).all()
+    completed = list(ctx.cp.get("profile_uids", []))
+    for uid in sorted(set(ids)):
+        if uid in completed:
+            continue
+        if not ctx.request_slot():
+            return False
+        _user(ctx, ctx.client.profile(uid), creator=True, full_profile=True)
+        completed.append(uid)
+        ctx.cp["profile_uids"] = completed
+        ctx.save()
+    ctx.cp["profiles_done"] = True
+    ctx.save()
+    return True
+
+
+def _enqueue_media(ctx, video):
+    from app.jobs import enqueue
+    # A deterministic child survives redelivery without resetting a paused,
+    # cancelled or exhausted task. Existing media checkpoints are transferred
+    # once when upgrading pre-split archive tasks.
+    key = "download:" + ctx.job.id
+    child = ctx.db.scalar(select(Job).where(Job.dedupe_key == key))
+    if not child:
+        child = enqueue(ctx.db, "download_media", video.id, ctx.job.account_id,
+                        dict(ctx.policy), key, frozen_policy=True)
+        child.checkpoint = {key: deepcopy(ctx.cp[key]) for key in
+            ("part_ids", "media_parts", "media_variants", "playback_parts") if key in ctx.cp}
+        child.checkpoint = {**child.checkpoint, "metadata_parent_id": ctx.job.id}
+    ctx.cp["media_job_id"] = child.id
+    _ingest_state(ctx, video, metadata="ready", media=child.status, media_job_id=child.id)
+    return child
+
+
 def _archive(ctx, video):
+    """Fast metadata slices; never download or transcode media in this job."""
+    _ingest_state(ctx, video, metadata="running")
     if not ctx.cp.get("metadata_done"):
-        ctx.guard()
+        ctx.stage("metadata")
         _metadata(ctx, video)
     errors = []
-    completed = list(ctx.cp.get("media_parts", []))
-    playback_completed = dict(ctx.cp.get("playback_parts", {}))
-    archives = dict(ctx.cp.get("media_variants", {}))
-    for part_id in ctx.cp["part_ids"]:
+    if not ctx.cp.get("basics_done"):
+        ctx.stage("profiles")
+        try:
+            if not _profiles(ctx, video):
+                return False
+        except IngestError as error:
+            if _halt(error):
+                raise
+            errors.append(error)
+        ctx.stage("cover_and_avatars", pending=len(ctx.cp["images"]))
+        try:
+            if not _images(ctx):
+                _raise_capture_errors(ctx, errors)
+                return False
+        except IngestError as error:
+            if _halt(error):
+                raise
+            errors.append(error)
+        _raise_capture_errors(ctx, errors)
+        ctx.cp["basics_done"] = True
+        ctx.stage("basics_ready")
+        # Let the remaining collection videos publish their cards and people
+        # before this video's potentially large comment/danmaku traversal.
+        if ctx.policy.get("comments", True) or ctx.policy.get("danmaku", True) or ctx.policy.get("subtitles", True):
+            return False
+    for part_id in ctx.cp.get("part_ids", []):
+        ctx.guard()
         part = ctx.db.get(VideoPart, part_id)
-        if ctx.policy.get("media", True) and part_id not in completed:
-            try:
-                variant, reused = archive_media(ctx.db, ctx.client, video, part, ctx.policy, guard=ctx.guard)
-                _ref(ctx.db, variant.asset_id, "media_variant", variant.id, "archive")
-                completed.append(part_id)
-                ctx.cp["media_parts"] = completed
-                archives[part_id] = variant.id
-                ctx.cp["media_variants"] = archives
-                ctx.save()
-                cleanup_media_scratch(part.id, variant.format_key)
-            except IngestError as error:
-                if error.code == "job_stopped" or error.blocked:
-                    raise
-                errors.append(error)
-        if ctx.policy.get("media", True) and part_id in completed and ctx.policy.get("create_compatible_copy", True):
-            try:
-                variant = ctx.db.get(MediaVariant, archives[part_id]) if part_id in archives else ctx.db.scalar(
-                    select(MediaVariant).where(MediaVariant.part_id == part_id, MediaVariant.kind == "archive").order_by(MediaVariant.created_at.desc()).limit(1))
-                if variant is None:
-                    raise IngestError("原始归档检查点对应的媒体不存在", code="missing_archive", retryable=False)
-                if playback_completed.get(part_id) != variant.id:
-                    playback, reused = ensure_playback_variant(ctx.db, part, variant, ctx.policy, guard=ctx.guard)
-                    _ref(ctx.db, playback.asset_id, "media_variant", playback.id, "playback")
-                    playback_completed[part_id] = variant.id
-                    ctx.cp["playback_parts"] = playback_completed
-                    ctx.save()
-            except IngestError as error:
-                if error.code == "job_stopped" or error.blocked:
-                    raise
-                errors.append(error)
         if ctx.policy.get("danmaku", True):
+            ctx.stage("danmaku", part_id=part_id)
             try:
                 done = _danmaku(ctx, video, part)
             except IngestError as error:
-                if error.code == "job_stopped" or error.blocked:
+                if _halt(error):
                     raise
                 errors.append(error)
             else:
                 if not done:
                     _raise_capture_errors(ctx, errors)
                     return False
-        if ctx.policy.get("subtitles", True):
+        if ctx.policy.get("subtitles", True) and part_id not in ctx.cp.get("subtitle_parts", []):
+            if not ctx.request_slot():
+                _raise_capture_errors(ctx, errors)
+                return False
+            ctx.stage("subtitles", part_id=part_id)
             try:
                 _subtitles(ctx, video, part)
             except IngestError as error:
-                if error.code == "job_stopped" or error.blocked:
+                if _halt(error):
                     raise
                 errors.append(error)
-    if ctx.policy.get("profiles", True) and not ctx.cp.get("profiles_done"):
-        try:
-            ids = ctx.db.scalars(select(PlatformUser.uid).join(Creator, Creator.user_id == PlatformUser.id).join(VideoCreator, VideoCreator.creator_id == Creator.id).where(VideoCreator.video_id == video.id)).all()
-            for uid in set(ids):
-                ctx.guard()
-                _user(ctx, ctx.client.profile(uid), creator=True)
-            ctx.cp["profiles_done"] = True
-            ctx.save()
-        except IngestError as error:
-            if error.code == "job_stopped" or error.blocked:
-                raise
-            errors.append(error)
+    comments_done = True
     if ctx.policy.get("comments", True):
+        ctx.stage("comments")
         try:
-            done = _comments(ctx, video)
+            comments_done = _comments(ctx, video)
         except IngestError as error:
-            if error.code == "job_stopped" or error.blocked:
+            if _halt(error):
                 raise
             errors.append(error)
-        else:
-            if not done:
-                _raise_capture_errors(ctx, errors)
-                return False
+    # Drain a bounded batch every slice, including when comments need another
+    # cursor page; otherwise avatars can accumulate indefinitely behind roots.
+    ctx.stage("images", pending=len(ctx.cp["images"]))
     try:
-        done = _images(ctx)
+        images_done = _images(ctx)
     except IngestError as error:
-        if error.code == "job_stopped" or error.blocked:
+        if _halt(error):
             raise
         errors.append(error)
-    else:
-        if not done:
-            _raise_capture_errors(ctx, errors)
-            return False
+        images_done = False
     _raise_capture_errors(ctx, errors)
+    if not comments_done or not images_done:
+        return False
+    if ctx.policy.get("media", True):
+        _enqueue_media(ctx, video)
+    else:
+        _ingest_state(ctx, video, metadata="ready", media="disabled")
+    ctx.stage("metadata_ready", media_job_id=ctx.cp.get("media_job_id"))
     return True
+
+
+def _download(ctx, video):
+    from app.jobs import enqueue
+    _ingest_state(ctx, video, media="running")
+    completed = list(ctx.cp.get("media_parts", []))
+    archives = dict(ctx.cp.get("media_variants", {}))
+    for part_id in ctx.cp.get("part_ids", []):
+        ctx.guard()
+        part = ctx.db.get(VideoPart, part_id)
+        if not part or part.video_id != video.id:
+            raise IngestError("媒体分P检查点无效", code="invalid_metadata", retryable=False)
+        if part_id not in completed:
+            ctx.stage("download", part_id=part_id, completed_parts=len(completed), total_parts=len(ctx.cp["part_ids"]))
+            variant, reused = archive_media(ctx.db, ctx.client, video, part, ctx.policy, guard=ctx.guard)
+            _ref(ctx.db, variant.asset_id, "media_variant", variant.id, "archive")
+            completed.append(part_id)
+            archives[part_id] = variant.id
+            ctx.cp["media_parts"], ctx.cp["media_variants"] = completed, archives
+            ctx.save()
+            cleanup_media_scratch(part.id, variant.format_key)
+        variant = ctx.db.get(MediaVariant, archives.get(part_id)) if archives.get(part_id) else None
+        if variant is None:
+            raise IngestError("原档检查点对应媒体不存在", code="missing_archive", retryable=False)
+        if ctx.policy.get("create_compatible_copy", True):
+            playback = enqueue(ctx.db, "create_playback", variant.id, policy=dict(ctx.policy),
+                dedupe_key="playback:" + variant.id, frozen_policy=True)
+            _playback_state(ctx, video, variant, playback)
+            ctx.save()
+    if not completed:
+        raise IngestError("媒体任务缺少分P检查点", code="invalid_metadata", retryable=False)
+    _ingest_state(ctx, video, media="complete")
+    ctx.stage("media_ready", completed_parts=len(completed))
+    return True
+
+
+def _create_playback(db, job):
+    ctx = Context(db, job, None)
+    archive = db.get(MediaVariant, job.target_id)
+    part = db.get(VideoPart, archive.part_id) if archive else None
+    video = db.get(Video, part.video_id) if part else None
+    if not archive or archive.kind != "archive" or not video:
+        raise IngestError("原始归档不存在", code="missing_archive", retryable=False)
+    ctx.run.video_id = video.id
+    with _lock(db, "video:" + video.id):
+        try:
+            ctx.stage("compatible_copy", part_id=part.id)
+            playback, reused = ensure_playback_variant(db, part, archive, ctx.policy, guard=ctx.guard)
+            _ref(db, playback.asset_id, "media_variant", playback.id, "playback")
+            _playback_state(ctx, video, archive, job, "complete")
+            ctx.run.status, ctx.run.finished_at = "visible_traversal_complete", _now()
+            ctx.stage("compatible_ready", variant_id=playback.id)
+        except IngestError as error:
+            if error.code == "job_stopped":
+                raise
+            ctx.run.status, ctx.run.end_reason = "partial", error.code
+            _playback_state(ctx, video, archive, job, "partial" if error.retryable else "failed")
+            _ingest_state(ctx, video, playback_error=error.code)
+            ctx.save()
+            raise
+    return {"video_id": video.id, "variant_id": playback.id, "run_id": ctx.run.id}
 
 
 def run_job(db, job):
     """Return a safe result; continuation=True means requeue, never success."""
+    if job.kind == "create_playback":
+        return _create_playback(db, job)
     account = db.get(SourceAccount, job.account_id) if job.account_id else None
     if not account:
         raise IngestError("采集任务缺少可用账号", code="login_required", retryable=False)
     client, ctx, pacer = None, None, None
     try:
-        with _lock(db, "account:" + account.id):
+        downloading = job.kind == "download_media"
+        with _lock(db, ("download-account:" if downloading else "collector-account:") + account.id):
             # Account updates use this same lock. Reload only after acquiring it
             # so a waiting job cannot use credentials rotated while it waited.
-            db.refresh(account)
-            try:
-                secret = decrypt_secret(account.secret_encrypted)
-            except Exception:
-                raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
+            with _lock(db, "account:" + account.id):
+                db.refresh(account)
+                try:
+                    secret = decrypt_secret(account.secret_encrypted)
+                except Exception:
+                    raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
             client = BiliClient(secret, interval=0)
             ctx = Context(db, job, client)
             pacer = AccountPacer(db, account, ctx.policy, ctx.guard)
             pacer.check_cooldown()
             client.before_request, client.before_video = pacer.before_request, pacer.before_video
+            client.media_progress = ctx.media_progress
+            def request_context(url):
+                return account_request_scope(db, account, client, pacer, url)
+            def before_video():
+                with _lock(db, "account:" + account.id):
+                    db.refresh(account)
+                    pacer.before_video(defer=downloading)
+            client.request_context, client.before_video = request_context, before_video
             ctx.guard()
             ctx.save()
             # Public endpoints may keep responding after expiry. Verify first so
@@ -742,7 +944,7 @@ def run_job(db, job):
                         done = _images(ctx)
                 result = {"collection_id": job.target_id,
                           "monitor_state": dict((db.get(Collection, job.target_id).monitor_state or {}))}
-            elif job.kind in ("archive_video", "refresh_comments", "refresh_stats"):
+            elif job.kind in ("archive_video", "download_media", "refresh_comments", "refresh_stats"):
                 video = db.get(Video, job.target_id)
                 if video is None and job.kind == "archive_video" and re.fullmatch(r"BV[A-Za-z0-9]{10}", job.target_id):
                     video = db.scalar(select(Video).where(Video.bvid == job.target_id))
@@ -757,6 +959,8 @@ def run_job(db, job):
                 with _lock(db, "video:" + video.id):
                     if job.kind == "archive_video":
                         done = _archive(ctx, video)
+                    elif job.kind == "download_media":
+                        done = _download(ctx, video)
                     elif job.kind == "refresh_stats":
                         done = _refresh_stats(ctx, video)
                     else:
@@ -765,11 +969,12 @@ def run_job(db, job):
                         done = _comments(ctx, video)
                         if done:
                             done = _images(ctx)
-                    if job.kind == "archive_video":
-                        video.capture_status = "complete" if done else "partial"
-                        if done:
+                    if job.kind in ("archive_video", "download_media"):
+                        media_pending = job.kind == "archive_video" and ctx.policy.get("media", True)
+                        video.capture_status = "metadata_ready" if done and media_pending else "complete" if done else "partial"
+                        if done and not media_pending:
                             video.metadata_json = {**(video.metadata_json or {}), "capture_policy": _capture_policy(ctx.policy)}
-                result = {"video_id": video.id}
+                result = {"video_id": video.id, "media_job_id": ctx.cp.get("media_job_id")}
             else:
                 raise IngestError("采集任务类型未支持", code="unsupported_job", retryable=False)
             ctx.run.status = "visible_traversal_complete" if done else "partial"
@@ -784,11 +989,12 @@ def run_job(db, job):
                 result["monitor_state"] = dict(collection.monitor_state)
             ctx.run.finished_at = _now() if done else None
             if done:
+                db.refresh(account, attribute_names=["cooldown_until", "risk_failures"])
                 pacer.succeeded()
             ctx.save()
             return {**result, "run_id": ctx.run.id, "continuation": not done}
     except IngestError as error:
-        if pacer:
+        if pacer and error.code == "rate_limited" and not getattr(error, "account_backoff_applied", False):
             pacer.failed(error)
         if ctx:
             if job.kind == "scan_collection":
@@ -796,7 +1002,7 @@ def run_job(db, job):
                 scan_error(ctx, error)
             ctx.run.status = "blocked" if error.blocked else "partial"
             ctx.run.end_reason = error.code
-            if ctx.run.video_id and job.kind == "archive_video":
+            if ctx.run.video_id and job.kind in ("archive_video", "download_media"):
                 video = db.get(Video, ctx.run.video_id)
                 if video:
                     video.capture_status = "partial"

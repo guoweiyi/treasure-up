@@ -12,6 +12,10 @@ class Login(Input):
     password: str = Field(min_length=1, max_length=256)
 
 
+class StarInput(Input):
+    starred: bool
+
+
 class UserCreate(Input):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=12, max_length=256)

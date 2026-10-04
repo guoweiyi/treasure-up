@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import PlayerChoice from '../player/PlayerChoice.vue';
 import {
   fontOptions,
   fontFamily,
@@ -55,15 +56,6 @@ const preview = computed(() => ({
           step="10"
       /></label>
       <label
-        >移动速度<select v-model.number="prefs.speed">
-          <option :value="10">很慢</option>
-          <option :value="7.5">较慢</option>
-          <option :value="5">适中</option>
-          <option :value="2.5">较快</option>
-          <option :value="1">很快</option>
-        </select></label
-      >
-      <label
         >时间偏移（秒）<input
           v-model.number="prefs.offset"
           type="number"
@@ -73,6 +65,19 @@ const preview = computed(() => ({
         /><small>正数推迟，负数提前</small></label
       >
     </div>
+    <PlayerChoice
+      label="弹幕移动速度"
+      :model-value="prefs.speed"
+      @update:model-value="prefs.speed = Number($event)"
+      :choices="[
+        { value: 10, label: '很慢' },
+        { value: 7.5, label: '较慢' },
+        { value: 5, label: '适中' },
+        { value: 2.5, label: '较快' },
+        { value: 1, label: '很快' },
+      ]"
+    />
+    <p class="player-setting-help">底部弹幕始终避开播放控件；开启防挡字幕会额外留出字幕空间。</p>
     <fieldset class="player-setting-checks">
       <legend>弹幕类型</legend>
       <label><input v-model="prefs.rolling" type="checkbox" />滚动</label
@@ -90,13 +95,12 @@ const preview = computed(() => ({
     <details class="player-settings-details">
       <summary>字体与颜色</summary>
       <div class="player-setting-grid">
-        <label
-          >字体<select v-model="prefs.fontFamily">
-            <option v-for="[value, label] in fontOptions" :key="value" :value="value">
-              {{ label }}
-            </option>
-          </select></label
-        >
+        <PlayerChoice
+          label="字体"
+          :model-value="prefs.fontFamily"
+          :choices="fontOptions.map(([value, label]) => ({ value, label }))"
+          @update:model-value="prefs.fontFamily = String($event)"
+        />
         <label v-if="prefs.fontFamily === 'custom'"
           >本机字体名称<input
             v-model="prefs.customFont"
@@ -104,22 +108,28 @@ const preview = computed(() => ({
             placeholder="如 Noto Sans SC"
           /><small>未安装时使用系统替代字体</small></label
         >
-        <label
-          >字重<select v-model.number="prefs.weight">
-            <option :value="400">常规</option>
-            <option :value="500">中等</option>
-            <option :value="600">半粗</option>
-            <option :value="700">粗体</option>
-          </select></label
-        >
-        <label
-          >文字效果<select v-model="prefs.outline">
-            <option value="stroke">描边</option>
-            <option value="heavy">重墨</option>
-            <option value="shadow">投影</option>
-            <option value="none">无</option>
-          </select></label
-        >
+        <PlayerChoice
+          label="字重"
+          :model-value="prefs.weight"
+          :choices="[
+            { value: 400, label: '常规' },
+            { value: 500, label: '中等' },
+            { value: 600, label: '半粗' },
+            { value: 700, label: '粗体' },
+          ]"
+          @update:model-value="prefs.weight = Number($event)"
+        />
+        <PlayerChoice
+          label="文字效果"
+          :model-value="prefs.outline"
+          :choices="[
+            { value: 'stroke', label: '描边' },
+            { value: 'heavy', label: '重墨' },
+            { value: 'shadow', label: '投影' },
+            { value: 'none', label: '无' },
+          ]"
+          @update:model-value="prefs.outline = String($event)"
+        />
         <label
           >效果宽度 <output>{{ prefs.strokeWidth }} px</output
           ><input

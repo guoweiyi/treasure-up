@@ -2,6 +2,9 @@
 import { computed } from 'vue';
 import type { Playback, Variant, MediaProperties } from '../types';
 import { qualityLabel } from '../utils/format';
+import PlayerChoice from '../player/PlayerChoice.vue';
+import { rateChoices } from '../player/layout';
+import { bitrate, type MeasuredMedia } from '../player/mediaInfo';
 const props = defineProps<{
   playback: Playback | null;
   variants: Variant[];
@@ -40,74 +43,74 @@ const selectedRoute = computed(() =>
 const selectedVariant = computed(() =>
   props.variants.find((variant) => variant.id === props.variantId),
 );
-const media = computed(() => props.playback?.media || props.mediaProperties?.[props.variantId]);
+const media = computed(
+  () =>
+    ({ ...props.mediaProperties?.[props.variantId], ...props.playback?.media }) as MeasuredMedia,
+);
+const variantChoices = computed(() =>
+  props.variants.map((variant) => ({
+    value: variant.id,
+    label: qualityLabel(variant) + ' · ' + (variant.kind === 'playback' ? '兼容副本' : '原档'),
+  })),
+);
+const subtitleChoices = computed(() => [
+  { value: '', label: props.playback?.subtitles?.length ? '关闭' : '暂无已保存字幕' },
+  ...(props.playback?.subtitles || []).map((track) => ({
+    value: track.url,
+    label: track.label + (track.is_auto ? '（自动）' : ''),
+  })),
+]);
+const routeChoices = computed(() => [
+  { value: '', label: '自动选择' },
+  ...(props.playback?.routes || []).map((route) => ({
+    value: route.id,
+    label: route.name + (route.status === 'unavailable' ? '（不可用）' : ''),
+    disabled: route.status === 'unavailable',
+  })),
+]);
 </script>
 <template>
   <div class="player-settings-fields">
+    <PlayerChoice
+      label="画质"
+      :model-value="variantId"
+      :choices="variantChoices"
+      :disabled="busy || !variants.length"
+      @update:model-value="$emit('variant', String($event))"
+    />
+    <PlayerChoice
+      label="播放速度"
+      :model-value="rate"
+      :choices="rateChoices"
+      @update:model-value="$emit('rate', Number($event))"
+    />
+    <PlayerChoice
+      label="字幕"
+      :model-value="subtitle"
+      :choices="subtitleChoices"
+      :disabled="!playback?.subtitles?.length"
+      @update:model-value="$emit('subtitle', String($event))"
+    />
+    <PlayerChoice
+      label="画面显示"
+      :model-value="fit"
+      :choices="[
+        { value: 'contain', label: '完整显示' },
+        { value: 'cover', label: '铺满画面（裁剪）' },
+      ]"
+      @update:model-value="$emit('fit', $event as 'contain' | 'cover')"
+    />
+    <PlayerChoice
+      label="播放节点"
+      :model-value="routeId"
+      :choices="routeChoices"
+      :disabled="busy"
+      @update:model-value="$emit('route', String($event))"
+    />
+    <p v-if="!routeId && selectedRoute" class="player-setting-help">
+      当前：{{ selectedRoute.name }}
+    </p>
     <div class="player-setting-grid">
-      <label
-        >画质<select
-          :value="variantId"
-          :disabled="busy || !variants.length"
-          @change="$emit('variant', ($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="variant in variants" :key="variant.id" :value="variant.id">
-            {{ qualityLabel(variant) }} · {{ variant.kind === 'playback' ? '兼容副本' : '原档' }}
-          </option>
-        </select></label
-      >
-      <label
-        >播放速度<select
-          :value="rate"
-          @change="$emit('rate', Number(($event.target as HTMLSelectElement).value))"
-        >
-          <option
-            v-for="value in [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3]"
-            :key="value"
-            :value="value"
-          >
-            {{ value }} 倍{{ value === 1 ? '（正常）' : '' }}
-          </option>
-        </select></label
-      >
-      <label
-        >字幕<select
-          :value="subtitle"
-          :disabled="!playback?.subtitles?.length"
-          @change="$emit('subtitle', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">{{ playback?.subtitles?.length ? '关闭' : '暂无已保存字幕' }}</option>
-          <option v-for="track in playback?.subtitles" :key="track.url" :value="track.url">
-            {{ track.label }}{{ track.is_auto ? '（自动）' : '' }}
-          </option>
-        </select></label
-      >
-      <label
-        >画面显示<select
-          :value="fit"
-          @change="$emit('fit', ($event.target as HTMLSelectElement).value as 'contain' | 'cover')"
-        >
-          <option value="contain">完整显示</option>
-          <option value="cover">铺满（裁剪边缘）</option>
-        </select></label
-      >
-      <label
-        >播放节点<select
-          :value="routeId"
-          :disabled="busy"
-          @change="$emit('route', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">自动选择</option>
-          <option
-            v-for="route in playback?.routes"
-            :key="route.id"
-            :value="route.id"
-            :disabled="route.status === 'unavailable'"
-          >
-            {{ route.name }}{{ route.status === 'unavailable' ? '（不可用）' : '' }}
-          </option></select
-        ><small v-if="!routeId && selectedRoute">当前：{{ selectedRoute.name }}</small></label
-      >
       <label
         >音量 <output>{{ Math.round(volume * 100) }}%</output
         ><input
@@ -145,6 +148,15 @@ const media = computed(() => props.playback?.media || props.mediaProperties?.[pr
         <dd>
           {{ selectedVariant?.audio_codec || '未记录'
           }}{{ media?.dolby_atmos ? ' · 杜比全景声' : '' }}
+        </dd>
+        <dt>码率</dt>
+        <dd>
+          {{ bitrate(media?.total_bitrate_bps)
+          }}<span v-if="media?.video_bitrate_bps">
+            · 视频 {{ bitrate(media.video_bitrate_bps) }}</span
+          ><span v-if="media?.audio_bitrate_bps">
+            · 音频 {{ bitrate(media.audio_bitrate_bps) }}</span
+          >
         </dd>
         <dt>传输</dt>
         <dd>{{ playback?.protocol === 'hls' ? '原码流分片' : '文件直读' }}</dd>

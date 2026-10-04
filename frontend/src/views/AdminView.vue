@@ -28,6 +28,12 @@ import type { Row, Page } from '../types';
 import AdminSettings from '../components/admin/AdminSettings.vue';
 import StorageReplicas from '../components/admin/StorageReplicas.vue';
 import SourceMonitor from '../components/admin/SourceMonitor.vue';
+import StorageFields from '../components/admin/StorageFields.vue';
+import OperationResult from '../components/admin/OperationResult.vue';
+import JobDetails from '../components/admin/JobDetails.vue';
+import IngestPolicyFields from '../components/admin/IngestPolicyFields.vue';
+import { storageDraft, storagePayload, storageKindName } from '../utils/storageForm';
+import { jobNames, jobPhase } from '../utils/jobDisplay';
 import { createScopedInterval } from '../utils/scopedInterval';
 const route = useRoute();
 const sections = [
@@ -87,23 +93,8 @@ const statuses = [
   'failed',
   'cancelled',
 ];
-const jobNames: Record<string, string> = {
-  scan_collection: '扫描收藏夹',
-  archive_video: '归档视频',
-  refresh_comments: '补采评论',
-  verify_account: '验证账号',
-  migrate_storage: '迁移存储',
-  backup: '创建备份',
-  probe_storage: '探测存储能力',
-  refresh_stats: '更新视频统计',
-  sync_storage: '同步存储节点',
-  measure_storage: '测量存储性能',
-  sync_video: '同步视频副本',
-  prepare_media: '准备播放文件',
-  retire_storage_location: '停用媒体副本',
-  restore_storage_location: '恢复媒体副本',
-  purge_storage_location: '永久删除副本',
-};
+const storageForm = ref(storageDraft());
+const operationOpen = ref(false);
 const dialog = ref(false),
   dialogTitle = ref(''),
   dialogKind = ref(''),
@@ -154,36 +145,28 @@ async function loadChoices() {
   if (results[0].status === 'fulfilled') accounts.value = results[0].value.items;
   if (results[1].status === 'fulfilled') storages.value = results[1].value.items;
 }
-function parseObject(value: string, label: string) {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value || '{}');
-  } catch {
-    throw new Error(`${label}不是有效的 JSON`);
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-    throw new Error(`${label}必须为 JSON 对象`);
-  return parsed as Row;
+function policyValues() {
+  return Object.fromEntries(
+    Object.entries(form.policy || {}).filter(([, value]) => value !== '' && value != null),
+  );
 }
-function policyOverride(key: string) {
-  try {
-    const value = parseObject(form.policy_text || '{}', '策略')[key];
-    return value === undefined ? 'inherit' : String(value);
-  } catch {
-    return 'inherit';
+function showOperation(result: Row) {
+  if (result?.id && result?.kind && result?.status) {
+    feedback.value = result;
+    operationOpen.value = true;
   }
 }
-function setPolicyOverride(key: string, value: string) {
-  try {
-    const policy = parseObject(form.policy_text || '{}', '策略');
-    if (value === 'inherit') delete policy[key];
-    else policy[key] = value === 'true';
-    form.policy_text = JSON.stringify(policy, null, 2);
-    formError.value = '';
-  } catch (e) {
-    formError.value = errorText(e);
-  }
-}
+const storageLabels: Record<string, string> = {
+  root: '媒体目录',
+  bucket: '存储桶',
+  endpoint: '服务端地址',
+  public_endpoint: '播放地址',
+  region: '区域',
+  prefix: '对象前缀',
+  addressing_style: '桶寻址',
+  read_priority: '读取优先级',
+  part_size: '分片大小（字节）',
+};
 function tags(value: string) {
   return [
     ...new Set(
@@ -197,6 +180,7 @@ function tags(value: string) {
 function resetForm() {
   Object.keys(form).forEach((k) => delete form[k]);
   formError.value = '';
+  storageForm.value.credentials = {};
 }
 async function openEditor(kind = section.value, row?: Row) {
   resetForm();
@@ -212,30 +196,21 @@ async function openEditor(kind = section.value, row?: Row) {
       account_id: accounts.value[0]?.id || '',
       enabled: false,
       interval_minutes: 1440,
-      policy_text: '{}',
+      policy: {},
       ...row,
       policy_text_override: undefined,
     });
-  if (kind === 'sources' && row) form.policy_text = JSON.stringify(row.policy || {}, null, 2);
+  if (kind === 'sources' && row) form.policy = { ...row.policy };
   if (kind === 'jobs') {
     Object.assign(form, {
       kind: 'archive_video',
       target_id: '',
       account_id: accounts.value[0]?.id || '',
-      policy_text: '{}',
+      policy: {},
     });
     await loadTargets();
   }
-  if (kind === 'storage')
-    Object.assign(form, {
-      name: '',
-      kind: 'local',
-      credentials_text: '',
-      is_default: false,
-      enabled: true,
-      ...row,
-      config_text: JSON.stringify(row?.config || {}, null, 2),
-    });
+  if (kind === 'storage') storageForm.value = storageDraft(row);
   if (kind === 'users')
     Object.assign(form, { username: '', password: '', role: 'reader', disabled: false, ...row });
   if (kind === 'videos') {
@@ -248,7 +223,6 @@ async function openEditor(kind = section.value, row?: Row) {
         description_override: d.description_override ?? '',
         notes: d.notes || '',
         tags_text: (d.tags || []).join('，'),
-        starred: d.starred,
       });
     } catch (e) {
       ElMessage.error(errorText(e));
@@ -309,7 +283,7 @@ async function submit() {
         account_id: form.account_id,
         enabled: form.enabled,
         interval_minutes: form.interval_minutes,
-        policy: parseObject(form.policy_text, '采集策略'),
+        policy: policyValues(),
       };
     } else if (kind === 'jobs') {
       if (!form.target_id) throw new Error('请选择或填写目标 ID');
@@ -317,19 +291,10 @@ async function submit() {
         kind: form.kind,
         target_id: form.target_id,
         ...(form.account_id ? { account_id: form.account_id } : {}),
-        policy: parseObject(form.policy_text, '任务策略'),
+        policy: policyValues(),
       };
     } else if (kind === 'storage') {
-      if (!form.name?.trim()) throw new Error('请填写存储名称');
-      payload = {
-        name: form.name.trim(),
-        kind: form.kind,
-        config: parseObject(form.config_text, '存储配置'),
-        is_default: form.is_default,
-        enabled: form.enabled,
-      };
-      if (form.credentials_text?.trim())
-        payload.credentials = parseObject(form.credentials_text, '存储凭据');
+      payload = storagePayload(storageForm.value);
     } else if (kind === 'users') {
       if (!editId.value && (!form.username?.trim() || form.password?.length < 12))
         throw new Error('请填写用户名和至少 12 位密码');
@@ -342,7 +307,6 @@ async function submit() {
         description_override: form.description_override || null,
         notes: form.notes,
         tags: tags(form.tags_text),
-        starred: form.starred,
       };
     else if (kind === 'creators')
       payload = {
@@ -357,9 +321,9 @@ async function submit() {
       payload = { target_profile_id: form.target_profile_id };
       if (form.asset_ids?.trim()) payload.asset_ids = tags(form.asset_ids);
       const d = await write(`/admin/storage/${editId.value}/migrate`, payload);
-      feedback.value = d;
+      showOperation(d);
       dialog.value = false;
-      ElMessage.success('迁移请求已提交，请在任务中心查看结果');
+      ElMessage.success('迁移请求已提交');
       await load(page.value);
       return;
     } else throw new Error('未支持的操作');
@@ -368,9 +332,9 @@ async function submit() {
       payload,
       editId.value ? 'PATCH' : 'POST',
     );
-    feedback.value = d;
+    showOperation(d);
     form.cookie = '';
-    form.credentials_text = '';
+    storageForm.value.credentials = {};
     form.password = '';
     dialog.value = false;
     ElMessage.success(kind === 'jobs' ? '任务已创建' : '已保存');
@@ -397,10 +361,8 @@ async function action(path: string, label: string, body?: unknown, confirm = fal
   feedback.value = null;
   try {
     const result = await write(path, body);
-    feedback.value = result;
-    ElMessage.success(
-      label === '测试存储连接' ? '存储探测已排队，请在任务中心查看结果' : '请求已提交',
-    );
+    showOperation(result);
+    ElMessage.success(label === '测试存储连接' ? '存储探测已排队' : '请求已提交');
     await load(page.value);
   } catch (e) {
     ElMessage.error(errorText(e));
@@ -440,6 +402,7 @@ watch(
     status.value = '';
     page.value = 1;
     feedback.value = null;
+    operationOpen.value = false;
     dialog.value = false;
     await load();
     if (disposed) return;
@@ -566,7 +529,9 @@ onBeforeUnmount(() => {
                 <p v-if="!overview?.storage?.length" class="muted">尚未配置存储位置。</p>
                 <div v-for="item in overview?.storage || []" :key="item.id" class="list-line">
                   <strong>{{ item.name }}</strong
-                  ><span>{{ item.kind }} · {{ item.enabled ? '启用' : '停用' }}</span>
+                  ><span
+                    >{{ storageKindName(item.kind) }} · {{ item.enabled ? '启用' : '停用' }}</span
+                  >
                 </div>
                 <RouterLink to="/admin/storage">管理存储 →</RouterLink>
               </section>
@@ -636,54 +601,28 @@ onBeforeUnmount(() => {
                 type="expand"
                 ><template #default="{ row }"
                   ><div class="record-detail">
-                    <template v-if="section === 'jobs'"
-                      ><h3>检查点</h3>
-                      <pre>{{ JSON.stringify(row.checkpoint || {}, null, 2) }}</pre>
-                      <h3>执行结果</h3>
-                      <div
-                        v-if="row.kind === 'probe_storage' && row.result?.status"
-                        class="probe-results"
+                    <JobDetails v-if="section === 'jobs'" :job="row" />
+                    <dl v-else-if="section === 'storage'" class="record-fields">
+                      <template v-for="(label, key) in storageLabels" :key="key"
+                        ><template v-if="row.config?.[key] != null"
+                          ><dt>{{ label }}</dt>
+                          <dd>{{ row.config[key] }}</dd></template
+                        ></template
                       >
-                        <p>
-                          存储探测：{{
-                            row.result.status === 'passed' ? '已通过以下检查' : '未通过'
-                          }}
-                        </p>
-                        <div v-for="(value, key) in row.result.checks || {}" :key="String(key)">
-                          {{
-                            (
-                              {
-                                put: '写入',
-                                head: '对象信息',
-                                sha256_readback: '读取与哈希校验',
-                                single_range: '范围读取',
-                              } as Row
-                            )[key] || key
-                          }}：{{ value === true ? '通过' : value === false ? '失败' : '未测试' }}
-                        </div>
-                        <p class="muted small">
-                          分片上传：{{
-                            row.result.multipart === 'not_tested' ? '未测试' : '请查看详细结果'
-                          }}
-                          · 浏览器跨域：{{
-                            row.result.browser_cors === 'not_tested' ? '未测试' : '请查看详细结果'
-                          }}
-                        </p>
-                      </div>
-                      <pre>{{ JSON.stringify(row.result || {}, null, 2) }}</pre>
+                      <dt>访问凭据</dt>
+                      <dd>{{ row.has_credentials ? '已配置（不回显）' : '未配置' }}</dd>
+                    </dl>
+                    <template v-else-if="section === 'backups'">
+                      <p>备份状态：{{ statusText(row.status) }}</p>
+                      <p>恢复点：{{ date(row.snapshot_at) }}</p>
+                      <p>完成时间：{{ date(row.completed_at) }}</p>
                       <p v-if="row.error" class="form-error">{{ row.error }}</p>
-                      <p class="muted">任务 ID：{{ row.id }}</p></template
-                    ><template v-else>
-                      <pre>{{
-                        JSON.stringify(
-                          section === 'storage'
-                            ? { config: row.config, has_credentials: row.has_credentials }
-                            : row,
-                          null,
-                          2,
-                        )
-                      }}</pre>
+                      <p class="muted">恢复演练需在隔离环境中执行，完成备份不等于已验证恢复。</p>
                     </template>
+                    <details v-else>
+                      <summary>审计详情</summary>
+                      <pre>{{ JSON.stringify(row, null, 2) }}</pre>
+                    </details>
                   </div></template
                 ></el-table-column
               >
@@ -758,7 +697,8 @@ onBeforeUnmount(() => {
                 ><el-table-column label="任务" min-width="140"
                   ><template #default="{ row }"
                     >{{ jobNames[row.kind] || row.kind
-                    }}<small class="table-subtitle">{{ row.id }}</small></template
+                    }}<small class="table-subtitle">{{ row.target_title || '归档任务' }}</small
+                    ><small class="table-subtitle">{{ jobPhase(row) }}</small></template
                   ></el-table-column
                 ><el-table-column label="状态" min-width="100"
                   ><template #default="{ row }"
@@ -860,10 +800,12 @@ onBeforeUnmount(() => {
               >
               <template v-else-if="section === 'storage'"
                 ><el-table-column prop="name" label="位置" min-width="160" /><el-table-column
-                  prop="kind"
                   label="类型"
-                  width="90"
-                /><el-table-column label="状态" width="150"
+                  width="130"
+                  ><template #default="{ row }">{{
+                    storageKindName(row.kind)
+                  }}</template></el-table-column
+                ><el-table-column label="状态" width="150"
                   ><template #default="{ row }"
                     >{{ row.enabled ? '启用' : '停用'
                     }}{{ row.is_default ? ' · 默认位置' : '' }}</template
@@ -948,16 +890,13 @@ onBeforeUnmount(() => {
               @current-change="load"
             />
           </template>
-          <details v-if="feedback" class="action-feedback" open>
-            <summary>最近操作的返回结果</summary>
-            <p v-if="feedback.kind && feedback.id">
-              <RouterLink to="/admin/jobs">在任务中心查看执行状态 →</RouterLink>
-            </p>
-            <pre>{{ JSON.stringify(feedback, null, 2) }}</pre>
-          </details>
+          <p v-if="feedback" class="action-feedback">
+            <el-button @click="operationOpen = true">查看最近任务进度与结果</el-button>
+          </p>
         </template>
       </main>
     </div>
+    <OperationResult v-model:open="operationOpen" :job="feedback" @completed="load(page, true)" />
     <el-dialog
       v-model="dialog"
       :title="dialogTitle"
@@ -1002,13 +941,8 @@ onBeforeUnmount(() => {
               :min="15"
               :max="525600" /></el-form-item
           ><el-form-item label="启用定期扫描"><el-switch v-model="form.enabled" /></el-form-item
-          ><el-form-item label="来源策略 JSON"
-            ><el-input v-model="form.policy_text" type="textarea" :rows="5" />
-            <p class="field-help">
-              留空对象使用系统策略；可覆盖 quality、request_budget、fetch_comments 等采集配置。
-            </p></el-form-item
-          ></template
-        >
+          ><IngestPolicyFields :value="form.policy"
+        /></template>
         <template v-if="dialogKind === 'jobs'"
           ><el-form-item label="任务类型"
             ><el-select v-model="form.kind" @change="loadTargets"
@@ -1044,70 +978,10 @@ onBeforeUnmount(() => {
                 :key="account.id"
                 :label="account.name"
                 :value="account.id" /></el-select></el-form-item
-          ><el-form-item label="任务策略 JSON"
-            ><el-input v-model="form.policy_text" type="textarea" :rows="5" /></el-form-item
-        ></template>
-        <template v-if="dialogKind === 'storage'"
-          ><el-form-item label="存储名称" required><el-input v-model="form.name" /></el-form-item
-          ><el-form-item label="类型"
-            ><el-select v-model="form.kind"
-              ><el-option value="local" label="本地目录" /><el-option
-                value="s3"
-                label="S3 兼容存储" /><el-option
-                value="oss"
-                label="阿里云 OSS" /></el-select></el-form-item
-          ><el-form-item label="位置配置 JSON" required
-            ><el-input v-model="form.config_text" type="textarea" :rows="7" />
-            <p class="field-help">
-              本地 root 须位于部署时挂载的媒体根目录内；留空对象使用服务器默认目录。S3 / OSS 支持
-              bucket、endpoint、public_endpoint、region、prefix；S3 另支持 addressing_style。
-            </p></el-form-item
-          ><el-form-item label="凭据 JSON"
-            ><el-input
-              v-model="form.credentials_text"
-              type="textarea"
-              :rows="3"
-              autocomplete="off"
-              :placeholder="editId ? '留空保留现有凭据；凭据不会回显' : '仅在需要云凭据时填写'"
-            />
-            <p class="field-help">
-              S3：access_key_id、secret_access_key、session_token（可选）；OSS：access_key_id、access_key_secret、security_token（可选）。服务端需配置加密密钥。
-            </p></el-form-item
-          >
-          <div class="settings-switches">
-            <el-checkbox v-model="form.is_default">设为默认写入位置</el-checkbox
-            ><el-checkbox v-model="form.enabled">启用</el-checkbox>
-          </div></template
-        >
-        <template v-if="['sources', 'jobs'].includes(dialogKind)"
-          ><div class="form-two-columns">
-            <el-form-item label="浏览器兼容副本"
-              ><el-select
-                :model-value="policyOverride('create_compatible_copy')"
-                @update:model-value="
-                  (value) => setPolicyOverride('create_compatible_copy', String(value))
-                "
-                ><el-option value="inherit" label="使用系统设置" /><el-option
-                  value="true"
-                  label="按需生成兼容副本" /><el-option
-                  value="false"
-                  label="仅保存归档原档" /></el-select></el-form-item
-            ><el-form-item label="优先 H.264"
-              ><el-select
-                :model-value="policyOverride('prefer_h264')"
-                @update:model-value="(value) => setPolicyOverride('prefer_h264', String(value))"
-                ><el-option value="inherit" label="使用系统设置" /><el-option
-                  value="true"
-                  label="优先 H.264 编码" /><el-option
-                  value="false"
-                  label="不限制编码偏好" /></el-select
-            ></el-form-item>
-          </div>
-          <p class="field-help">
-            兼容副本保留原档，可能增加转码时间和占用空间；未支持的 HDR
-            转换会记录具体状态。上述选择会同步到策略 JSON。
-          </p></template
-        ><template v-if="dialogKind === 'migrate'"
+          ><IngestPolicyFields :value="form.policy"
+        /></template>
+        <StorageFields v-if="dialogKind === 'storage'" :value="storageForm" />
+        <template v-if="dialogKind === 'migrate'"
           ><el-alert
             title="迁移会复制并校验资产。默认位置的切换不会替代迁移。"
             type="info"
@@ -1163,8 +1037,9 @@ onBeforeUnmount(() => {
           ><el-form-item label="收藏笔记"
             ><el-input v-model="form.notes" type="textarea" :rows="4" /></el-form-item
           ><el-form-item label="标签（逗号分隔）"
-            ><el-input v-model="form.tags_text" /></el-form-item
-          ><el-checkbox v-model="form.starred">星标视频</el-checkbox></template
+            ><el-input v-model="form.tags_text"
+          /></el-form-item>
+          <p class="field-help">个人星标请在视频页设置；这里的标注用于共享资料整理。</p></template
         >
         <template v-if="dialogKind === 'creators'"
           ><p class="field-help">平台昵称：{{ form.source_name }}</p>

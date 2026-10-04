@@ -1,0 +1,21 @@
+# Inline playback and iOS
+
+This player keeps `HTMLVideoElement`, Artplayer controls and the danmaku overlay in the same page. The media adapter sets `playsinline`, the legacy `webkit-playsinline` attribute, and `controls = false` before assigning the source. Mobile settings use our own bottom sheet and radio buttons. Opening settings does not enter fullscreen. Webpage fullscreen remains available when element fullscreen is not exposed.
+
+Safari uses its native HLS decoding path when available; this does not enable the browser's native control bar. Other supported browsers use hls.js. A native video fullscreen surface or picture-in-picture window cannot be assumed to include the page's danmaku and custom controls.
+
+Official references checked on 2026-10-04:
+
+- [WebKit: New video policies for iOS](https://webkit.org/blog/6784/new-video-policies-for-ios/) documents inline playback with `playsinline`; playback with sound remains subject to user interaction policies.
+- [Apple: allowsInlineMediaPlayback](https://developer.apple.com/documentation/webkit/wkwebviewconfiguration/allowsinlinemediaplayback) documents the additional native host setting needed by an embedded WKWebView. Website code cannot change a host application's configuration.
+- [WebKit features for Safari 27.0](https://webkit.org/blog/18325/webkit-features-for-safari-27-0/) describes fixes involving WebVTT cues, fullscreen subtitles on iOS and `currentTime` update frequency. These release notes do not promise that every archived codec or HDR combination can play on every device.
+- [bilibili/ijkplayer](https://github.com/bilibili/ijkplayer) is a native Android/iOS FFmpeg player, with platform decoders including VideoToolbox. Its documented iOS support and build prerequisites are historical; it is not a web media engine or evidence of iOS 27 compatibility. The useful design distinction is the separation of media decoding and playback UI.
+- [bilibili/flv.js](https://github.com/bilibili/flv.js) transmuxes FLV to fragmented MP4 through Media Source Extensions. The project states that maintenance is infrequent. It is not a universal codec decoder and adds no required capability to this archive's existing MP4/HLS path.
+- [bilibili/DanmakuFlameMaster](https://github.com/bilibili/DanmakuFlameMaster) is an Android danmaku parser and renderer using native views, including SurfaceView and TextureView. Its XML parsing and layout concepts are relevant; the engine cannot run directly in a web page.
+- [xqq/mpegts.js](https://github.com/xqq/mpegts.js), linked by flv.js for live playback, targets low-latency MPEG-TS/FLV streaming. It is outside the bilibili organization and does not justify replacing this on-demand archive player.
+
+The native shell's `Cargo.lock` pins Wry 0.57.0. Its [versioned WKWebView initialization](https://github.com/tauri-apps/wry/blob/wry-v0.57.0/src/wkwebview/mod.rs#L330-L331) already enables `allowsInlineMediaPlayback` for iOS. The current ordinary `WebviewWindowBuilder` therefore inherits this setting; no extra native builder override is needed for this dependency version. Recheck the setting when changing the native engine or supplying a custom WKWebView configuration.
+
+Automated tests cover the inline attributes, disabled native controls, bottom danmaku margins and missing bitrate handling. Desktop-browser viewport testing is not real iOS testing. A physical iPhone running iOS 27 is still required to validate user-gesture playback, rotation/safe areas, seeking, background return, subtitles, fullscreen transitions and hardware codec support.
+
+Browser verification on 2026-10-04 used Windows Chrome at 1280×800 and 390×844. Actual playback advanced at 1.5× with native controls disabled; the inline attribute was present. Custom speed/settings sheets, danmaku defaults, webpage fullscreen, Escape/focus restoration, part switching and the mobile part list were exercised. Guest starring navigated to login with the original video as `next`; authenticated starring and reversal succeeded. Publication time, contributor roles, source/archived format labels and descending comment likes were checked with synthetic metadata around an existing local archive asset. The temporary fixture, its progress/sessions and derived maintenance jobs were removed; the original video and asset were confirmed present afterward.

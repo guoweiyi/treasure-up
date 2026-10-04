@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { api } from '../api';
 import type { Creator } from '../types';
-const props = defineProps<{ creators: Creator[] }>();
+import type { VideoCreator } from '../player/mediaInfo';
+const props = defineProps<{ creators: VideoCreator[] }>();
+const people = computed(() => {
+  const unique = new Map<string, VideoCreator & { roles: string[] }>();
+  for (const creator of props.creators) {
+    const entry = unique.get(creator.id) || { ...creator, roles: [] };
+    const role =
+      creator.role_title?.trim() || (creator.role === 'staff' ? '联合投稿' : '投稿 UP 主');
+    if (!entry.roles.includes(role)) entry.roles.push(role);
+    unique.set(creator.id, entry);
+  }
+  return [...unique.values()];
+});
 const details = ref<Record<string, Creator>>({});
 let request = 0;
 watch(
-  () => props.creators,
+  people,
   async (creators) => {
     const key = ++request;
     details.value = {};
@@ -22,7 +34,10 @@ watch(
 </script>
 <template>
   <section class="watch-up-section">
-    <div v-for="creator in creators" :key="creator.id" class="watch-up">
+    <h2 v-if="people.length > 1" class="joint-creators-heading">
+      联合投稿 <span>{{ people.length }} 位创作者</span>
+    </h2>
+    <div v-for="creator in people" :key="creator.id" class="watch-up">
       <RouterLink :to="`/creators/${creator.id}`"
         ><img v-if="creator.avatar_url" :src="creator.avatar_url" alt="" class="avatar" /><span
           v-else
@@ -34,11 +49,9 @@ watch(
         <RouterLink :to="`/creators/${creator.id}`" class="watch-up-name"
           >{{ creator.name }}<span class="up-label">UP</span></RouterLink
         >
-        <p class="clamp-two">
-          {{
-            details[creator.id]?.description ||
-            (creator.role === 'staff' ? '合作 UP 主' : '投稿 UP 主')
-          }}
+        <div class="creator-contribution">{{ creator.roles.join(' · ') }}</div>
+        <p v-if="details[creator.id]?.description" class="clamp-two">
+          {{ details[creator.id]?.description }}
         </p>
         <RouterLink :to="`/creators/${creator.id}`" class="up-space-link"
           >查看已收藏作品<span v-if="details[creator.id]?.saved_count != null">

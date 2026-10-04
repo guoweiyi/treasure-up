@@ -210,7 +210,7 @@ def test_component_failure_is_not_erased_by_comment_budget_continuation(job_sess
     from app.models import Comment, SourceAccount, Video, VideoPart
     from test_ingest_runner import FakeClient, comment
 
-    comments, downloads = [], []
+    comments, subtitles = [], []
     class Source(FakeClient):
         def comment_page(self, aid, offset):
             comments.append(offset)
@@ -218,20 +218,20 @@ def test_component_failure_is_not_erased_by_comment_budget_continuation(job_sess
                     "replies": [comment(str(len(comments)), member=False)]}
     monkeypatch.setattr(runner, "BiliClient", Source)
     monkeypatch.setattr(runner, "decrypt_secret", lambda _: "mock-cookie")
-    def fail_download(*args, **kwargs):
-        downloads.append(True)
-        raise IngestError("模拟持续下载失败", code="download_failed")
-    monkeypatch.setattr(runner, "archive_media", fail_download)
+    def fail_subtitles(*args, **kwargs):
+        subtitles.append(True)
+        raise IngestError("模拟持续字幕失败", code="invalid_subtitle")
+    monkeypatch.setattr(runner, "_subtitles", fail_subtitles)
     with job_sessions() as db:
         account = SourceAccount(name="mock", secret_encrypted="mock")
         video = Video(bvid="BV1234567890", aid="123")
         db.add_all([account, video]); db.flush()
         part = VideoPart(video_id=video.id, cid="1", duration=10)
         db.add(part); db.flush()
-        job = jobs.enqueue(db, "archive_video", video.id, account.id, policy={"request_budget": 1,
-            "fetch_danmaku": False, "fetch_subtitles": False, "create_compatible_copy": False, "images": False})
+        job = jobs.enqueue(db, "archive_video", video.id, account.id, policy={"request_budget": 2,
+            "fetch_danmaku": False, "fetch_subtitles": True, "create_compatible_copy": False, "images": False})
         job.max_attempts = 2
-        job.checkpoint = {"metadata_done": True, "part_ids": [part.id]}
+        job.checkpoint = {"metadata_done": True, "basics_done": True, "part_ids": [part.id]}
         db.commit()
         job_id = job.id
     for number, expected in [(1, "queued"), (2, "partial")]:
@@ -240,10 +240,10 @@ def test_component_failure_is_not_erased_by_comment_budget_continuation(job_sess
             job = db.get(Job, job_id)
             assert job.attempts == number
             assert job.checkpoint["comments"]["offset"] == f"cursor-{number}"
-            assert job.result["components"] == ["download_failed"]
+            assert job.result["components"] == ["invalid_subtitle"]
             job.available_at = utcnow() - timedelta(seconds=1)
             db.commit()
-    assert comments == ["", "cursor-1"] and len(downloads) == 2
+    assert comments == ["", "cursor-1"] and len(subtitles) == 2
     with job_sessions() as db:
         assert db.scalar(select(func.count()).select_from(Comment)) == 2
 
@@ -375,7 +375,7 @@ def test_explicit_empty_migration_scope_does_no_work(job_sessions, monkeypatch):
     assert result["status"] == "succeeded" and result["result"]["total"] == 0
 
 
-def test_storage_probe_is_a_media_worker_job_with_real_result(job_sessions, tmp_path, monkeypatch):
+def test_storage_probe_is_a_collector_job_with_real_result(job_sessions, tmp_path, monkeypatch):
     from app.config import settings
     from app.scheduler import queue_for_kind
     monkeypatch.setattr(settings, "scratch_dir", tmp_path / "scratch")
@@ -387,7 +387,7 @@ def test_storage_probe_is_a_media_worker_job_with_real_result(job_sessions, tmp_
         item = jobs.enqueue(db, "probe_storage", profile.id)
         db.commit()
         job_id = item.id
-    assert queue_for_kind("probe_storage") == "media"
+    assert queue_for_kind("probe_storage") == "collector"
     result = jobs.run_job_id(job_id)
     assert result["status"] == "succeeded"
     assert result["result"]["checks"]["sha256_readback"] is True
@@ -398,9 +398,53 @@ def test_storage_probe_is_a_media_worker_job_with_real_result(job_sessions, tmp_
         assert db.get(Job, job_id).result["status"] == "passed"
 def test_media_and_backup_jobs_use_dedicated_queues():
     from app.scheduler import queue_for_kind
-    assert queue_for_kind("archive_video") == "media"
+    assert queue_for_kind("archive_video") == "collector"
+    assert queue_for_kind("download_media") == "download"
+    assert queue_for_kind("create_playback") == "media"
     assert queue_for_kind("migrate_storage") == "media"
-    assert queue_for_kind("probe_storage") == "media"
+    assert queue_for_kind("probe_storage") == "collector"
     assert queue_for_kind("backup") == "backup"
     assert queue_for_kind("scan_collection") == "collector"
     assert queue_for_kind("refresh_comments") == "collector"
+
+
+def test_download_progress_is_fenced_and_uses_a_separate_session(job_sessions):
+    from app.ingest.runner import Context
+    job_id = new_job(job_sessions, kind="download_media")
+    with job_sessions() as db:
+        job = jobs.claim(db, job_id, "owner")
+        ctx = Context(db, job, None)
+        ctx.save()
+        progress = {"phase": "download", "downloaded_bytes": 512, "total_bytes": 1024}
+        ctx.media_progress(progress)
+        with job_sessions() as observer:
+            row = observer.get(Job, job_id)
+            assert row.result["progress"]["downloaded_bytes"] == 512
+            assert row.checkpoint["run_id"] == ctx.run.id
+            row.status = "cancelled"
+            observer.commit()
+        ctx.last_progress = 0
+        with pytest.raises(jobs.LeaseLost):
+            ctx.media_progress({**progress, "downloaded_bytes": 1024})
+    with job_sessions() as db:
+        row = db.get(Job, job_id)
+        assert row.status == "cancelled" and row.result["progress"]["downloaded_bytes"] == 512
+
+
+def test_existing_probe_is_republished_to_collector_without_resetting_stopped_jobs(job_sessions):
+    from app.scheduler import queue_for_kind
+    probe_id = new_job(job_sessions, kind="probe_storage")
+    stopped_id = new_job(job_sessions, kind="probe_storage")
+    with job_sessions() as db:
+        db.get(Job, stopped_id).status = "cancelled"
+        for outbox in db.scalars(select(OutboxEvent)):
+            outbox.published_at = utcnow() - timedelta(seconds=90)
+        db.commit()
+        dispatched = []
+        jobs.recover_and_dispatch(db, lambda identity, kind: dispatched.append((identity, queue_for_kind(kind))))
+        assert dispatched == [(probe_id, "collector")]
+        assert db.get(Job, probe_id).attempts == 0
+        assert db.get(Job, stopped_id).status == "cancelled"
+        assert jobs.claim(db, probe_id, "collector") is not None
+    with job_sessions() as stale_media_worker:
+        assert jobs.claim(stale_media_worker, probe_id, "old-media-message") is None

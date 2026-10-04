@@ -2,6 +2,7 @@ import type Artplayer from 'artplayer';
 
 interface Actions {
   openSettings: () => void;
+  openRates: () => void;
   toggleDanmaku: () => void;
   setVolume: (value: number) => void;
   getVolume: () => number;
@@ -25,6 +26,13 @@ export function installPlayerControls(art: Artplayer, actions: Actions) {
   danmaku.className = 'player-control-button player-danmaku-toggle';
   danmaku.textContent = '弹幕';
   danmaku.setAttribute('aria-label', '显示弹幕');
+  const rate = document.createElement('button');
+  rate.type = 'button';
+  rate.className = 'player-control-button player-rate-toggle';
+  rate.textContent = '1×';
+  rate.setAttribute('aria-label', '播放速度 1 倍');
+  rate.setAttribute('aria-haspopup', 'dialog');
+  rate.setAttribute('aria-expanded', 'false');
   art.controls.add({
     name: 'treasure-danmaku',
     position: 'right',
@@ -33,9 +41,16 @@ export function installPlayerControls(art: Artplayer, actions: Actions) {
     click: actions.toggleDanmaku,
   });
   art.controls.add({
-    name: 'treasure-settings',
+    name: 'treasure-rate',
     position: 'right',
     index: 6,
+    html: rate,
+    click: actions.openRates,
+  });
+  art.controls.add({
+    name: 'treasure-settings',
+    position: 'right',
+    index: 7,
     html: settings,
     click: actions.openSettings,
   });
@@ -63,14 +78,17 @@ export function installPlayerControls(art: Artplayer, actions: Actions) {
   progress.setAttribute('role', 'slider');
   progress.setAttribute('aria-label', '播放进度');
   progress.setAttribute('aria-valuemin', '0');
-  art.on('video:timeupdate', () => {
+  const updateProgress = () => {
     progress.setAttribute('aria-valuemax', String(Math.round(art.duration || 0)));
     progress.setAttribute('aria-valuenow', String(Math.round(art.currentTime || 0)));
     progress.setAttribute(
       'aria-valuetext',
       `已播放 ${Math.round(art.currentTime || 0)} 秒，共 ${Math.round(art.duration || 0)} 秒`,
     );
-  });
+  };
+  updateProgress();
+  art.on('video:loadedmetadata', updateProgress);
+  art.on('video:timeupdate', updateProgress);
   root.addEventListener('keydown', (event) => {
     if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
     const target = event.target as HTMLElement;
@@ -112,5 +130,5 @@ export function installPlayerControls(art: Artplayer, actions: Actions) {
     )
       root.focus({ preventScroll: true });
   });
-  return { settings, danmaku };
+  return { settings, danmaku, rate };
 }

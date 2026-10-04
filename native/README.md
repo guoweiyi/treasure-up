@@ -23,6 +23,8 @@ macOS ARM job 另以 `TREASURE_CARGO_LOCK_BEGIN/END` 输出同一个公开依赖
 
 应用始终从随包附带的本地连接页开始，只持久化规范化的服务器 origin。地址只接受 HTTPS；HTTP 例外仅限 localhost/IPv4 或 IPv6 回环，用于本机开发。不支持反向代理子路径，不接受 URL 凭据、query、fragment、本地协议或保留的 Tauri/IPC 地址。移动设备的 localhost 指移动设备自己；移动发布版本的 ATS/网络安全策略仍可能拒绝 HTTP，应连接有效 HTTPS 站点，不要通过允许任意明文流量绕过。
 
+连接表单也接受以 `/api` 或 `/api/v1` 结尾的 API 地址，提交前规范化为同一服务器根地址；不支持任意挂载前缀。进入后可直接浏览视频库，个人星标、进度保存与管理操作再登录。移动播放器使用站内自定义控件；iOS 27 的实现依据与尚需真机验证的项目见 [播放器说明](../frontend/src/player/IOS_NOTES.md)。
+
 Rust 在固定 origin 请求 `GET /api/v1/server`，8 秒超时、16 KiB 响应上限、禁止重定向、正常校验证书；只接收 `{application:"treasure-up",api_version:1}`。服务标识用于兼容性识别，不是替代 TLS 的身份凭证。服务器响应从不注入本地 HTML、JavaScript 或 CSP。
 
 验证成功后，同一 WebView 导航到 `/?client=native`，只允许选定 origin 的顶层导航。B 站及其他外链不会进入本地信任域；云存储/CDN 媒体作为网页子资源由正常 WebView 加载，顶层导航策略不是媒体请求代理。

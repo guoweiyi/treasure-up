@@ -11,6 +11,11 @@ export function createMediaAdapter(onError: (kind: 'network' | 'media', message:
   async function attach(video: HTMLVideoElement, url: string, protocol?: 'file' | 'hls') {
     destroy();
     const key = generation;
+    // Inline Safari playback retains our controls and danmaku in the page.
+    video.controls = false;
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
     if (protocol !== 'hls') {
       video.src = url;
       return;

@@ -49,7 +49,7 @@ def login(client, name="admin"):
 
 def test_authentication_csrf_and_reader_permissions(context):
     client, db, _ = context
-    assert client.get("/api/v1/videos").status_code == 401
+    assert client.get("/api/v1/videos").status_code == 200
     login(client, "reader")
     assert client.get("/api/v1/videos").status_code == 200
     assert client.get("/api/v1/admin/accounts").status_code == 403
@@ -106,7 +106,7 @@ def test_metadata_overrides_snapshot_search_and_comment_tree(context):
     assert client.get(f"/api/v1/videos/{video.id}/comments", params={"root": "123"}).json()["items"][0]["content"] == "回复内容"
 
 
-def test_private_assets_range_playback_and_danmaku_modes(context):
+def test_public_assets_range_playback_and_danmaku_modes(context):
     client, db, tmp = context
     video, part, _ = seed_catalog(db)
     media = tmp / "clip.mp4"; media.write_bytes(bytes(range(100)))
@@ -118,7 +118,7 @@ def test_private_assets_range_playback_and_danmaku_modes(context):
     da = ingest_file(db, data, kind="danmaku", mime_type="application/json")
     db.add(DanmakuSnapshot(part_id=part.id, run_id="test", data_asset_id=da.id, status="complete")); db.commit()
     url = f"/api/v1/assets/{asset.id}"
-    assert client.get(url).status_code == 401
+    assert client.get(url).status_code == 200
     login(client)
     result = client.get(url, headers={"Range": "bytes=10-19"})
     assert result.status_code == 206 and result.content == bytes(range(10, 20))

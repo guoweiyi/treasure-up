@@ -19,9 +19,9 @@ from app.jobs import enqueue
 from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, Collection, CollectionItem, Comment, Creator,
                         DanmakuSnapshot, Job, MediaVariant, OutboxEvent, PlatformUser, Setting,
                         SourceAccount, SourceSubscription, StorageProfile, SubtitleTrack, User, UserSession,
-                        UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart, WatchProgress, utcnow)
+                        UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart, VideoStar, CommentAsset, WatchProgress, utcnow)
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
-                          require_admin, require_editor, reserve_password_attempt, verify_password)
+                          require_admin, require_editor, reserve_password_attempt, verify_password, optional_identity)
 
 app = FastAPI(title="Treasure Up", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
@@ -130,12 +130,12 @@ def logout(response: Response, identity=Depends(authenticated), db: Session = De
 
 
 @app.get(P + "/library/stats")
-def library_stats(_=Depends(authenticated), db: Session = Depends(get_db)):
+def library_stats(db: Session = Depends(get_db)):
     return catalog.stats(db)
 
 
 @app.get(P + "/library/settings")
-def library_settings(_=Depends(authenticated), db: Session = Depends(get_db)):
+def library_settings(db: Session = Depends(get_db)):
     row = db.get(Setting, "display")
     return schemas.DisplaySettings(**(row.value if row else {})).model_dump()
 
@@ -143,7 +143,7 @@ def library_settings(_=Depends(authenticated), db: Session = Depends(get_db)):
 @app.get(P + "/videos")
 def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_id: str = "", tag: str = "",
            starred: bool = False, page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100), sort: str = "newest",
-           _=Depends(authenticated), db: Session = Depends(get_db)):
+           identity=Depends(optional_identity), db: Session = Depends(get_db)):
     stmt = select(Video).outerjoin(VideoAnnotation, VideoAnnotation.video_id == Video.id)
     if q.strip():
         pattern = like(q.strip())
@@ -159,21 +159,40 @@ def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_
     if tag:
         stmt = stmt.where(cast(VideoAnnotation.tags, String).ilike(like(json.dumps(tag, ensure_ascii=False)), escape="\\"))
     if starred:
-        stmt = stmt.where(VideoAnnotation.starred.is_(True))
+        stmt = stmt.where(Video.id.in_(select(VideoStar.video_id).where(VideoStar.user_id == identity[0].id))) if identity else stmt.where(False)
     ordering = {"newest": Video.created_at.desc(), "oldest": Video.created_at.asc(),
-                "title": func.coalesce(VideoAnnotation.title_override, Video.title).asc(), "duration": Video.duration.desc()}
+                "title": func.coalesce(VideoAnnotation.title_override, Video.title).asc(), "duration": Video.duration.desc(),
+                "published": Video.published_at.desc().nullslast()}
     stmt = stmt.order_by(ordering.get(sort, ordering["newest"]), Video.id)
-    return catalog.page(db, stmt, page, page_size, batch_mapper=catalog.video_views)
+    result = catalog.page(db, stmt, page, page_size, batch_mapper=catalog.video_views)
+    catalog.personalize_videos(db, result["items"], identity)
+    return result
 
 
 @app.get(P + "/videos/{video_id}")
-def video(video_id: str, _=Depends(authenticated), db: Session = Depends(get_db)):
-    return catalog.video_view(db, required(db, Video, video_id), detail=True)
+def video(video_id: str, identity=Depends(optional_identity), db: Session = Depends(get_db)):
+    result = catalog.video_view(db, required(db, Video, video_id), detail=True)
+    catalog.personalize_videos(db, [result], identity)
+    return result
+
+
+@app.put(P + "/videos/{video_id}/star")
+def star_video(video_id: str, body: schemas.StarInput, identity=Depends(authenticated), db: Session = Depends(get_db)):
+    required(db, Video, video_id)
+    user = identity[0]
+    db.scalar(select(User).where(User.id == user.id).with_for_update(key_share=True))
+    current = db.scalar(select(VideoStar).where(VideoStar.user_id == user.id, VideoStar.video_id == video_id))
+    if body.starred and not current:
+        db.add(VideoStar(user_id=user.id, video_id=video_id))
+    elif not body.starred and current:
+        db.delete(current)
+    db.commit()
+    return {"starred": body.starred}
 
 
 @app.get(P + "/creators")
 def creators(q: str = Query("", max_length=200), page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100),
-             _=Depends(authenticated), db: Session = Depends(get_db)):
+             db: Session = Depends(get_db)):
     stmt = select(Creator).join(PlatformUser, PlatformUser.id == Creator.user_id)
     if q.strip():
         pattern = like(q.strip())
@@ -181,26 +200,31 @@ def creators(q: str = Query("", max_length=200), page: int = Query(1, ge=1), pag
         stmt = stmt.where(or_(Creator.alias.ilike(pattern, escape="\\"), PlatformUser.display_name.ilike(pattern, escape="\\"),
                              PlatformUser.signature.ilike(pattern, escape="\\"), Creator.description_override.ilike(pattern, escape="\\"),
                              PlatformUser.uid == q.strip(), PlatformUser.id.in_(history)))
-    return catalog.page(db, stmt.order_by(Creator.created_at.desc(), Creator.id), page, page_size, batch_mapper=catalog.creator_views)
+    result = catalog.page(db, stmt.order_by(Creator.created_at.desc(), Creator.id), page, page_size, batch_mapper=catalog.creator_views)
+    for row in result["items"]:
+        row.pop("notes", None)
+    return result
 
 
 @app.get(P + "/creators/{creator_id}")
-def creator(creator_id: str, _=Depends(authenticated), db: Session = Depends(get_db)):
+def creator(creator_id: str, identity=Depends(optional_identity), db: Session = Depends(get_db)):
     item = required(db, Creator, creator_id)
     result = catalog.creator_view(db, item)
     result.update(alias=item.alias, description_override=item.description_override)
+    if not identity or identity[0].role not in {"admin", "editor"}:
+        result.pop("notes", None)
     return result
 
 
 @app.get(P + "/collections")
 def collections(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100),
-                _=Depends(authenticated), db: Session = Depends(get_db)):
+                db: Session = Depends(get_db)):
     return catalog.page(db, select(Collection).order_by(Collection.created_at.desc(), Collection.id), page, page_size, batch_mapper=catalog.collection_views)
 
 
 @app.get(P + "/videos/{video_id}/comments")
 def comments(video_id: str, root: str = "", q: str = Query("", max_length=200), page: int = Query(1, ge=1),
-             page_size: int = Query(20, ge=1, le=100), _=Depends(authenticated), db: Session = Depends(get_db)):
+             page_size: int = Query(20, ge=1, le=100), sort: str = Query("likes", pattern="^(likes|newest)$"), db: Session = Depends(get_db)):
     required(db, Video, video_id)
     stmt = select(Comment).where(Comment.video_id == video_id)
     if root:
@@ -209,13 +233,24 @@ def comments(video_id: str, root: str = "", q: str = Query("", max_length=200), 
         stmt = stmt.where(or_(Comment.root_rpid == "0", Comment.root_rpid == "", Comment.root_rpid == Comment.rpid))
     if q:
         stmt = stmt.where(Comment.content.ilike(like(q), escape="\\"))
-    return catalog.page(db, stmt.order_by(Comment.posted_at.desc(), Comment.id), page, page_size, batch_mapper=catalog.comment_views)
+    ordering = (Comment.like_count.desc(), Comment.posted_at.desc(), Comment.id) if sort == "likes" else (Comment.posted_at.desc(), Comment.id)
+    return catalog.page(db, stmt.order_by(*ordering), page, page_size, batch_mapper=catalog.comment_views)
 
 
 @app.api_route(P + "/assets/{asset_id}", methods=["GET", "HEAD"])
-def asset(asset_id: str, request: Request, _=Depends(authenticated), db: Session = Depends(get_db)):
+def asset(asset_id: str, request: Request, identity=Depends(optional_identity), db: Session = Depends(get_db)):
     from app.storage.service import resolve_asset
     required(db, Asset, asset_id)
+    if not identity:
+        public = db.scalar(select(or_(
+            select(Video.id).where(Video.cover_asset_id == asset_id).exists(),
+            select(MediaVariant.id).where(MediaVariant.asset_id == asset_id).exists(),
+            select(PlatformUser.id).where(PlatformUser.avatar_asset_id == asset_id).exists(),
+            select(UserSnapshot.id).where(UserSnapshot.avatar_asset_id == asset_id).exists(),
+            select(CommentAsset.id).where(CommentAsset.asset_id == asset_id).exists(),
+            select(SubtitleTrack.id).where(SubtitleTrack.asset_id == asset_id).exists())))
+        if not public:
+            raise HTTPException(404, "此文件不属于可浏览的内容")
     try:
         resolved = resolve_asset(db, asset_id)
     except Exception:
@@ -237,7 +272,7 @@ def asset(asset_id: str, request: Request, _=Depends(authenticated), db: Session
 
 
 @app.get(P + "/parts/{part_id}/danmaku")
-def danmaku(part_id: str, _=Depends(authenticated), db: Session = Depends(get_db)):
+def danmaku(part_id: str, db: Session = Depends(get_db)):
     from app.storage.service import read_asset_bytes
     required(db, VideoPart, part_id)
     snapshot = db.scalar(select(DanmakuSnapshot).where(DanmakuSnapshot.part_id == part_id, DanmakuSnapshot.data_asset_id.is_not(None))
@@ -353,8 +388,9 @@ def verify_account(account_id: str, user=Depends(require_admin), db: Session = D
 
 
 def source_view(db, s, collection=None):
+    from app.source_labels import display_source_title
     c = collection if collection is not None else required(db, Collection, s.collection_id)
-    return {"id": s.id, "collection_id": s.collection_id, "source_id": c.source_id, "title": c.title,
+    return {"id": s.id, "collection_id": s.collection_id, "source_id": c.source_id, "title": display_source_title(c),
             "account_id": s.account_id, "enabled": s.enabled, "interval_minutes": s.interval_minutes,
             "policy": s.policy, "next_run_at": s.next_run_at, "last_scan_at": c.last_scan_at,
             "kind": c.kind, "monitor": c.monitor_state or {}}
@@ -446,7 +482,7 @@ def source_history(source_id: str, page: int = Query(1, ge=1), page_size: int = 
 
 
 @app.get(P + "/creators/{creator_id}/monitor")
-def creator_monitor(creator_id: str, _=Depends(authenticated), db: Session = Depends(get_db)):
+def creator_monitor(creator_id: str, db: Session = Depends(get_db)):
     creator = required(db, Creator, creator_id)
     person = required(db, PlatformUser, creator.user_id)
     row = db.execute(select(Collection, SourceSubscription).join(SourceSubscription, SourceSubscription.collection_id == Collection.id)
@@ -464,7 +500,12 @@ def jobs(status: str = "", page: int = Query(1, ge=1), page_size: int = Query(30
     stmt = select(Job)
     if status:
         stmt = stmt.where(Job.status == status)
-    return catalog.page(db, stmt.order_by(Job.created_at.desc(), Job.id), page, page_size, catalog.job_view)
+    return catalog.page(db, stmt.order_by(Job.created_at.desc(), Job.id), page, page_size, batch_mapper=catalog.job_views)
+
+
+@app.get(P + "/admin/jobs/{job_id}")
+def job_detail(job_id: str, _=Depends(require_admin), db: Session = Depends(get_db)):
+    return catalog.job_views(db, [required(db, Job, job_id)])[0]
 
 
 @app.post(P + "/admin/jobs", status_code=201)
@@ -515,6 +556,11 @@ def validate_storage(body):
     permitted = {"root", "prefix", "endpoint", "public_endpoint", "region", "bucket", "addressing_style", "read_priority", "part_size"}
     if set(body.config) - permitted:
         raise HTTPException(422, "存储配置含未知字段；凭据请使用独立凭据字段")
+    for key in permitted - {"read_priority", "part_size"}:
+        if key in {"endpoint", "public_endpoint"} and body.config.get(key) is None:
+            continue
+        if key in body.config and not isinstance(body.config[key], str):
+            raise HTTPException(422, "存储地址、目录和名称须为文本")
     if "read_priority" in body.config and (not isinstance(body.config["read_priority"], int) or not 0 <= body.config["read_priority"] <= 10000):
         raise HTTPException(422, "读取优先级须为0至10000的整数，数值越小越优先")
     if "part_size" in body.config and (not isinstance(body.config["part_size"], int) or not 5 * 1024**2 <= body.config["part_size"] <= 512 * 1024**2):
@@ -526,6 +572,14 @@ def validate_storage(body):
     else:
         if not body.config.get("bucket"):
             raise HTTPException(422, "请填写存储桶名称")
+        from app.storage.cloud import _endpoint
+        from app.storage.base import StorageError
+        try:
+            for key in ("endpoint", "public_endpoint"):
+                if body.config.get(key):
+                    _endpoint(body.config[key])
+        except StorageError:
+            raise HTTPException(422, "服务地址须为完整的 HTTP(S) 地址，不要包含账号、路径或参数") from None
 
 
 @app.get(P + "/admin/storage")
@@ -563,6 +617,14 @@ def write_storage(db, body, item=None):
     if item and db.scalar(select(AssetLocation.id).where(AssetLocation.storage_profile_id == item.id).limit(1)):
         if storage_placement(body.kind, body.config) != storage_placement(item.kind, item.config):
             raise HTTPException(409, "此位置已有资产；请新建存储并执行迁移，不能修改定位配置")
+    if body.kind != "local":
+        credentials = body.credentials
+        if credentials is None and (item is None or item.kind != body.kind or not item.secret_encrypted):
+            raise HTTPException(422, "请填写此存储服务的访问凭据")
+        if credentials is not None:
+            secret_name = "secret_access_key" if body.kind == "s3" else "access_key_secret"
+            if not all(isinstance(credentials.get(key), str) and credentials[key].strip() for key in ("access_key_id", secret_name)):
+                raise HTTPException(422, "请完整填写访问密钥 ID 和访问密钥")
     if body.is_default:
         for existing in previous_defaults:
             existing.is_default = False
@@ -570,7 +632,9 @@ def write_storage(db, body, item=None):
         item = StorageProfile()
         db.add(item)
     item.name, item.kind, item.config, item.enabled, item.is_default = body.name, body.kind, body.config, body.enabled, body.is_default
-    if body.credentials is not None:
+    if body.kind == "local":
+        item.secret_encrypted = None
+    elif body.credentials is not None:
         try:
             item.secret_encrypted = encrypt_secret(json.dumps(body.credentials))
         except ValueError:
@@ -720,3 +784,5 @@ from app.delivery_api import router as delivery_router
 app.include_router(delivery_router)
 from app.passkeys import router as passkeys_router
 app.include_router(passkeys_router)
+from app.source_discovery import router as source_discovery_router
+app.include_router(source_discovery_router)

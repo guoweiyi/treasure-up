@@ -1,5 +1,5 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>连接 Treasure Up</title><link rel="stylesheet" href="style.css"><script type="module" src="app.js"></script></head>
 <body><main><div class="brand" aria-hidden="true">T</div><p class="eyebrow">YOUR PRIVATE VIDEO LIBRARY</p><h1>连接你的 Treasure Up</h1><p class="lead">媒体与后台任务在你自己的服务器上运行。客户端负责浏览、播放与管理。</p>
-<form id="connect"><label for="origin">服务器地址</label><input id="origin" type="url" inputmode="url" placeholder="https://video.example.com" autocomplete="url" required maxlength="2048" spellcheck="false"><p class="hint">填写站点根地址，不支持子路径。远程连接须 HTTPS；本机开发可用 http://localhost:8788。</p><button id="submit" type="submit">连接服务器</button></form>
+<form id="connect"><label for="origin">服务器或 API 地址</label><input id="origin" type="url" inputmode="url" placeholder="https://video.example.com/api/v1" autocomplete="url" required maxlength="2048" spellcheck="false"><p class="hint">支持站点首页或 /api/v1 地址。远程连接使用 HTTPS；本机开发可用 http://localhost:8788。</p><button id="submit" type="submit">连接服务器</button></form>
 <p id="status" role="status" aria-live="polite"></p><button id="forget" class="secondary" type="button">清除连接与客户端登录数据</button><footer>仅保存服务器地址。密码在服务器页面登录；客户端不保存 B 站 Cookie 或云存储密钥。连接失败时可重试，桌面菜单可随时返回此页。</footer></main></body></html>

@@ -31,7 +31,7 @@ watch(
 watch(
   () => session.user,
   (user) => {
-    if (!user && session.ready && route.path !== '/login')
+    if (!user && session.ready && route.meta.login)
       void router.replace({ path: '/login', query: { next: route.fullPath } });
   },
 );
@@ -42,7 +42,7 @@ async function logout() {
     await write('/auth/logout');
     session.user = null;
     session.csrf = '';
-    await router.push('/login');
+    await router.push('/');
   } catch (e) {
     error.value = errorText(e);
   } finally {
@@ -51,7 +51,7 @@ async function logout() {
 }
 </script>
 <template>
-  <header v-if="session.user && route.path !== '/login'" class="topbar">
+  <header v-if="route.path !== '/login'" class="topbar">
     <RouterLink class="brand" to="/" :aria-label="`${display.site_name} 首页`"
       ><span class="brand-mark"><UiIcon name="play" /></span
       ><span>{{ display.site_name }}</span></RouterLink
@@ -77,13 +77,22 @@ async function logout() {
       <RouterLink v-if="isAdmin" to="/admin" :class="{ active: route.path.startsWith('/admin') }"
         >管理中心</RouterLink
       ><RouterLink
+        v-if="session.user"
         to="/account/security"
         class="account-avatar"
         aria-label="账户安全"
         title="账户安全"
         >{{ session.user.username.slice(0, 1).toUpperCase() }}</RouterLink
-      ><span class="username">{{ session.user.username }}</span
-      ><button class="text-button" :disabled="busy" @click="logout">退出</button>
+      ><span v-if="session.user" class="username">{{ session.user.username }}</span
+      ><button v-if="session.user" class="text-button" :disabled="busy" @click="logout">
+        退出
+      </button>
+      <RouterLink
+        v-else
+        class="login-link"
+        :to="{ path: '/login', query: { next: route.fullPath } }"
+        >登录</RouterLink
+      >
       <a v-if="nativeShell" class="text-button" href="https://treasure-up.invalid/connect"
         >切换服务器</a
       >
@@ -102,6 +111,13 @@ async function logout() {
   </footer>
 </template>
 <style scoped>
+.login-link {
+  background: #222;
+  color: #fff;
+  border-radius: 6px;
+  padding: 7px 18px;
+  white-space: nowrap;
+}
 .native-connection-link {
   position: fixed;
   bottom: 24px;

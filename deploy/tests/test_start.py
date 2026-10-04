@@ -14,7 +14,7 @@ spec.loader.exec_module(start)
 sys.path.pop(0)
 
 
-@pytest.mark.parametrize("light,old", [(True, ["collector", "media-worker"]), (False, ["worker"])])
+@pytest.mark.parametrize("light,old", [(True, ["download-worker", "media-worker"]), (False, ["worker"])])
 def test_replacement_healthy_before_old_workers_stopped(tmp_path, light, old):
     calls = []
     start.start_services(tmp_path, tmp_path / "synthetic.env", light=light, run=lambda command, **kwargs: calls.append(command))

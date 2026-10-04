@@ -5,7 +5,7 @@ import artplayerPluginDanmuku, {
   type Result as DanmakuPlugin,
   type Mode,
 } from 'artplayer-plugin-danmuku';
-import { api, write, errorText, display } from '../api';
+import { api, write, errorText, display, session } from '../api';
 import type { Part, Playback, Danmaku, MediaProperties } from '../types';
 import { createMediaAdapter } from '../player/mediaAdapter';
 import { createPlayback } from '../player/routing';
@@ -13,6 +13,8 @@ import PlaybackOptions from './PlaybackOptions.vue';
 import DanmakuSettings from './DanmakuSettings.vue';
 import PlayerSettingsPanel from './PlayerSettingsPanel.vue';
 import { installPlayerControls } from '../player/controls';
+import PlayerChoice from '../player/PlayerChoice.vue';
+import { danmakuMargins, rateChoices } from '../player/layout';
 import {
   defaultPreferences,
   readPreferences,
@@ -27,6 +29,7 @@ const props = defineProps<{
   poster?: string | null;
   mediaProperties?: Record<string, MediaProperties>;
 }>();
+const emit = defineEmits<{ variant: [id: string] }>();
 const container = ref<HTMLDivElement>(),
   error = ref(''),
   note = ref(''),
@@ -43,6 +46,7 @@ const routeId = ref(''),
 const playableVariants = computed(() =>
   props.part.variants.filter((variant) => variant.kind !== 'hls'),
 );
+watch(variantId, (id) => emit('variant', id));
 let playbackController = new AbortController(),
   expectedVolume = 0.7;
 const userVolume = ref(0.7),
@@ -56,9 +60,13 @@ let danmakuLoading = false,
 let rejectMediaLoad: ((error: Error) => void) | null = null;
 const mediaAdapter = createMediaAdapter(handleMediaFailure);
 const playerHost = ref<HTMLElement | null>(null),
-  settingsOpen = ref(false);
+  settingsOpen = ref(false),
+  panelMode = ref<'settings' | 'rate'>('settings'),
+  smallScreen = ref(false),
+  fullscreenActive = ref(false);
+const sheet = computed(() => smallScreen.value && !fullscreenActive.value);
 const returnFocus = ref<HTMLElement | null>(null);
-let settingsFullscreenOwner: Artplayer | null = null;
+let screenQuery: MediaQueryList | null = null;
 let initialPreferences = defaultPreferences(display.default_danmaku);
 try {
   initialPreferences = readPreferences(
@@ -116,7 +124,12 @@ function applyPreferences() {
     opacity: clamp(prefs.opacity, 0, 100) / 100,
     fontSize: size,
     speed: clamp(prefs.speed, 1, 10),
-    margin: [10, `${Math.max(100 - clamp(prefs.area, 25, 100), prefs.subtitleSafe ? 12 : 0)}%`],
+    margin: danmakuMargins(
+      art?.template.$player.clientHeight || 450,
+      prefs.area,
+      prefs.subtitleSafe,
+      art ? parseFloat(getComputedStyle(art.template.$bottom).paddingBottom) || 0 : 0,
+    ),
     modes,
     antiOverlap: prefs.antiOverlap,
     synchronousPlayback: prefs.synchronousPlayback,
@@ -173,47 +186,42 @@ watch(
     danmakuReload = setTimeout(() => void reloadDanmaku(), 150);
   },
 );
-function openSettings() {
+function openPanel(mode: 'settings' | 'rate') {
   returnFocus.value =
     document.activeElement instanceof HTMLElement
       ? document.activeElement
       : controlButtons?.settings || null;
+  panelMode.value = mode;
   settingsOpen.value = true;
-  expandSettingsOnSmallScreen();
 }
-function expandSettingsOnSmallScreen() {
-  if (!settingsOpen.value || !art || art.fullscreen || art.fullscreenWeb) return;
-  if (art.template.$player.clientWidth > 560 || art.template.$player.clientHeight >= 360) return;
-  settingsFullscreenOwner = art;
-  art.fullscreenWeb = true;
+function openSettings() {
+  openPanel('settings');
 }
 function closeSettings() {
   settingsOpen.value = false;
-  const owner = settingsFullscreenOwner;
-  settingsFullscreenOwner = null;
-  if (owner === art && owner?.fullscreenWeb && !owner.fullscreen) owner.fullscreenWeb = false;
 }
-function fullscreenWebChanged(active: boolean) {
+function fullscreenChanged() {
+  fullscreenActive.value = !!(art?.fullscreen || art?.fullscreenWeb);
   syncPlayerStyles();
-  if (!active && settingsFullscreenOwner === art) {
-    settingsFullscreenOwner = null;
-    settingsOpen.value = false;
-  }
+  applyPreferences();
 }
-function fullscreenChanged(active: boolean) {
-  syncPlayerStyles();
-  // Native fullscreen belongs to the user, never to the settings panel.
-  settingsFullscreenOwner = null;
-  if (!active) settingsOpen.value = false;
+function screenChanged() {
+  smallScreen.value = !!screenQuery?.matches;
 }
-watch(settingsOpen, (open) => {
-  controlButtons?.settings.setAttribute('aria-expanded', String(open));
+watch([settingsOpen, panelMode], ([open, mode]) => {
+  controlButtons?.settings.setAttribute('aria-expanded', String(open && mode === 'settings'));
+  controlButtons?.rate.setAttribute('aria-expanded', String(open && mode === 'rate'));
   if (art) art.controls.show = true;
 });
 function setRate(value: number) {
   playbackRate.value = value;
   if (art) art.playbackRate = value;
 }
+watch(playbackRate, (value) => {
+  if (!controlButtons) return;
+  controlButtons.rate.textContent = `${value}×`;
+  controlButtons.rate.setAttribute('aria-label', `播放速度 ${value} 倍`);
+});
 function setVolume(value: number) {
   userVolume.value = clamp(value, 0, 1);
   if (art) art.muted = false;
@@ -239,7 +247,8 @@ function resetSettings(tab: 'playback' | 'danmaku') {
   void renew();
 }
 async function saveProgress() {
-  if (!art || !activePartId || !Number.isFinite(art.duration) || art.duration <= 0) return;
+  if (!session.user || !art || !activePartId || !Number.isFinite(art.duration) || art.duration <= 0)
+    return;
   const partId = activePartId;
   try {
     await write(
@@ -377,6 +386,7 @@ async function setup() {
   await saveProgress();
   if (key !== request) return;
   closeSettings();
+  fullscreenActive.value = false;
   playerHost.value = null;
   await nextTick();
   if (key !== request) return;
@@ -467,10 +477,13 @@ async function setup() {
     setFit(fit.value);
     controlButtons = installPlayerControls(art, {
       openSettings,
+      openRates: () => openPanel('rate'),
       toggleDanmaku: () => (prefs.visible = !prefs.visible),
       setVolume,
       getVolume: () => userVolume.value,
     });
+    controlButtons.rate.textContent = `${playbackRate.value}×`;
+    controlButtons.rate.setAttribute('aria-label', `播放速度 ${playbackRate.value} 倍`);
     applyVolume();
     art.on('video:volumechange', () => {
       if (!art || Math.abs(art.video.volume - expectedVolume) < 0.0001) return;
@@ -480,13 +493,14 @@ async function setup() {
     syncPlayerStyles();
     resize?.observe(art.template.$player);
     art.on('fullscreen', fullscreenChanged);
-    art.on('fullscreenWeb', fullscreenWebChanged);
+    art.on('fullscreenWeb', fullscreenChanged);
     art.on('video:ratechange', () => {
       if (art) playbackRate.value = art.playbackRate;
     });
     art.on('ready', async () => {
       applyPreferences();
       setRate(playbackRate.value);
+      if (!session.user) return;
       try {
         const progress = await api<{ position: number }>(`/progress/${props.part.id}`);
         if (key === request && art && progress.position > 0 && progress.position < art.duration - 3)
@@ -532,13 +546,16 @@ watch(
   },
 );
 onMounted(() => {
+  screenQuery = window.matchMedia('(max-width: 700px)');
+  screenQuery.addEventListener('change', screenChanged);
+  screenChanged();
   void setup();
   resize = new ResizeObserver(() => {
-    if (prefs.scaleWithScreen) applyPreferences();
-    expandSettingsOnSmallScreen();
+    applyPreferences();
   });
 });
 onBeforeUnmount(() => {
+  screenQuery?.removeEventListener('change', screenChanged);
   closeSettings();
   request++;
   clearTimeout(danmakuReload);
@@ -582,39 +599,54 @@ onBeforeUnmount(() => {
           ×
         </button>
       </div>
-      <PlayerSettingsPanel
-        v-if="playerHost && settingsOpen"
-        :return-focus="returnFocus"
-        :busy="switching"
-        @close="closeSettings"
-        @reset="resetSettings"
-      >
-        <template #playback
-          ><PlaybackOptions
-            :playback="playback"
-            :variants="playableVariants"
-            :variant-id="variantId"
-            :subtitle="subtitle"
-            :route-id="routeId"
-            :balance="volumeBalance"
-            :busy="busy || switching"
-            :rate="playbackRate"
-            :volume="userVolume"
-            :fit="fit"
-            :media-properties="mediaProperties"
-            @variant="selectVariant"
-            @route="selectRoute"
-            @balance="volumeBalance = $event"
-            @subtitle="
-              subtitle = $event;
-              selectSubtitle();
-            "
-            @rate="setRate"
-            @volume="setVolume"
-            @fit="setFit"
-        /></template>
-        <template #danmaku><DanmakuSettings :model-value="prefs" :count="dmCount" /></template>
-      </PlayerSettingsPanel>
+      <Teleport to="body" :disabled="!sheet">
+        <PlayerSettingsPanel
+          v-if="playerHost && settingsOpen"
+          :sheet="sheet"
+          :rate-only="panelMode === 'rate'"
+          :return-focus="returnFocus"
+          :busy="switching"
+          @close="closeSettings"
+          @reset="resetSettings"
+        >
+          <template #rate>
+            <PlayerChoice
+              label="播放速度"
+              :model-value="playbackRate"
+              :choices="rateChoices"
+              @update:model-value="
+                setRate(Number($event));
+                closeSettings();
+              "
+            />
+          </template>
+          <template #playback
+            ><PlaybackOptions
+              :playback="playback"
+              :variants="playableVariants"
+              :variant-id="variantId"
+              :subtitle="subtitle"
+              :route-id="routeId"
+              :balance="volumeBalance"
+              :busy="busy || switching"
+              :rate="playbackRate"
+              :volume="userVolume"
+              :fit="fit"
+              :media-properties="mediaProperties"
+              @variant="selectVariant"
+              @route="selectRoute"
+              @balance="volumeBalance = $event"
+              @subtitle="
+                subtitle = $event;
+                selectSubtitle();
+              "
+              @rate="setRate"
+              @volume="setVolume"
+              @fit="setFit"
+          /></template>
+          <template #danmaku><DanmakuSettings :model-value="prefs" :count="dmCount" /></template>
+        </PlayerSettingsPanel>
+      </Teleport>
     </Teleport>
   </section>
 </template>

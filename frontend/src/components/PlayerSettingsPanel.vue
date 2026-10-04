@@ -4,6 +4,8 @@ const props = defineProps<{
   initialTab?: 'playback' | 'danmaku';
   returnFocus?: HTMLElement | null;
   busy?: boolean;
+  sheet?: boolean;
+  rateOnly?: boolean;
 }>();
 const emit = defineEmits<{ close: []; reset: [tab: 'playback' | 'danmaku'] }>();
 const dialog = ref<HTMLElement>(),
@@ -14,6 +16,17 @@ const tabs = [
 ] as const;
 const id = useId();
 const body = ref<HTMLElement>();
+let savedOverflow = '';
+watch(
+  () => props.sheet,
+  (sheet, previous) => {
+    if (sheet) {
+      savedOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+    } else if (previous) document.body.style.overflow = savedOverflow;
+  },
+  { immediate: true },
+);
 watch(
   tab,
   () => {
@@ -64,12 +77,14 @@ function switchTab(event: KeyboardEvent) {
 }
 onMounted(() => dialog.value?.querySelector<HTMLElement>('.player-settings-close')?.focus());
 onBeforeUnmount(() => {
+  if (props.sheet) document.body.style.overflow = savedOverflow;
   if (props.returnFocus?.isConnected) props.returnFocus.focus();
 });
 </script>
 <template>
   <div
     class="player-settings-scrim"
+    :class="{ 'player-sheet': sheet, 'player-rate-panel': rateOnly }"
     @click.self="$emit('close')"
     @pointerdown.stop
     @click.stop
@@ -81,16 +96,22 @@ onBeforeUnmount(() => {
       class="player-settings-dialog"
       role="dialog"
       aria-modal="true"
-      aria-label="播放器设置"
+      :aria-label="rateOnly ? '播放速度' : '播放器设置'"
       tabindex="-1"
     >
       <header class="player-settings-header">
-        <strong>播放器设置</strong
+        <strong>{{ rateOnly ? '播放速度' : '播放器设置' }}</strong
         ><button class="player-settings-close" aria-label="关闭播放器设置" @click="$emit('close')">
           关闭 <span aria-hidden="true">×</span>
         </button>
       </header>
-      <div class="player-settings-tabs" role="tablist" aria-label="设置分类" @keydown="switchTab">
+      <div
+        v-if="!rateOnly"
+        class="player-settings-tabs"
+        role="tablist"
+        aria-label="设置分类"
+        @keydown="switchTab"
+      >
         <button
           v-for="[value, label] in tabs"
           :key="value"
@@ -109,11 +130,14 @@ onBeforeUnmount(() => {
         ref="body"
         :id="`${id}-panel`"
         class="player-settings-body"
-        role="tabpanel"
-        :aria-labelledby="`${id}-${tab}`"
+        :role="rateOnly ? undefined : 'tabpanel'"
+        :aria-labelledby="rateOnly ? undefined : `${id}-${tab}`"
       >
-        <slot :name="tab"></slot>
-        <details v-if="tab === 'playback'" class="player-settings-details">
+        <slot :name="rateOnly ? 'rate' : tab"></slot>
+        <details
+          v-if="!rateOnly && tab === 'playback'"
+          class="player-settings-details player-keyboard-help"
+        >
           <summary>键盘快捷键</summary>
           <p class="player-setting-help">
             焦点在播放器时：空格 / K 暂停或播放，← → 跳转 5 秒，↑ ↓ 调整音量，M 静音，D 开关弹幕，S
@@ -121,7 +145,7 @@ onBeforeUnmount(() => {
           </p>
         </details>
       </div>
-      <footer class="player-settings-footer">
+      <footer v-if="!rateOnly" class="player-settings-footer">
         <span>{{ tab === 'danmaku' ? '弹幕偏好保存在此浏览器' : '设置当前播放器' }}</span
         ><button :disabled="busy" @click="$emit('reset', tab)">恢复默认</button>
       </footer>

@@ -16,6 +16,8 @@ import {
 import { api, write, query, bytes, date, errorText } from '../../api';
 import type { Row, Page, Video } from '../../types';
 import { qualityLabel } from '../../utils/format';
+import OperationResult from './OperationResult.vue';
+const operationOpen = ref(false);
 const route = useRoute(),
   videos = ref<Video[]>([]),
   profiles = ref<Row[]>([]),
@@ -91,7 +93,8 @@ async function run(path: string, body?: unknown, method = 'POST') {
   error.value = '';
   try {
     queued.value = await write(path, body, method);
-    ElMessage.success('任务已排队，请在任务中心查看执行结果');
+    operationOpen.value = true;
+    ElMessage.success('任务已排队');
   } catch (e) {
     error.value = errorText(e);
   } finally {
@@ -185,12 +188,13 @@ onMounted(async () => {
   </section>
   <el-alert v-if="error" :title="error" type="error" :closable="false" class="mb" /><el-alert
     v-if="queued"
-    :title="'任务已排队：' + queued.id + '，请在任务中心确认执行结果，再刷新本页。'"
+    title="后台任务已提交，可以查看实时进度与执行结果。"
     type="info"
     :closable="false"
     class="mb"
   />
-  <p v-if="queued"><RouterLink to="/admin/jobs" class="text-button">查看任务 →</RouterLink></p>
+  <p v-if="queued"><el-button @click="operationOpen = true">查看进度与结果</el-button></p>
+  <OperationResult v-model:open="operationOpen" :job="queued" @completed="load" />
   <template v-if="selected"
     ><section class="admin-panel">
       <div class="section-heading">

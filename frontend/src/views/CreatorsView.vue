@@ -73,9 +73,7 @@ watch(() => route.fullPath, load, { immediate: true });
         /><span v-else class="avatar large fallback">{{ creator.name?.slice(0, 1) || '?' }}</span>
         <div>
           <h2>{{ creator.name }}</h2>
-          <p class="muted small">
-            UID {{ creator.uid }} · 已保存 {{ creator.saved_count || 0 }} 条
-          </p>
+          <p class="muted small">已保存 {{ creator.saved_count || 0 }} 条视频</p>
           <p class="clamp-two">{{ creator.description || '暂无简介' }}</p>
         </div></RouterLink
       >

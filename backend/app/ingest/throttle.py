@@ -1,11 +1,19 @@
 """Persisted, account-serialized pacing and source-request backoff.
 
 Jitter spreads scheduled load; it never changes identity or evades challenges.
-The runner must hold the account advisory lock while using this object.
+Request/video slots are reserved under the shared account request lock. The
+shared request scope waits outside that lock and rechecks before reserving.
+Rejections use a separate short account transaction, without job/capture locks.
 """
 import math
 import random
 import time
+from urllib.parse import urlsplit
+
+from sqlalchemy import or_, select, update
+from sqlalchemy.orm import Session
+
+from app.models import SourceAccount
 from datetime import datetime, timedelta, timezone
 
 from .errors import IngestDeferred
@@ -42,13 +50,20 @@ class AccountPacer:
 
     def before_request(self, url=None):
         self.check_cooldown()
+        if url:
+            host = (urlsplit(url).hostname or "").lower()
+            if host == "hdslb.com" or host.endswith(".hdslb.com"):
+                return  # Public CDN requests never carry account credentials.
         self._wait_until(self.account.next_request_at)
         interval = max(1, min(120, float(self.policy.get("request_interval_seconds", 3))))
-        self.account.next_request_at = self.clock() + timedelta(seconds=interval + self._jitter())
+        self.account.next_request_at = self.clock() + timedelta(seconds=interval + min(1, self._jitter()))
         self.db.commit()
 
-    def before_video(self):
+    def before_video(self, *, defer=False):
         self.check_cooldown()
+        remaining = (utc(self.account.next_video_at) - self.clock()).total_seconds() if self.account.next_video_at else 0
+        if defer and remaining > 2:
+            raise IngestDeferred("等待同账号下一次媒体下载时段", code="video_interval", retry_after_seconds=math.ceil(remaining))
         self._wait_until(self.account.next_video_at)
         interval = max(10, min(3600, float(self.policy.get("video_interval_seconds", 60))))
         self.account.next_video_at = self.clock() + timedelta(seconds=interval + self._jitter())
@@ -57,16 +72,30 @@ class AccountPacer:
     def failed(self, error):
         if error.code != "rate_limited":
             return
-        self.account.risk_failures = min(20, (self.account.risk_failures or 0) + 1)
-        baseline = max(60, min(86400, float(self.policy.get("risk_cooldown_seconds", 900))))
-        delay = max(float(error.retry_after_seconds or 0), min(86400, baseline * 2 ** (self.account.risk_failures - 1)) + self._jitter())
-        deadline = self.clock() + timedelta(seconds=delay)
-        self.account.cooldown_until = max(utc(self.account.cooldown_until) or deadline, deadline)
-        error.retry_after_seconds = math.ceil((utc(self.account.cooldown_until) - self.clock()).total_seconds())
+        # A JSON rejection is decoded after releasing the HTTP/advisory scope.
+        # Persist it independently, even if another request now holds that lock
+        # or the caller loses its job lease. Never hold this short account row
+        # lock while committing capture rows or acquiring the caller's job fence.
+        with Session(self.db.get_bind()) as risk_db:
+            account = risk_db.scalar(select(SourceAccount).where(SourceAccount.id == self.account.id)
+                .with_for_update(key_share=True))
+            if account is None:
+                return
+            account.risk_failures = min(20, (account.risk_failures or 0) + 1)
+            baseline = max(60, min(86400, float(self.policy.get("risk_cooldown_seconds", 900))))
+            delay = max(float(error.retry_after_seconds or 0), min(86400, baseline * 2 ** (account.risk_failures - 1)) + self._jitter())
+            deadline = self.clock() + timedelta(seconds=delay)
+            deadline = account.cooldown_until = max(utc(account.cooldown_until) or deadline, deadline)
+            risk_db.commit()
+        self.db.refresh(self.account, attribute_names=["cooldown_until", "risk_failures"])
+        error.retry_after_seconds = math.ceil((deadline - self.clock()).total_seconds())
         # A real source rejection counts as an attempt. Later jobs waiting for
         # this persisted deadline use IngestDeferred and consume no attempts.
         error.blocked = False
-        self.db.commit()
 
     def succeeded(self):
-        self.account.risk_failures = 0
+        # A different lane may have encountered a challenge while this job
+        # finished already downloaded/local work. Never clear its active risk.
+        self.db.execute(update(SourceAccount).where(SourceAccount.id == self.account.id,
+            or_(SourceAccount.cooldown_until.is_(None), SourceAccount.cooldown_until <= self.clock()))
+            .values(risk_failures=0).execution_options(synchronize_session=False))

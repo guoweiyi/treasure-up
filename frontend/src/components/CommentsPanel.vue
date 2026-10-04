@@ -44,7 +44,8 @@ watch(
   <section class="comments-panel">
     <div class="section-heading">
       <h2 title="评论和点赞数为归档时快照。展开回复只读取本地保存的内容。">
-        {{ q ? '评论搜索结果' : '已保存的顶层评论' }} <span class="muted">{{ total }}</span>
+        {{ q ? '评论搜索结果' : '评论' }} <span class="muted">{{ total }}</span
+        ><small class="comment-sort-label">按点赞排序</small>
       </h2>
       <form class="search-form compact" @submit.prevent="load()">
         <input v-model="q" placeholder="搜索此视频的评论" aria-label="搜索评论" /><button>

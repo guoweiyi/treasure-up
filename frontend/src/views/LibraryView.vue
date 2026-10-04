@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { api, query, errorText } from '../api';
+import { api, query, errorText, session } from '../api';
 import type { Video, Collection, Page } from '../types';
 import VideoCard from '../components/VideoCard.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -45,6 +45,10 @@ async function load() {
   }
 }
 function search(next = 1) {
+  if (starred.value && !session.user) {
+    void router.push({ path: '/login', query: { next: '/?starred=true' } });
+    return;
+  }
   router.push({
     path: '/',
     query: {
@@ -81,7 +85,7 @@ watch(() => route.fullPath, load, { immediate: true });
             search();
           "
         >
-          星标收藏
+          我的星标
         </button>
       </div>
       <span class="muted small">{{ busy ? '正在读取…' : total + ' 个视频' }}</span>
@@ -113,6 +117,7 @@ watch(() => route.fullPath, load, { immediate: true });
       <form class="filter-bar" @submit.prevent="search()">
         <select v-model="sort" aria-label="排序" @change="search()">
           <option value="newest">最近保存</option>
+          <option value="published">最新发布</option>
           <option value="oldest">最早保存</option>
           <option value="title">按标题</option>
           <option value="duration">按时长</option>

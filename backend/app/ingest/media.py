@@ -6,7 +6,13 @@ import shutil
 import subprocess
 import tempfile
 import time
+import threading
+import math
 from copy import deepcopy
+from contextlib import nullcontext
+from datetime import datetime, timezone
+from http.cookiejar import Cookie as JarCookie
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,6 +29,53 @@ class _SilentLogger:
     def debug(self, *args, **kwargs): pass
     def warning(self, *args, **kwargs): pass
     def error(self, *args, **kwargs): pass
+
+
+def _positive(value, scale=1):
+    try:
+        result = float(value) * scale
+        return result if math.isfinite(result) and result > 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def record_available_formats(video, part, info):
+    """Capabilities actually returned for this account; never persist URLs."""
+    formats = []
+    for source in (info.get("formats") or info.get("requested_formats") or [info])[:500]:
+        width, height = _positive(source.get("width")), _positive(source.get("height"))
+        video_only, audio_only = source.get("acodec") == "none", source.get("vcodec") == "none"
+        formats.append({"format_id": str(source.get("format_id") or ""),
+            "quality": str(source.get("format_note") or source.get("format") or
+                (f"{int(min(width, height))}p" if width and height else source.get("quality") or "unknown")),
+            "width": int(width) if width else None, "height": int(height) if height else None,
+            "fps": _positive(source.get("fps")), "video_codec": source.get("vcodec"),
+            "audio_codec": source.get("acodec"), "dynamic_range": source.get("dynamic_range"),
+            "video_bitrate_bps": _positive(source.get("vbr") or (source.get("tbr") if video_only else None), 1000),
+            "audio_bitrate_bps": _positive(source.get("abr") or (source.get("tbr") if audio_only else None), 1000),
+            "total_bitrate_bps": _positive(source.get("tbr"), 1000),
+            "filesize_estimate": _positive(source.get("filesize") or source.get("filesize_approx"))})
+    videos = [item for item in formats if item["video_codec"] != "none" and item["width"] and item["height"]]
+    audios = [item for item in formats if item["audio_codec"] not in (None, "none")]
+    metadata = deepcopy(video.metadata_json or {})
+    quality = metadata.setdefault("source_quality", {})
+    quality.update(observed_at=datetime.now(timezone.utc).isoformat(), scope="current_account")
+    quality.setdefault("parts", {})[part.id] = {"cid": part.cid, "observed_at": quality["observed_at"], "status": "available" if formats else "unavailable",
+        "formats": formats,
+        "maximum": max(videos, key=lambda f: (min(f["width"], f["height"]), f["fps"] or 0, f["total_bitrate_bps"] or 0), default=None),
+        "maximum_audio": max(audios, key=lambda f: f["audio_bitrate_bps"] or 0, default=None)}
+    video.metadata_json = metadata
+
+
+def _measured_properties(video, audio, duration, size):
+    try:
+        fps = _positive(Fraction(str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0")))
+    except (ValueError, ZeroDivisionError):
+        fps = None
+    return {"video_bitrate_bps": _positive(video.get("bit_rate")), "audio_bitrate_bps": _positive(audio.get("bit_rate")),
+            "total_bitrate_bps": size * 8 / duration if duration > 0 else None,
+            "total_bitrate_basis": "file_size_over_duration", "size_bytes": size, "duration_seconds": duration,
+            "fps": fps, "measured_at": datetime.now(timezone.utc).isoformat()}
 
 
 def selected_fingerprint(info, generation=0):
@@ -118,12 +171,22 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
 
         started = time.monotonic()
         merge_evidence = {}
+        downloaded_streams = {}
+        download_progress_lock = threading.Lock()
         def hook(state):
             guard()
             if time.monotonic() - started > int(policy.get("download_timeout_seconds", 21600)):
                 raise IngestError("媒体下载超过本轮时间预算", code="download_timeout")
-            if int(state.get("downloaded_bytes") or 0) > maximum:
-                raise IngestError("媒体超过本次大小预算", code="media_budget", retryable=False)
+            with download_progress_lock:
+                identity = state.get("filename") or state.get("tmpfilename") or "media"
+                downloaded_streams[identity] = max(downloaded_streams.get(identity, 0), int(state.get("downloaded_bytes") or 0))
+                if sum(downloaded_streams.values()) > maximum:
+                    raise IngestError("媒体超过本次大小预算", code="media_budget", retryable=False)
+            if getattr(client, "media_progress", None):
+                client.media_progress({"phase": "download", "part_id": part.id, "scope": "current_stream",
+                    "downloaded_bytes": state.get("downloaded_bytes"),
+                    "total_bytes": state.get("total_bytes") or state.get("total_bytes_estimate"),
+                    "speed_bytes_per_second": state.get("speed"), "eta_seconds": state.get("eta")})
 
         format_selector(policy)  # Validate policy before touching the source.
         ffmpeg_location = shutil.which(str(settings.ffmpeg_path))
@@ -159,20 +222,34 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
                 return info["__files_to_merge"], info
 
         class PacedDownloader(yt_dlp.YoutubeDL):
+            _treasure_cookies = tuple(client.cookies)
+
             def urlopen(self, request):
                 guard()
                 url = request if isinstance(request, str) else getattr(request, "url", "")
                 host = urlsplit(url).hostname or ""
-                if (host == "bilibili.com" or host.endswith(".bilibili.com")) and getattr(client, "before_request", None):
-                    client.before_request(url)
-                try:
-                    return super().urlopen(request)
-                except HTTPError as error:
-                    if error.status in (412, 429):
-                        delay = retry_after(error.response.headers.get("retry-after"))
-                        error.close()
-                        raise IngestError("媒体源站限流，暂停并等待冷却", code="rate_limited", retry_after_seconds=delay) from None
-                    raise
+                source_request = host == "bilibili.com" or host.endswith(".bilibili.com")
+                scope = client.request_context(url) if source_request and getattr(client, "request_context", None) else nullcontext()
+                with scope:
+                    if source_request and getattr(client, "before_request", None):
+                        client.before_request(url)
+                        # request_context refreshes rotated credentials under
+                        # the account lock; replace the extractor's old jar too.
+                        if tuple(client.cookies) != self._treasure_cookies:
+                            self.cookiejar.clear()
+                            for c in client.cookies:
+                                self.cookiejar.set_cookie(JarCookie(0, c.name, c.value, None, False, c.domain,
+                                    c.include_subdomains, c.domain.startswith("."), c.path, True, c.secure,
+                                    c.expires or None, not bool(c.expires), None, None, {}))
+                            self._treasure_cookies = tuple(client.cookies)
+                    try:
+                        return super().urlopen(request)
+                    except HTTPError as error:
+                        if error.status in (403, 412, 429):
+                            delay = retry_after(error.response.headers.get("retry-after"))
+                            error.close()
+                            raise IngestError("媒体源站限流，暂停并等待冷却", code="rate_limited", retry_after_seconds=delay) from None
+                        raise
 
             def run_pp(self, pp, info):
                 if isinstance(pp, FFmpegMergerPP) and not isinstance(pp, ControlledMerger):
@@ -210,6 +287,8 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
                 checked = client.view(video.bvid).get("pages", [])
                 if not any(str(p.get("cid")) == part.cid and int(p.get("page") or 1) == position for p in checked):
                     raise IngestError("提取期间分P顺序发生变化，请重试新轮次", code="source_changed", retryable=False)
+                record_available_formats(video, part, info)
+                db.commit()  # The available specification survives a later download failure.
                 part.position = position
                 fingerprint = selected_fingerprint(info, policy.get("acquisition_generation", 0))
                 existing = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id, MediaVariant.format_key == fingerprint, MediaVariant.kind == "archive"))
@@ -269,7 +348,8 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
         variant.duration = duration
         db.add(variant)
         db.flush()
-        _record_source_properties(db, part, variant, vstream, **dolby, **merge_evidence, archive_stream_copy=True)
+        _record_source_properties(db, part, variant, vstream, **dolby, **merge_evidence,
+            **_measured_properties(vstream, astream, duration, path.stat().st_size), archive_stream_copy=True)
         return variant, False
 
 
@@ -478,4 +558,6 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
         db.add(variant)
         db.flush()
         _record_source_properties(db, part, archive, source_stream, compatibility="ready", playback_variant_id=variant.id)
+        _record_source_properties(db, part, variant, vstream,
+            **_measured_properties(vstream, astream, duration, asset.size), compatibility="ready")
         return variant, compatible

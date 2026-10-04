@@ -8,10 +8,64 @@ from sqlalchemy import func, select
 from app.ingest import runner
 from app.ingest.errors import IngestError
 from app.models import CaptureRun, Collection, CollectionItem, Creator, Job, SourceSubscription, Video, VideoCreator
+from app.source_labels import apply_source_title, display_source_title
 from test_ingest_runner import FakeClient, db, setup
 
 
 NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("kind,title", [("favorite", "收藏夹123"), ("favorite", "收藏夹 123"), ("creator", "UP 123"), ("creator", "123")])
+def test_real_source_name_replaces_default_and_tracks_upstream_changes(kind, title):
+    collection = Collection(source_id="123", kind=kind, title=title)
+    apply_source_title(collection, "第一次真实名")
+    assert collection.title == "第一次真实名"
+    apply_source_title(collection, "新真实名")
+    assert collection.title == "新真实名" and collection.monitor_state["source_title"] == "新真实名"
+    collection.title = "我自定义的标题"
+    apply_source_title(collection, "另一个源站名称")
+    assert collection.title == "我自定义的标题"
+    assert display_source_title(collection) == "我自定义的标题"
+
+
+def test_legacy_source_placeholder_display_uses_saved_real_name_without_mutation():
+    collection = Collection(source_id="123", kind="favorite", title="收藏夹 123", monitor_state={"source_title": "原站收藏名"})
+    assert display_source_title(collection) == "原站收藏名"
+    assert collection.title == "收藏夹 123"
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_favorite_scan_applies_real_source_name_but_preserves_custom(db, monkeypatch, custom):
+    class Client(FakeClient):
+        def favorite_page(self, _, number):
+            data = page([])
+            data["info"]["title"] = "旅行记录"
+            return data
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    collection = Collection(source_id="123", kind="favorite", title="自己命名" if custom else "收藏夹 123")
+    db.add(collection); db.flush()
+    _, job = source_job(db, collection=collection)
+    complete(db, job)
+    assert collection.title == ("自己命名" if custom else "旅行记录")
+    assert collection.monitor_state["source_title"] == "旅行记录"
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_creator_scan_uses_existing_profile_request_for_real_name(db, monkeypatch, custom):
+    calls = []
+    class Client(FakeClient):
+        def profile(self, uid):
+            calls.append(uid)
+            return {"mid": uid, "name": "真实UP名字"}
+        def creator_page(self, uid, pn):
+            return {"page": {"count": 0, "pn": pn, "ps": 30}, "list": {"vlist": []}}
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    collection = Collection(source_id="123", kind="creator", title="自定义UP名" if custom else "UP 123")
+    db.add(collection); db.flush()
+    _, job = source_job(db, kind="creator", collection=collection)
+    complete(db, job)
+    assert collection.title == ("自定义UP名" if custom else "真实UP名字")
+    assert calls == ["123"]
 
 
 def favorite(identity, *, added=None, bvid=True, **extra):

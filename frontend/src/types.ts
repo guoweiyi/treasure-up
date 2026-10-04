@@ -21,6 +21,7 @@ export interface Creator {
   saved_count?: number;
   tags?: string[];
   role?: string;
+  role_title?: string;
 }
 export interface Variant {
   id: string;
@@ -74,6 +75,7 @@ export interface Video {
   playable: boolean;
   capture_status: string;
   created_at: string;
+  published_at?: string | null;
   notes?: string;
   source_state?: string;
   parts?: Part[];
@@ -88,6 +90,7 @@ export interface Collection {
   source_id: string;
   saved_count: number;
   enabled: boolean;
+  cover_url?: string | null;
 }
 export interface Comment {
   id: string;

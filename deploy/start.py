@@ -17,14 +17,14 @@ def start_services(root, env_file, *, light=False, build=True, run=subprocess.ru
     # Keep the same compose project/environment; only retire workers from the other mode.
     # Compose stop respects stop_grace_period. Expired task leases recover unfinished work.
     stop = base + ["-f", str(root / "compose.light.yaml"), "--profile", "full-workers", "stop"]
-    stop += ["collector", "media-worker"] if light else ["worker"]
+    stop += ["download-worker", "media-worker"] if light else ["worker"]
     run(stop, cwd=root, check=True)
 
 
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--light", action="store_true", help="Combine collector/media workers; backup worker remains separate")
+    parser.add_argument("--light", action="store_true", help="Combine download/media workers; metadata and backup remain separate")
     parser.add_argument("--env-file", type=Path, default=root / ".env")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--origin", help="External HTTPS origin, or local http://localhost:<port>")

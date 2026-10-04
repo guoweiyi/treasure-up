@@ -10,6 +10,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public retryAfterSeconds?: number,
   ) {
     super(message);
   }
@@ -38,6 +39,16 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
           ? detail.map((e: any) => e.msg).join('；')
           : `请求失败（${response.status}）`,
       response.status,
+      (() => {
+        const value = response.headers.get('Retry-After');
+        if (!value) return undefined;
+        const seconds = /^\d+$/.test(value)
+          ? Number(value)
+          : (Date.parse(value) - Date.now()) / 1000;
+        return Number.isFinite(seconds)
+          ? Math.max(1, Math.min(86400, Math.ceil(seconds)))
+          : undefined;
+      })(),
     );
   }
   return data as T;
@@ -49,11 +60,11 @@ export async function loadSession() {
     const data = await api<{ user: User; csrf_token: string }>('/auth/me');
     session.user = data.user;
     session.csrf = data.csrf_token;
-    await loadDisplaySettings();
   } catch (error) {
     if (!(error instanceof ApiError) || error.status !== 401) throw error;
   } finally {
     session.ready = true;
+    await loadDisplaySettings();
   }
 }
 export async function loadDisplaySettings() {
@@ -105,6 +116,7 @@ const states: Record<string, string> = {
   failed: '失败',
   cancelled: '已取消',
   pending: '待归档',
+  metadata_ready: '资料已保存，等待视频下载',
   available: '可访问',
   unavailable: '来源不可用',
   unknown: '未确认',

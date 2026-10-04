@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { Video } from '../types';
+import type { VideoDetail } from '../player/mediaInfo';
 import { duration, statusText } from '../api';
 import { count, shortDate } from '../utils/format';
 import UiIcon from './UiIcon.vue';
-defineProps<{ video: Video }>();
+defineProps<{ video: VideoDetail }>();
 </script>
 <template>
   <article class="video-card">
@@ -34,8 +34,10 @@ defineProps<{ video: Video }>();
       <RouterLink v-if="video.creators?.length" :to="`/creators/${video.creators[0]!.id}`"
         ><span class="up-label">UP</span>{{ video.creators[0]!.name }}</RouterLink
       ><span v-else>UP 主资料待补全</span
-      ><span>{{
-        video.parts_count > 1 ? `${video.parts_count} P` : shortDate(video.created_at)
+      ><span :title="video.published_at ? '发布时间' : '归档时间'">{{
+        video.parts_count > 1
+          ? `${video.parts_count} P`
+          : shortDate(video.published_at || video.created_at)
       }}</span>
     </div>
   </article>

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (Asset, CaptureRun, Collection, CollectionItem, Comment, CommentAsset, Creator,
                         Job, MediaVariant, PlatformUser, SourceSubscription, UserSnapshot, Video, VideoAnnotation,
-                        VideoCreator, VideoPart, VideoStatSnapshot)
+                        VideoCreator, VideoPart, VideoStatSnapshot, VideoStar, StorageProfile, SourceAccount)
 
 
 def asset_url(asset_id):
@@ -14,6 +14,20 @@ def asset_url(asset_id):
 
 def effective(override, original):
     return original if override is None else override
+
+
+def personalize_videos(db, items, identity):
+    ids = [item["id"] for item in items]
+    stars = set(db.scalars(select(VideoStar.video_id).where(VideoStar.user_id == identity[0].id,
+                                                          VideoStar.video_id.in_(ids)))) if identity and ids else set()
+    editor = bool(identity and identity[0].role in {"admin", "editor"})
+    for item in items:
+        if editor:
+            item["annotation_starred"] = item["starred"]
+        item["starred"] = item["id"] in stars
+        if not editor:
+            for field in ("notes", "capture_runs"):
+                item.pop(field, None)
 
 
 def page(db, statement, page=1, page_size=24, mapper=None, batch_mapper=None):
@@ -70,7 +84,7 @@ def video_views(db: Session, rows, *, detail=False):
             .join(Creator, Creator.id == VideoCreator.creator_id).join(PlatformUser, PlatformUser.id == Creator.user_id)
             .where(VideoCreator.video_id.in_(ids)).order_by(VideoCreator.role)):
         people[rel.video_id].append({"id": creator.id, "name": effective(creator.alias, person.display_name),
-                                    "avatar_url": asset_url(person.avatar_asset_id), "role": rel.role})
+                                    "avatar_url": asset_url(person.avatar_asset_id), "role": rel.role, "role_title": rel.role_title})
     parts = defaultdict(list)
     part_videos = {}
     for part in db.scalars(select(VideoPart).where(VideoPart.video_id.in_(ids)).order_by(VideoPart.position, VideoPart.id)):
@@ -103,6 +117,8 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
                        **(latest_stats.counts if latest_stats else {}),
                        "observed_at": latest_stats.observed_at if latest_stats else None}
     result["published_at"] = video.published_at
+    result["source_quality"] = (video.metadata_json or {}).get("source_quality")
+    result["ingest_state"] = (video.metadata_json or {}).get("ingest_state", {})
     properties = dict((video.metadata_json or {}).get("media_properties", {}))
     for variant in variants:
         properties[variant.id] = {**properties.get(variant.id, {}), **(variant.metadata_json or {})}
@@ -165,24 +181,41 @@ def collection_views(db, rows):
     ids = [collection.id for collection in rows]
     subscriptions = {subscription.collection_id: subscription for subscription in db.scalars(select(SourceSubscription)
                      .where(SourceSubscription.collection_id.in_(ids)))}
-    counts = dict(db.execute(select(CollectionItem.collection_id, func.count())
+    counts = {identifier: (count, cover) for identifier, count, cover in db.execute(select(CollectionItem.collection_id, func.count(), func.min(Video.cover_asset_id))
+                            .outerjoin(Video, Video.id == CollectionItem.video_id)
                             .where(CollectionItem.collection_id.in_(ids), CollectionItem.video_id.is_not(None))
-                            .group_by(CollectionItem.collection_id)).all())
-    return [_collection_view(collection, subscriptions.get(collection.id), counts.get(collection.id, 0)) for collection in rows]
+                            .group_by(CollectionItem.collection_id))}
+    return [_collection_view(collection, subscriptions.get(collection.id), *counts.get(collection.id, (0, None))) for collection in rows]
 
 
-def _collection_view(collection, subscription, count):
-    return {"id": collection.id, "title": collection.title, "kind": collection.kind,
+def _collection_view(collection, subscription, count, cover=None):
+    from app.source_labels import display_source_title
+    return {"id": collection.id, "title": display_source_title(collection), "kind": collection.kind,
             "source_id": collection.source_id, "enabled": subscription.enabled if subscription else collection.enabled,
             "subscribed": subscription is not None, "next_run_at": subscription.next_run_at if subscription else None,
             "monitor": collection.monitor_state or {}, "last_scan_at": collection.last_scan_at,
-            "saved_count": count}
+            "saved_count": count, "cover_url": asset_url(cover)}
 
 
 def job_view(job):
     return {name: getattr(job, name) for name in ("id", "kind", "target_id", "account_id", "status", "policy", "checkpoint",
                                                   "result", "error", "attempts", "max_attempts", "available_at",
                                                   "created_at", "started_at", "finished_at")}
+
+
+def job_views(db, rows):
+    if not rows:
+        return []
+    ids = [row.target_id for row in rows]
+    videos = {video.id: video.title for video in db.scalars(select(Video).where(Video.id.in_(ids)))}
+    variants = dict(db.execute(select(MediaVariant.id, Video.title).join(VideoPart, VideoPart.id == MediaVariant.part_id)
+                               .join(Video, Video.id == VideoPart.video_id).where(MediaVariant.id.in_(ids))).all())
+    from app.source_labels import display_source_title
+    collections = {row.id: display_source_title(row) for row in db.scalars(select(Collection).where(Collection.id.in_(ids)))}
+    profiles = dict(db.execute(select(StorageProfile.id, StorageProfile.name).where(StorageProfile.id.in_(ids))).all())
+    accounts = dict(db.execute(select(SourceAccount.id, SourceAccount.name).where(SourceAccount.id.in_(ids))).all())
+    names = {**videos, **variants, **collections, **profiles, **accounts}
+    return [{**job_view(row), "target_title": names.get(row.target_id, "归档任务")} for row in rows]
 
 
 def backup_view(backup):

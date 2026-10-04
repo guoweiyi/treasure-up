@@ -12,6 +12,7 @@ from sqlalchemy import or_, select, update
 
 from app.ingest.errors import IngestError
 from app.models import Collection, CollectionItem, SourceSubscription, Video, VideoCreator
+from app.source_labels import apply_source_title
 
 
 COUNTS = ("observed", "new_items", "new_videos", "newly_published", "newly_favorited",
@@ -68,7 +69,7 @@ def _fetch(ctx, collection, page):
         if isinstance(owner, dict) and owner.get("mid"):
             collection.owner_uid = _source_id(owner["mid"])
         if info.get("title"):
-            collection.monitor_state = {**(collection.monitor_state or {}), "source_title": str(info["title"])}
+            apply_source_title(collection, info["title"])
         items = data.get("medias")
         if items is None and not more and (total in (None, 0)):
             items = []
@@ -290,6 +291,7 @@ def scan_source(ctx, *, user_snapshot, enqueue_archive, now):
         if not isinstance(profile, dict) or str(profile.get("mid")) != collection.source_id:
             raise IngestError("UP 资料与订阅 UID 不一致", code="invalid_metadata")
         _, _, creator = user_snapshot(ctx, profile, creator=True)
+        apply_source_title(collection, profile.get("name"))
         scan["creator_id"], scan["profile_done"] = creator.id, True
         collection.owner_uid = collection.source_id
         ctx.save()

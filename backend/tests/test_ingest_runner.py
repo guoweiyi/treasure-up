@@ -52,6 +52,9 @@ def test_account_rotation_is_read_after_acquiring_account_lock(db, monkeypatch):
 
     @contextmanager
     def rotate_before_lock(_db, key):
+        if key == "collector-account:" + account.id:
+            yield
+            return
         assert key == "account:" + account.id
         # Simulate another session's completed rotation while this job waited;
         # leave the ORM identity map stale, as it is in a real concurrent job.
@@ -235,8 +238,7 @@ def test_danmaku_resume_raw_assets_and_subtitles(db, monkeypatch):
     monkeypatch.setattr(runner, "BiliClient", Source)
     policy = {"media": False, "comments": False, "profiles": False, "images": False, "request_budget": 1}
     job = setup(db, "archive_video", "BV1234567890", policy)
-    assert runner.run_job(db, job)["continuation"] is True
-    assert runner.run_job(db, job)["continuation"] is False
+    assert [runner.run_job(db, job)["continuation"] for _ in range(4)] == [True, True, True, False]
     assert calls == [1, 2]
     snapshot = db.scalar(select(DanmakuSnapshot))
     assert snapshot.completed_segments == 2 and snapshot.status == "visible_traversal_complete"
@@ -272,6 +274,7 @@ def test_danmaku_disk_merge_deduplicates_sorts_and_streams_result(db, monkeypatc
     monkeypatch.setattr(runner.json, "dumps", bounded_encode)
     job = setup(db, "archive_video", "BV1234567890", {"media": False, "comments": False,
         "subtitles": False, "profiles": False, "images": False})
+    assert runner.run_job(db, job)["continuation"]  # Give other video cards their first turn.
     assert not runner.run_job(db, job)["continuation"]
     snapshot = db.scalar(select(DanmakuSnapshot))
     result = json.loads(read_asset_bytes(db, snapshot.data_asset_id))
@@ -314,6 +317,7 @@ def test_danmaku_merge_stops_between_fragments_without_publishing_snapshot(db, m
         db.commit()
         return result
     monkeypatch.setattr(service, "materialize_asset", stop_after_first)
+    assert runner.run_job(db, job)["continuation"]
     with pytest.raises(IngestError) as error:
         runner.run_job(db, job)
     assert error.value.code == "job_stopped" and len(restored) == 1
@@ -412,12 +416,18 @@ def test_failed_playback_resumes_without_redownloading_archive(db, monkeypatch):
         return variant, False
     monkeypatch.setattr(runner, "archive_media", archive)
     monkeypatch.setattr(runner, "ensure_playback_variant", compatible)
-    with pytest.raises(IngestError, match="conversion_failed"):
-        runner.run_job(db, job)
-    assert job.checkpoint["media_parts"] == [part.id]
-    assert not job.checkpoint.get("playback_parts")
-    assert video.capture_status == "partial"
-    result = runner.run_job(db, job)
-    assert result["continuation"] is False and video.capture_status == "complete"
+    assert not runner.run_job(db, job)["continuation"]
+    assert not downloads and not conversions and video.capture_status == "metadata_ready"
+    download_job = db.get(Job, job.checkpoint["media_job_id"])
+    download_job.status = "running"; db.commit()
+    assert not runner.run_job(db, download_job)["continuation"]
+    assert download_job.checkpoint["media_parts"] == [part.id]
+    assert video.capture_status == "complete" and not conversions
+    playback_job = db.scalar(select(Job).where(Job.kind == "create_playback"))
+    playback_job.status = "running"; db.commit()
+    with pytest.raises(IngestError, match="转换暂时失败"):
+        runner.run_job(db, playback_job)
+    assert video.capture_status == "complete"  # Optional conversion cannot hide the original.
+    result = runner.run_job(db, playback_job)
+    assert result["variant_id"] and video.capture_status == "complete"
     assert len(downloads) == 1 and len(conversions) == 2
-    assert job.checkpoint["playback_parts"][part.id] == conversions[0]

@@ -13,7 +13,9 @@ from app.worker import execute
 def queue_for_kind(kind):
     if kind == "backup":
         return "backup"
-    if kind in {"archive_video", "migrate_storage", "probe_storage", "prepare_media", "sync_video",
+    if kind == "download_media":
+        return "download"
+    if kind in {"create_playback", "migrate_storage", "prepare_media", "sync_video",
                 "retire_storage_location", "restore_storage_location", "purge_storage_location"}:
         return "media"
     return "collector"

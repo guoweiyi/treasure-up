@@ -137,6 +137,13 @@ class VideoCreator(Entity, Base):
     role_title: Mapped[str] = mapped_column(String(100), default="UP主")
 
 
+class VideoStar(Entity, Base):
+    __tablename__ = "video_stars"
+    __table_args__ = (UniqueConstraint("user_id", "video_id"),)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+
+
 class VideoPart(Entity, Base):
     __tablename__ = "video_parts"
     __table_args__ = (UniqueConstraint("video_id", "cid"),)
@@ -402,7 +409,7 @@ class VideoStatSnapshot(Entity, Base):
 
 class PlaybackSession(Entity, Base):
     __tablename__ = "playback_sessions"
-    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id"), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_users.id"), index=True)
     variant_id: Mapped[str] = mapped_column(ForeignKey("media_variants.id"), index=True)
     protocol: Mapped[str] = mapped_column(String(20))
     profile_id: Mapped[str | None] = mapped_column(ForeignKey("storage_profiles.id"))

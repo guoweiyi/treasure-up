@@ -10,11 +10,15 @@ export const router = createRouter({
     { path: '/creators', component: () => import('./views/CreatorsView.vue') },
     { path: '/creators/:id', component: () => import('./views/CreatorView.vue') },
     { path: '/collections', component: () => import('./views/CollectionsView.vue') },
-    { path: '/account/security', component: () => import('./views/SecurityView.vue') },
+    {
+      path: '/account/security',
+      component: () => import('./views/SecurityView.vue'),
+      meta: { login: true },
+    },
     {
       path: '/admin/:section?',
       component: () => import('./views/AdminView.vue'),
-      meta: { admin: true },
+      meta: { admin: true, login: true },
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
@@ -24,11 +28,10 @@ router.beforeEach(async (to) => {
     try {
       await loadSession();
     } catch {
-      return to.path === '/login' ? true : { path: '/login', query: { next: to.fullPath } };
+      if (to.meta.login) return { path: '/login', query: { next: to.fullPath } };
     }
   }
-  if (!session.user && to.path !== '/login')
-    return { path: '/login', query: { next: to.fullPath } };
+  if (!session.user && to.meta.login) return { path: '/login', query: { next: to.fullPath } };
   if (session.user && to.path === '/login') return '/';
   if (to.meta.admin && !['admin', 'editor'].includes(session.user?.role || '')) return '/';
   if (

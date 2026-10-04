@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -146,18 +147,31 @@ class BiliClient:
         self.images_at = 0
         self.before_request = None
         self.before_video = None
+        self.request_context = lambda url: nullcontext()
+        self.last_asset_request = 0
         self.http = httpx.Client(timeout=httpx.Timeout(30, connect=10), follow_redirects=False, transport=transport, headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
 
     def close(self):
         self.http.close()
 
     def _request(self, url, *, params=None, limit=16 * 1024 * 1024, authenticated=False):
+        with self.request_context(url):
+            return self._request_in_context(url, params=params, limit=limit, authenticated=authenticated)
+
+    def _request_in_context(self, url, *, params=None, limit=16 * 1024 * 1024, authenticated=False):
         if self.before_request:
             self.before_request(url)
-        delay = self.interval - (time.monotonic() - self.last_request)
+        # Public CDN assets carry no Cookie and do not consume the account API
+        # interval. Keep their serial requests gently paced without per-image
+        # multi-second account jitter.
+        asset_request = (urlsplit(url).hostname or "").endswith(".hdslb.com")
+        delay = (0.1 if asset_request else self.interval) - (time.monotonic() - (self.last_asset_request if asset_request else self.last_request))
         if delay > 0:
             self.sleep(delay)
-        self.last_request = time.monotonic()
+        if asset_request:
+            self.last_asset_request = time.monotonic()
+        else:
+            self.last_request = time.monotonic()
         headers = {"Cookie": cookie_header(self.cookies, url)} if authenticated and self.cookies else {}
         try:
             with self.http.stream("GET", url, params=params, headers=headers) as response:

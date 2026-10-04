@@ -10,8 +10,12 @@ from .base import ObjectInfo, ObjectMissing, Storage, StorageError, file_digest,
 
 def _endpoint(value: str | None):
     if value is not None:
-        parsed = urlparse(value)
-        if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+        try:
+            parsed = urlparse(value)
+            port = parsed.port
+        except ValueError:
+            raise StorageError("Endpoint must be an HTTP(S) origin without credentials") from None
+        if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/") or (port is not None and not 1 <= port <= 65535):
             raise StorageError("Endpoint must be an HTTP(S) origin without credentials")
     return value
 
