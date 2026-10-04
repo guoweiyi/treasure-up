@@ -25,6 +25,39 @@ def sample_index():
                      {"sequence": 1, "asset_id": str(uuid4()), "duration": 1.0}]}
 
 
+def test_parallel_hls_cache_misses_share_authorization_and_count_bytes_once(monkeypatch):
+    import hashlib
+    import threading
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    from app.playback import hls
+
+    payload = json.dumps(sample_index()).encode()
+    asset = SimpleNamespace(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload))
+    barrier = threading.Barrier(2)
+    def read(*args, **kwargs):
+        barrier.wait(timeout=5)
+        return payload
+    monkeypatch.setattr(hls, '_INDEX_CACHE', OrderedDict())
+    monkeypatch.setattr(hls, '_CACHE_BYTES', 0)
+    monkeypatch.setattr(hls, 'read_asset_bytes', read)
+    db = SimpleNamespace(get=lambda *args: asset)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = list(pool.map(lambda _: hls.load_hls_package(db, 'index'), range(2)))
+    assert first[0] is second[0] and first[1] is second[1]
+    assert isinstance(first[1], frozenset) and len(first[1]) == 3
+    assert len(hls._INDEX_CACHE) == 1 and hls._CACHE_BYTES == len(payload)
+
+
+def test_media_tool_aborts_excess_diagnostics_even_on_successful_exit(monkeypatch):
+    import sys
+    from app.playback import tools
+    monkeypatch.setattr(tools, 'MAX_TOOL_OUTPUT', 65536)
+    with pytest.raises(PlaybackError, match='output limit'):
+        tools.run_tool([sys.executable, '-c', 'import sys; sys.stderr.write("x" * 131072)'], timeout=5)
+
+
 def test_manifest_keeps_asset_references_and_authorized_routes_only():
     index = sample_index()
     result = render_manifest(index, lambda asset: f"/api/playback/session/segments/{asset}")

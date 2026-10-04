@@ -1,7 +1,6 @@
-import hashlib
 import json
 import secrets
-from datetime import timedelta, timezone
+from datetime import timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,11 +17,11 @@ from app.config import settings
 from app.db import get_db
 from app.jobs import enqueue
 from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, Collection, CollectionItem, Comment, Creator,
-                        DanmakuSnapshot, Job, LoginAttempt, MediaVariant, OutboxEvent, PlatformUser, Setting,
+                        DanmakuSnapshot, Job, MediaVariant, OutboxEvent, PlatformUser, Setting,
                         SourceAccount, SourceSubscription, StorageProfile, SubtitleTrack, User, UserSession,
                         UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart, WatchProgress, utcnow)
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
-                          require_admin, require_editor, verify_password)
+                          require_admin, require_editor, reserve_password_attempt, verify_password)
 
 app = FastAPI(title="Treasure Up", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
@@ -96,21 +95,18 @@ def login(body: schemas.Login, request: Request, response: Response, db: Session
         pass
     if origin and origin.rstrip("/") not in accepted_origins:
         raise HTTPException(403, "登录来源不匹配")
-    ip = request.client.host if request.client else "unknown"
-    key = hashlib.sha256(ip.encode()).hexdigest()
-    since = utcnow() - timedelta(seconds=settings.login_window_seconds)
-    failures = db.scalar(select(func.count()).select_from(LoginAttempt).where(LoginAttempt.client_hash == key,
-                        LoginAttempt.created_at >= since, LoginAttempt.succeeded.is_(False)))
-    if failures >= settings.login_limit:
-        raise HTTPException(429, "登录尝试过于频繁，请稍后再试")
+    attempt = reserve_password_attempt(db, request)
     user = db.scalar(select(User).where(User.username == body.username))
-    valid = verify_password(body.password, user.password_hash if user else _DUMMY_HASH)
-    valid = valid and bool(user and not user.disabled)
-    db.add(LoginAttempt(client_hash=key, succeeded=valid))
-    db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < utcnow() - timedelta(days=1)))
-    db.commit()
-    if not valid:
+    checked_hash = user.password_hash if user else _DUMMY_HASH
+    valid = verify_password(body.password, checked_hash)
+    # Password changes and disabling a user revoke sessions under the same row
+    # lock. Re-read after scrypt; never issue a fresh session from stale state.
+    user = db.scalar(select(User).where(User.id == user.id).with_for_update()
+                     .execution_options(populate_existing=True)) if user and valid else None
+    if not user or user.disabled or user.password_hash != checked_hash:
+        db.rollback()
         raise HTTPException(401, "用户名或密码不正确")
+    attempt.succeeded = True
     session, token = create_session(db, user)
     audit(db, user, "login", "session", session.id)
     db.commit()
@@ -167,7 +163,7 @@ def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_
     ordering = {"newest": Video.created_at.desc(), "oldest": Video.created_at.asc(),
                 "title": func.coalesce(VideoAnnotation.title_override, Video.title).asc(), "duration": Video.duration.desc()}
     stmt = stmt.order_by(ordering.get(sort, ordering["newest"]), Video.id)
-    return catalog.page(db, stmt, page, page_size, lambda v: catalog.video_view(db, v))
+    return catalog.page(db, stmt, page, page_size, batch_mapper=catalog.video_views)
 
 
 @app.get(P + "/videos/{video_id}")
@@ -185,7 +181,7 @@ def creators(q: str = Query("", max_length=200), page: int = Query(1, ge=1), pag
         stmt = stmt.where(or_(Creator.alias.ilike(pattern, escape="\\"), PlatformUser.display_name.ilike(pattern, escape="\\"),
                              PlatformUser.signature.ilike(pattern, escape="\\"), Creator.description_override.ilike(pattern, escape="\\"),
                              PlatformUser.uid == q.strip(), PlatformUser.id.in_(history)))
-    return catalog.page(db, stmt.order_by(Creator.created_at.desc(), Creator.id), page, page_size, lambda c: catalog.creator_view(db, c))
+    return catalog.page(db, stmt.order_by(Creator.created_at.desc(), Creator.id), page, page_size, batch_mapper=catalog.creator_views)
 
 
 @app.get(P + "/creators/{creator_id}")
@@ -199,7 +195,7 @@ def creator(creator_id: str, _=Depends(authenticated), db: Session = Depends(get
 @app.get(P + "/collections")
 def collections(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100),
                 _=Depends(authenticated), db: Session = Depends(get_db)):
-    return catalog.page(db, select(Collection).order_by(Collection.created_at.desc()), page, page_size, lambda c: catalog.collection_view(db, c))
+    return catalog.page(db, select(Collection).order_by(Collection.created_at.desc(), Collection.id), page, page_size, batch_mapper=catalog.collection_views)
 
 
 @app.get(P + "/videos/{video_id}/comments")
@@ -213,7 +209,7 @@ def comments(video_id: str, root: str = "", q: str = Query("", max_length=200), 
         stmt = stmt.where(or_(Comment.root_rpid == "0", Comment.root_rpid == "", Comment.root_rpid == Comment.rpid))
     if q:
         stmt = stmt.where(Comment.content.ilike(like(q), escape="\\"))
-    return catalog.page(db, stmt.order_by(Comment.posted_at.desc(), Comment.id), page, page_size, lambda c: catalog.comment_view(db, c))
+    return catalog.page(db, stmt.order_by(Comment.posted_at.desc(), Comment.id), page, page_size, batch_mapper=catalog.comment_views)
 
 
 @app.api_route(P + "/assets/{asset_id}", methods=["GET", "HEAD"])
@@ -538,15 +534,37 @@ def storage(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100
 
 
 def write_storage(db, body, item=None):
+    from sqlalchemy.exc import DBAPIError
+    from app.storage.service import lock_storage_configuration, storage_placement
     validate_storage(body)
+    if not lock_storage_configuration(db, wait=False):
+        db.rollback()
+        raise HTTPException(409, "存储配置正在更新，请稍后重试")
+    previous_defaults = []
+    try:
+        if item is not None:
+            item = db.scalar(select(StorageProfile).where(StorageProfile.id == item.id).with_for_update(nowait=True)
+                             .execution_options(populate_existing=True))
+            if item is None:
+                raise HTTPException(404, "存储位置不存在")
+        if body.is_default:
+            # Clearing the old default also updates its row. Lock every row
+            # before mutation, without waiting while holding the writer lock.
+            previous_defaults = list(db.scalars(select(StorageProfile).where(StorageProfile.is_default.is_(True))
+                                     .order_by(StorageProfile.id).with_for_update(nowait=True)
+                                     .execution_options(populate_existing=True)))
+    except DBAPIError as exc:
+        if (getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)) != "55P03":
+            raise
+        db.rollback()
+        raise HTTPException(409, "存储位置正在登记资产，请稍后重试配置") from None
     if body.is_default and not body.enabled:
         raise HTTPException(422, "默认存储必须启用")
     if item and db.scalar(select(AssetLocation.id).where(AssetLocation.storage_profile_id == item.id).limit(1)):
-        placement = lambda c: {k: v for k, v in c.items() if k not in {"read_priority", "part_size"}}
-        if body.kind != item.kind or placement(body.config) != placement(item.config):
+        if storage_placement(body.kind, body.config) != storage_placement(item.kind, item.config):
             raise HTTPException(409, "此位置已有资产；请新建存储并执行迁移，不能修改定位配置")
     if body.is_default:
-        for existing in db.scalars(select(StorageProfile).where(StorageProfile.is_default.is_(True))):
+        for existing in previous_defaults:
             existing.is_default = False
     if item is None:
         item = StorageProfile()
@@ -679,7 +697,11 @@ def new_user(body: schemas.UserCreate, user=Depends(require_admin), db: Session 
 
 @app.patch(P + "/admin/users/{user_id}")
 def update_user(user_id: str, body: schemas.UserUpdate, user=Depends(require_admin), db: Session = Depends(get_db)):
-    item = required(db, User, user_id)
+    # No identity keys change here. NO KEY UPDATE permits audit's actor FK
+    # check when two administrators edit each other, while serializing logins.
+    item = db.scalar(select(User).where(User.id == user_id).with_for_update(key_share=True).execution_options(populate_existing=True))
+    if not item:
+        raise HTTPException(404, "记录不存在")
     if item.id == user.id and (body.disabled or body.role not in {None, "admin"}):
         raise HTTPException(409, "不能停用或降级当前管理员")
     values = body.model_dump(exclude_unset=True, exclude_none=True)

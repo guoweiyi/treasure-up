@@ -258,10 +258,7 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
         if part.duration and abs(duration - part.duration) > 2:
             raise IngestError("媒体时长与分P元数据不符", code="duration_mismatch")
         if policy.get("verify_decode", False):
-            try:
-                subprocess.run([str(settings.ffmpeg_path), "-v", "error", "-xerror", "-i", str(path), "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"], capture_output=True, timeout=int(policy.get("verify_timeout_seconds", 7200)), check=True)
-            except (OSError, subprocess.SubprocessError):
-                raise IngestError("媒体完整解码验证失败", code="decode_failed") from None
+            _verify_decode(path, int(policy.get("verify_timeout_seconds", 7200)), guard)
         mime = {".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm", ".flv": "video/x-flv"}[path.suffix.lower()]
         asset = ingest_file(db, path, kind="media", mime_type=mime, profile_id=policy.get("storage_profile_id"))
         variant = existing or MediaVariant(part_id=part.id, kind="archive", format_key=fingerprint)
@@ -384,7 +381,7 @@ def _run_ffmpeg(arguments, output, maximum, timeout, guard):
             guard()
             if time.monotonic() - started > timeout:
                 raise IngestError("播放副本转换超过时间预算", code="conversion_timeout")
-            if output.exists() and output.stat().st_size > maximum:
+            if output is not None and output.exists() and output.stat().st_size > maximum:
                 raise IngestError("播放副本超过媒体大小预算", code="media_budget", retryable=False)
             status = process.poll()
             if status is not None:
@@ -394,6 +391,19 @@ def _run_ffmpeg(arguments, output, maximum, timeout, guard):
             time.sleep(0.2)
     finally:
         _stop_process(process)
+
+
+def _verify_decode(path, timeout, guard):
+    # Validation can run for hours on long media; use the same lease/cancel
+    # polling as conversion and discard subprocess output instead of buffering.
+    command = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-xerror", "-i", str(path),
+               "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"]
+    try:
+        _run_ffmpeg(command, None, 0, timeout, guard)
+    except IngestError as error:
+        if error.code in {"conversion_failed", "conversion_timeout"}:
+            raise IngestError("媒体完整解码验证失败或超过时间预算", code="decode_failed") from None
+        raise
 
 
 def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):

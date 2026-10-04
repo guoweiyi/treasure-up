@@ -169,3 +169,23 @@ def test_content_mutex_survives_commits_and_serializes_threads(replicas):
     with content_lock(db, asset.sha256, timeout=0.05):
         pass
     engine.dispose()
+
+
+def test_disabled_during_verification_does_not_reactivate_retired_location(replicas, monkeypatch):
+    from sqlalchemy import update
+    from app.storage.local import LocalStorage
+    db, asset, _, target = replicas
+    location = db.scalar(select(AssetLocation).where(AssetLocation.storage_profile_id == target.id))
+    retire_location(db, location.id); db.commit()
+    original = LocalStorage.verify
+    def disable_after_readback(store, *args, **kwargs):
+        info = original(store, *args, **kwargs)
+        if str(store.root) == target.config['root']:
+            db.execute(update(StorageProfile).where(StorageProfile.id == target.id).values(enabled=False)
+                       .execution_options(synchronize_session=False))
+        return info
+    monkeypatch.setattr(LocalStorage, 'verify', disable_after_readback)
+    with pytest.raises(StorageError, match='placement changed'):
+        migrate_asset(db, asset.id, target.id)
+    db.refresh(location)
+    assert location.state == 'retired'

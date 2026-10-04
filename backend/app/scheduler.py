@@ -34,12 +34,15 @@ def schedule_backup(db):
 def main():
     if engine.dialect.name != "postgresql":
         raise RuntimeError("持续调度仅支持PostgreSQL；本地测试请显式单次执行任务")
-    with engine.connect() as leader:
+    # The session lock must survive cycle transactions without retaining an
+    # idle transaction. A lost connection also loses leadership: exit so the
+    # process supervisor restarts us and acquires a fresh lock before dispatch.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as leader:
         if not leader.scalar(text("SELECT pg_try_advisory_lock(87213001)")):
             raise RuntimeError("已有调度器运行")
         while True:
+            leader.execute(text("SELECT 1"))
             try:
-                leader.execute(text("SELECT 1"))
                 with SessionLocal() as db:
                     schedule_due(db)
                     schedule_backup(db)

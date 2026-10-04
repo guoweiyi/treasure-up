@@ -37,11 +37,13 @@ def file_digest(path: Path) -> tuple[str, int]:
         return stream_digest(stream)
 
 
-def stream_digest(stream: BinaryIO) -> tuple[str, int]:
+def stream_digest(stream: BinaryIO, *, max_bytes: int | None = None) -> tuple[str, int]:
     digest, count = hashlib.sha256(), 0
-    while block := stream.read(1024 * 1024):
-        digest.update(block)
+    while block := stream.read(min(1024 * 1024, max_bytes - count + 1) if max_bytes is not None else 1024 * 1024):
         count += len(block)
+        if max_bytes is not None and count > max_bytes:
+            raise IntegrityError("Object exceeds registered size")
+        digest.update(block)
     return digest.hexdigest(), count
 
 
@@ -78,14 +80,18 @@ class Storage:
         if info.size != size:
             raise IntegrityError("Stored object size does not match")
         with self.reader(key, version_id=version_id) as stream:
-            actual = stream_digest(stream)
+            actual = stream_digest(stream, max_bytes=size)
         if actual != (sha256, size):
             raise IntegrityError("Stored object SHA256 does not match")
         return info
 
-    def download_to(self, key: str, destination: Path, *, version_id: str | None = None):
+    def download_to(self, key: str, destination: Path, *, version_id: str | None = None, max_bytes: int | None = None):
         with self.reader(key, version_id=version_id) as source, Path(destination).open("wb") as target:
-            while block := source.read(1024 * 1024):
+            count = 0
+            while block := source.read(min(1024 * 1024, max_bytes - count + 1) if max_bytes is not None else 1024 * 1024):
+                count += len(block)
+                if max_bytes is not None and count > max_bytes:
+                    raise IntegrityError("Object exceeds registered size")
                 target.write(block)
 
     def read_range(self, key: str, start: int, end: int, *, version_id: str | None = None) -> bytes:

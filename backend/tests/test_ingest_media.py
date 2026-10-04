@@ -135,6 +135,30 @@ def test_ffmpeg_is_terminated_on_guard_timeout_or_size_limit(tmp_path, monkeypat
     assert process.stopped
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_full_decode_verification_releases_process_on_cancel_or_lease_loss(tmp_path, monkeypatch, cancelled):
+    from app.jobs import LeaseLost
+    process = RunningProcess()
+    commands = []
+    def start(arguments, **options):
+        commands.append(arguments)
+        assert options["stdin"] is subprocess.DEVNULL
+        assert options["stderr"] is subprocess.DEVNULL
+        return process
+    monkeypatch.setattr(media.subprocess, "Popen", start)
+    calls = [0]
+    def guard():
+        calls[0] += 1
+        if calls[0] > 1:
+            if cancelled:
+                raise IngestError("任务已停止", code="job_stopped", retryable=False)
+            raise LeaseLost("expired")
+    with pytest.raises(IngestError if cancelled else LeaseLost):
+        media._verify_decode(tmp_path / "long-video.mp4", 7200, guard)
+    assert process.stopped
+    assert "-xerror" in commands[0] and commands[0][-3:] == ["-f", "null", "-"]
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="real media tools unavailable")
 def test_real_ffmpeg_converts_synthetic_hevc_to_h264_aac(original, tmp_path):
     db, part, archive = original

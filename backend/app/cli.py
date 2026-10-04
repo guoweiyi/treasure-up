@@ -27,6 +27,8 @@ def initialize():
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
     with SessionLocal() as db:
+        from app.storage.service import lock_storage_configuration
+        lock_storage_configuration(db)
         if not db.scalar(select(User).where(User.username == settings.admin_username)):
             db.add(User(username=settings.admin_username, password_hash=password_hash, role="admin"))
         if not db.scalar(select(StorageProfile.id).limit(1)):
@@ -80,7 +82,9 @@ def main():
         from sqlalchemy import delete
         from app.models import UserSession
         with SessionLocal() as db:
-            user = db.scalar(select(User).where(User.username == args.username))
+            # Serialize password/session changes while permitting a concurrent
+            # passkey revocation's audit FK check on this user.
+            user = db.scalar(select(User).where(User.username == args.username).with_for_update(key_share=True))
             if not user:
                 raise RuntimeError("账号不存在")
             user.password_hash = hash_password(value)

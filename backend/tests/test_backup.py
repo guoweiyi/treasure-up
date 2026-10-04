@@ -133,3 +133,46 @@ def test_pg_environment_retains_url_password_without_cli_argument():
     environment = _postgres_environment(make_url("postgresql+psycopg://test:example-only@localhost/catalog"))
     assert environment["PGPASSWORD"] == "example-only"
     assert environment["PGDATABASE"] == "catalog"
+
+
+def test_decrypt_size_limit_is_enforced_before_writing_excess_plaintext(tmp_path, monkeypatch):
+    monkeypatch.setattr('app.backup.CHUNK', 64)
+    source, encrypted = tmp_path / 'plain', tmp_path / 'encrypted'
+    source.write_bytes(b'payload' * 100)
+    master = os.urandom(32)
+    encrypt_file(source, encrypted, master, 'size-limit')
+    output = io.BytesIO()
+    with pytest.raises(BackupError, match='size limit'):
+        decrypt_to(encrypted, output, master, 'size-limit', max_bytes=100)
+    assert output.tell() == 64
+    with pytest.raises(BackupError, match='size limit'):
+        decrypt_to(encrypted, None, master, 'size-limit', max_bytes=100)
+
+
+@pytest.mark.parametrize('unlock_failure', [False, True])
+def test_gc_guard_invalidates_connection_when_session_unlock_is_not_confirmed(unlock_failure):
+    from types import SimpleNamespace
+    from app.backup import asset_gc_guard
+
+    class Connection:
+        invalidated = False
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execution_options(self, **kwargs):
+            assert kwargs == {'isolation_level': 'AUTOCOMMIT'}
+            return self
+        def execute(self, *args): pass
+        def scalar(self, *args):
+            if unlock_failure:
+                raise RuntimeError('synthetic broken connection')
+            return False
+        def invalidate(self): self.invalidated = True
+
+    connection = Connection()
+    db = SimpleNamespace(get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name='postgresql'), connect=lambda: connection))
+    if unlock_failure:
+        with pytest.raises(RuntimeError):
+            with asset_gc_guard(db): pass
+    else:
+        with asset_gc_guard(db): pass
+    assert connection.invalidated

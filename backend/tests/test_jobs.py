@@ -204,6 +204,50 @@ def test_successful_budget_continuations_preserve_failure_retry_budget(job_sessi
         assert db.get(Job, job_id).attempts == 1
 
 
+def test_component_failure_is_not_erased_by_comment_budget_continuation(job_sessions, monkeypatch):
+    from app.ingest import runner
+    from app.ingest.errors import IngestError
+    from app.models import Comment, SourceAccount, Video, VideoPart
+    from test_ingest_runner import FakeClient, comment
+
+    comments, downloads = [], []
+    class Source(FakeClient):
+        def comment_page(self, aid, offset):
+            comments.append(offset)
+            return {"cursor": {"is_end": False, "pagination_reply": {"next_offset": f"cursor-{len(comments)}"}},
+                    "replies": [comment(str(len(comments)), member=False)]}
+    monkeypatch.setattr(runner, "BiliClient", Source)
+    monkeypatch.setattr(runner, "decrypt_secret", lambda _: "mock-cookie")
+    def fail_download(*args, **kwargs):
+        downloads.append(True)
+        raise IngestError("模拟持续下载失败", code="download_failed")
+    monkeypatch.setattr(runner, "archive_media", fail_download)
+    with job_sessions() as db:
+        account = SourceAccount(name="mock", secret_encrypted="mock")
+        video = Video(bvid="BV1234567890", aid="123")
+        db.add_all([account, video]); db.flush()
+        part = VideoPart(video_id=video.id, cid="1", duration=10)
+        db.add(part); db.flush()
+        job = jobs.enqueue(db, "archive_video", video.id, account.id, policy={"request_budget": 1,
+            "fetch_danmaku": False, "fetch_subtitles": False, "create_compatible_copy": False, "images": False})
+        job.max_attempts = 2
+        job.checkpoint = {"metadata_done": True, "part_ids": [part.id]}
+        db.commit()
+        job_id = job.id
+    for number, expected in [(1, "queued"), (2, "partial")]:
+        assert jobs.run_job_id(job_id)["status"] == expected
+        with job_sessions() as db:
+            job = db.get(Job, job_id)
+            assert job.attempts == number
+            assert job.checkpoint["comments"]["offset"] == f"cursor-{number}"
+            assert job.result["components"] == ["download_failed"]
+            job.available_at = utcnow() - timedelta(seconds=1)
+            db.commit()
+    assert comments == ["", "cursor-1"] and len(downloads) == 2
+    with job_sessions() as db:
+        assert db.scalar(select(func.count()).select_from(Comment)) == 2
+
+
 def test_account_cooldown_deferrals_honor_deadline_without_using_failure_budget(job_sessions, monkeypatch):
     from app.ingest.errors import IngestDeferred, IngestError
     job_id = new_job(job_sessions, max_attempts=2)

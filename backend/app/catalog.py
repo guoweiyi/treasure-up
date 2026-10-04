@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -14,10 +16,11 @@ def effective(override, original):
     return original if override is None else override
 
 
-def page(db, statement, page=1, page_size=24, mapper=None):
+def page(db, statement, page=1, page_size=24, mapper=None, batch_mapper=None):
     total = db.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
     items = db.scalars(statement.offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [mapper(v) for v in items] if mapper else items, "total": total, "page": page, "page_size": page_size}
+    mapped = batch_mapper(db, items) if batch_mapper else [mapper(v) for v in items] if mapper else items
+    return {"items": mapped, "total": total, "page": page, "page_size": page_size}
 
 
 def stats(db: Session):
@@ -31,8 +34,21 @@ def stats(db: Session):
 
 
 def creator_view(db: Session, creator: Creator):
-    person = db.get(PlatformUser, creator.user_id)
-    count = db.scalar(select(func.count(func.distinct(VideoCreator.video_id))).where(VideoCreator.creator_id == creator.id))
+    return creator_views(db, [creator])[0]
+
+
+def creator_views(db: Session, rows):
+    if not rows:
+        return []
+    people = {person.id: person for person in db.scalars(select(PlatformUser)
+              .where(PlatformUser.id.in_({creator.user_id for creator in rows})))}
+    counts = dict(db.execute(select(VideoCreator.creator_id, func.count(func.distinct(VideoCreator.video_id)))
+                            .where(VideoCreator.creator_id.in_([creator.id for creator in rows]))
+                            .group_by(VideoCreator.creator_id)).all())
+    return [_creator_view(creator, people[creator.user_id], counts.get(creator.id, 0)) for creator in rows]
+
+
+def _creator_view(creator, person, count):
     return {"id": creator.id, "uid": person.uid, "name": effective(creator.alias, person.display_name),
             "source_name": person.display_name, "avatar_url": asset_url(person.avatar_asset_id),
             "description": effective(creator.description_override, person.signature), "saved_count": count,
@@ -41,23 +57,48 @@ def creator_view(db: Session, creator: Creator):
 
 
 def video_view(db: Session, video: Video, detail=False):
-    note = db.scalar(select(VideoAnnotation).where(VideoAnnotation.video_id == video.id))
-    people = []
-    for rel in db.scalars(select(VideoCreator).where(VideoCreator.video_id == video.id).order_by(VideoCreator.role)):
-        creator = db.get(Creator, rel.creator_id)
-        person = db.get(PlatformUser, creator.user_id)
-        people.append({"id": creator.id, "name": effective(creator.alias, person.display_name),
-                       "avatar_url": asset_url(person.avatar_asset_id), "role": rel.role})
-    parts = db.scalars(select(VideoPart).where(VideoPart.video_id == video.id).order_by(VideoPart.position, VideoPart.id)).all()
-    variants = db.scalars(select(MediaVariant).where(MediaVariant.part_id.in_([p.id for p in parts]))).all() if parts else []
+    return video_views(db, [video], detail=detail)[0]
+
+
+def video_views(db: Session, rows, *, detail=False):
+    if not rows:
+        return []
+    ids = [video.id for video in rows]
+    notes = {note.video_id: note for note in db.scalars(select(VideoAnnotation).where(VideoAnnotation.video_id.in_(ids)))}
+    people = defaultdict(list)
+    for rel, creator, person in db.execute(select(VideoCreator, Creator, PlatformUser)
+            .join(Creator, Creator.id == VideoCreator.creator_id).join(PlatformUser, PlatformUser.id == Creator.user_id)
+            .where(VideoCreator.video_id.in_(ids)).order_by(VideoCreator.role)):
+        people[rel.video_id].append({"id": creator.id, "name": effective(creator.alias, person.display_name),
+                                    "avatar_url": asset_url(person.avatar_asset_id), "role": rel.role})
+    parts = defaultdict(list)
+    part_videos = {}
+    for part in db.scalars(select(VideoPart).where(VideoPart.video_id.in_(ids)).order_by(VideoPart.position, VideoPart.id)):
+        parts[part.video_id].append(part)
+        part_videos[part.id] = part.video_id
+    variants = defaultdict(list)
+    if part_videos:
+        # Bind only page video IDs, not every part ID in potentially large multi-P archives.
+        for variant in db.scalars(select(MediaVariant).join(VideoPart, VideoPart.id == MediaVariant.part_id)
+                                  .where(VideoPart.video_id.in_(ids))):
+            if variant.part_id in part_videos:
+                variants[part_videos[variant.part_id]].append(variant)
+    ranked_stats = (select(VideoStatSnapshot.id, func.row_number().over(partition_by=VideoStatSnapshot.video_id,
+                           order_by=(VideoStatSnapshot.observed_at.desc(), VideoStatSnapshot.id.desc())).label("rank"))
+                    .where(VideoStatSnapshot.video_id.in_(ids)).subquery())
+    latest = {snapshot.video_id: snapshot for snapshot in db.scalars(select(VideoStatSnapshot)
+              .join(ranked_stats, ranked_stats.c.id == VideoStatSnapshot.id).where(ranked_stats.c.rank == 1))}
+    return [_video_view(db, video, notes.get(video.id), people[video.id], parts[video.id], variants[video.id],
+                        latest.get(video.id), detail=detail) for video in rows]
+
+
+def _video_view(db, video, note, people, parts, variants, latest_stats, *, detail=False):
     result = {"id": video.id, "bvid": video.bvid, "title": effective(note.title_override if note else None, video.title),
               "source_title": video.title, "description": effective(note.description_override if note else None, video.description),
               "duration": video.duration, "cover_url": asset_url(video.cover_asset_id), "creators": people,
               "tags": note.tags if note else [], "starred": note.starred if note else False,
               "parts_count": len(parts), "playable": bool(variants), "capture_status": video.capture_status,
               "created_at": video.created_at}
-    latest_stats = db.scalar(select(VideoStatSnapshot).where(VideoStatSnapshot.video_id == video.id)
-                             .order_by(VideoStatSnapshot.observed_at.desc(), VideoStatSnapshot.id.desc()).limit(1))
     result["stats"] = {**{key: None for key in ("view", "like", "coin", "favorite", "share", "reply", "danmaku")},
                        **(latest_stats.counts if latest_stats else {}),
                        "observed_at": latest_stats.observed_at if latest_stats else None}
@@ -84,9 +125,26 @@ def video_view(db: Session, video: Video, detail=False):
 
 
 def comment_view(db, comment: Comment):
-    user = db.get(PlatformUser, comment.author_user_id) if comment.author_user_id else None
-    snapshot = db.get(UserSnapshot, comment.author_snapshot_id) if comment.author_snapshot_id else None
-    creator = db.scalar(select(Creator).where(Creator.user_id == user.id)) if user else None
+    return comment_views(db, [comment])[0]
+
+
+def comment_views(db, rows):
+    if not rows:
+        return []
+    users = {user.id: user for user in db.scalars(select(PlatformUser)
+             .where(PlatformUser.id.in_({comment.author_user_id for comment in rows if comment.author_user_id})))}
+    snapshots = {snapshot.id: snapshot for snapshot in db.scalars(select(UserSnapshot)
+                 .where(UserSnapshot.id.in_({comment.author_snapshot_id for comment in rows if comment.author_snapshot_id})))}
+    creators = {creator.user_id: creator for creator in db.scalars(select(Creator).where(Creator.user_id.in_(list(users))))}
+    images = defaultdict(list)
+    for image in db.scalars(select(CommentAsset).where(CommentAsset.comment_id.in_([comment.id for comment in rows]))
+                           .order_by(CommentAsset.position)):
+        images[image.comment_id].append(asset_url(image.asset_id))
+    return [_comment_view(comment, users.get(comment.author_user_id), snapshots.get(comment.author_snapshot_id),
+                          creators.get(comment.author_user_id), images[comment.id]) for comment in rows]
+
+
+def _comment_view(comment, user, snapshot, creator, images):
     avatar = snapshot.avatar_asset_id if snapshot else user.avatar_asset_id if user else None
     return {"id": comment.id, "rpid": comment.rpid, "root_rpid": comment.root_rpid, "parent_rpid": comment.parent_rpid,
             "content": comment.content, "posted_at": comment.posted_at, "like_count": comment.like_count,
@@ -94,18 +152,31 @@ def comment_view(db, comment: Comment):
             "author": {"uid": user.uid if user else None,
                        "name": snapshot.display_name if snapshot else user.display_name if user else "未知作者",
                        "avatar_url": asset_url(avatar), "creator_id": creator.id if creator else None},
-            "images": [asset_url(a.asset_id) for a in db.scalars(select(CommentAsset).where(CommentAsset.comment_id == comment.id)
-                                                              .order_by(CommentAsset.position))]}
+            "images": images}
 
 
 def collection_view(db, collection):
-    subscription = db.scalar(select(SourceSubscription).where(SourceSubscription.collection_id == collection.id))
+    return collection_views(db, [collection])[0]
+
+
+def collection_views(db, rows):
+    if not rows:
+        return []
+    ids = [collection.id for collection in rows]
+    subscriptions = {subscription.collection_id: subscription for subscription in db.scalars(select(SourceSubscription)
+                     .where(SourceSubscription.collection_id.in_(ids)))}
+    counts = dict(db.execute(select(CollectionItem.collection_id, func.count())
+                            .where(CollectionItem.collection_id.in_(ids), CollectionItem.video_id.is_not(None))
+                            .group_by(CollectionItem.collection_id)).all())
+    return [_collection_view(collection, subscriptions.get(collection.id), counts.get(collection.id, 0)) for collection in rows]
+
+
+def _collection_view(collection, subscription, count):
     return {"id": collection.id, "title": collection.title, "kind": collection.kind,
             "source_id": collection.source_id, "enabled": subscription.enabled if subscription else collection.enabled,
             "subscribed": subscription is not None, "next_run_at": subscription.next_run_at if subscription else None,
             "monitor": collection.monitor_state or {}, "last_scan_at": collection.last_scan_at,
-            "saved_count": db.scalar(select(func.count()).select_from(CollectionItem)
-                                     .where(CollectionItem.collection_id == collection.id, CollectionItem.video_id.is_not(None)))}
+            "saved_count": count}
 
 
 def job_view(job):

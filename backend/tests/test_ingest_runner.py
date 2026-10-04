@@ -252,6 +252,77 @@ def test_bad_subtitle_time_is_not_success():
         runner.subtitle_vtt({"body": [{"from": 2, "to": 1, "content": "bad"}]})
 
 
+def test_danmaku_disk_merge_deduplicates_sorts_and_streams_result(db, monkeypatch):
+    from test_ingest_client import blob, integer
+    def item(identity, time, text):
+        return blob(1, integer(1, identity) + integer(2, time) + blob(7, text.encode()))
+    class Source(FakeClient):
+        def view(self, bvid):
+            return {"bvid": bvid, "aid": "123", "pages": [{"cid": 11, "duration": 361}]}
+        def segment(self, aid, cid, index):
+            return (item(1, 2000, "old") + item(2, 1000, "second") if index == 1 else
+                    item(1, 0, "updated") + item(3, 1000, "third"))
+    monkeypatch.setattr(runner, "BiliClient", Source)
+    dumps = json.dumps
+    def bounded_encode(value, *args, **kwargs):
+        # Segment JSON has two rows; the merged three-row output must be
+        # streamed, never rebuilt and encoded as one in-memory list.
+        assert not (isinstance(value, list) and len(value) > 2 and all(isinstance(x, dict) and "text" in x for x in value))
+        return dumps(value, *args, **kwargs)
+    monkeypatch.setattr(runner.json, "dumps", bounded_encode)
+    job = setup(db, "archive_video", "BV1234567890", {"media": False, "comments": False,
+        "subtitles": False, "profiles": False, "images": False})
+    assert not runner.run_job(db, job)["continuation"]
+    snapshot = db.scalar(select(DanmakuSnapshot))
+    result = json.loads(read_asset_bytes(db, snapshot.data_asset_id))
+    assert [(row["id"], row["time"], row["text"]) for row in result] == [
+        ("1", 0, "updated"), ("2", 1, "second"), ("3", 1, "third")]
+    assert read_asset_bytes(db, snapshot.data_asset_id) == dumps(result, ensure_ascii=False).encode()
+    assert snapshot.count == 3 and snapshot.completed_segments == 2
+    assert not list(settings.scratch_dir.glob("treasure-danmaku-*"))
+
+
+def test_danmaku_merge_stops_between_fragments_without_publishing_snapshot(db, monkeypatch):
+    from app.storage import service
+    class Source(FakeClient):
+        def view(self, bvid):
+            return {"bvid": bvid, "aid": "123", "pages": [{"cid": 11, "duration": 361}]}
+        def segment(self, aid, cid, index):
+            return b"\x0a\x08\x08" + bytes([index]) + b"\x10\xe8\x07\x3a\x01a"
+    monkeypatch.setattr(runner, "BiliClient", Source)
+    # An earlier completed snapshot must remain readable if this refresh stops.
+    video = Video(bvid="BV1234567890", aid="123")
+    db.add(video); db.flush()
+    part = VideoPart(video_id=video.id, cid="11", duration=361)
+    previous_run = CaptureRun(video_id=video.id, status="complete", scope={})
+    db.add_all([part, previous_run]); db.flush()
+    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
+    saved = settings.scratch_dir / "previous-danmaku.json"
+    saved.write_bytes(b"[]")
+    previous_asset = runner.ingest_file(db, saved, kind="danmaku", mime_type="application/json")
+    previous = DanmakuSnapshot(part_id=part.id, run_id=previous_run.id, status="complete",
+                              data_asset_id=previous_asset.id, raw_asset_ids=[], count=0)
+    db.add(previous); db.commit()
+    job = setup(db, "archive_video", "BV1234567890", {"media": False, "comments": False,
+        "subtitles": False, "profiles": False, "images": False})
+    original = service.materialize_asset
+    restored = []
+    def stop_after_first(session, asset_id, path):
+        result = original(session, asset_id, path)
+        restored.append(asset_id)
+        job.status = "cancelled"
+        db.commit()
+        return result
+    monkeypatch.setattr(service, "materialize_asset", stop_after_first)
+    with pytest.raises(IngestError) as error:
+        runner.run_job(db, job)
+    assert error.value.code == "job_stopped" and len(restored) == 1
+    snapshot = db.scalar(select(DanmakuSnapshot).where(DanmakuSnapshot.run_id != previous_run.id))
+    assert snapshot.data_asset_id is None and snapshot.completed_segments == 2
+    assert previous.status == "complete" and read_asset_bytes(db, previous.data_asset_id) == b"[]"
+    assert not list(settings.scratch_dir.glob("treasure-danmaku-*"))
+
+
 def test_media_is_reused_before_second_download(db, monkeypatch):
     import yt_dlp
     from pathlib import Path

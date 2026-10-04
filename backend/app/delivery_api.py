@@ -32,11 +32,11 @@ def audit(db, user, action, kind, identifier, details=None):
 
 
 def session_assets(db, session):
-    from app.playback import load_hls_index, package_asset_ids
+    from app.playback import load_hls_package
     variant = required(db, MediaVariant, session.variant_id)
     if session.protocol == "hls":
-        index = load_hls_index(db, variant.asset_id)
-        return variant, package_asset_ids(index), index
+        index, allowed = load_hls_package(db, variant.asset_id)
+        return variant, allowed, index
     return variant, [variant.asset_id], None
 
 
@@ -98,7 +98,7 @@ def create_playback(body: schemas.PlaybackInput, identity=Depends(authenticated)
         raise HTTPException(503, "没有完整可用的存储节点，请检查媒体副本") from None
     row = db.get(Setting, "playback")
     config = schemas.PlaybackSettings.model_validate(row.value if row else {})
-    probe_asset_id = asset_ids[1] if len(asset_ids) > 1 else asset_ids[0]
+    probe_asset_id = index["segments"][0]["asset_id"] if index else selected.asset_id
     routes = [dict(route) for route in routes]
     probe_ids = []
     db.add(session)

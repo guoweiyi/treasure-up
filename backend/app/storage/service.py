@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import uuid
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError as DatabaseIntegrityError
 
 from app.config import settings
@@ -21,6 +23,24 @@ from .locking import content_lock
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def storage_placement(kind, config):
+    """Snapshot physical placement; tuning and credential rotation do not move bytes."""
+    return {"kind": kind, "config": deepcopy({key: value for key, value in (config or {}).items()
+            if key not in {"read_priority", "part_size"}})}
+
+
+_CONFIGURATION_LOCK = int.from_bytes(hashlib.sha256(b"treasure-storage-configuration-v1").digest()[:8], "big", signed=True)
+
+
+def lock_storage_configuration(db, *, wait=True):
+    """Serialize configuration writers until commit; SQLite is test-only."""
+    if db.get_bind().dialect.name == "postgresql":
+        if not wait:
+            return bool(db.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _CONFIGURATION_LOCK}))
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CONFIGURATION_LOCK})
+    return True
 
 
 def get_adapter(profile: StorageProfile):
@@ -46,7 +66,16 @@ def default_profile(db, profile_id=None):
         if not profile or not profile.enabled:
             raise StorageError("Storage profile is unavailable")
         return profile
-    profile = db.scalars(select(StorageProfile).where(StorageProfile.enabled.is_(True)).order_by(StorageProfile.is_default.desc(), StorageProfile.created_at)).first()
+    profile = db.scalars(select(StorageProfile).where(StorageProfile.enabled.is_(True))
+                         .order_by(StorageProfile.is_default.desc(), StorageProfile.created_at, StorageProfile.id)).first()
+    if profile:
+        return profile
+    # Existing defaults and fallbacks do not lock configuration during uploads.
+    # Empty installations recheck after acquiring the writer lock.
+    lock_storage_configuration(db)
+    profile = db.scalars(select(StorageProfile).where(StorageProfile.enabled.is_(True))
+                         .order_by(StorageProfile.is_default.desc(), StorageProfile.created_at, StorageProfile.id)
+                         .execution_options(populate_existing=True)).first()
     if profile:
         return profile
     if db.scalars(select(StorageProfile)).first():
@@ -57,7 +86,14 @@ def default_profile(db, profile_id=None):
     return profile
 
 
-def _register_location(db, asset, profile, key, info):
+def _register_location(db, asset, profile, key, info, *, expected_placement):
+    # The adapter may have uploaded before an administrator changed an empty
+    # profile. A shared row lock permits unrelated assets to register together,
+    # while excluding configuration writers until the caller's commit.
+    current = db.scalar(select(StorageProfile).where(StorageProfile.id == profile.id)
+                        .with_for_update(read=True).execution_options(populate_existing=True))
+    if current is None or not current.enabled or storage_placement(current.kind, current.config) != expected_placement:
+        raise StorageError("Storage placement changed during upload; retry using the current configuration")
     # Keep publication serialized until the caller commits, even after the
     # content lock exits. Purge/retire take this same row lock before reading state.
     db.scalar(select(Asset).where(Asset.id == asset.id).with_for_update())
@@ -89,6 +125,7 @@ def ingest_file(db, path: Path, *, kind: str, mime_type: str, profile_id=None) -
 
 def _ingest_file_locked(db, path, sha, size, *, kind, mime_type, profile_id):
     profile = default_profile(db, profile_id)
+    expected_placement = storage_placement(profile.kind, profile.config)
     adapter = get_adapter(profile)
     key = content_key(sha)
     try:
@@ -108,7 +145,7 @@ def _ingest_file_locked(db, path, sha, size, *, kind, mime_type, profile_id):
             asset = db.scalars(select(Asset).where(Asset.sha256 == sha)).one()
     if asset.size != size:
         raise IntegrityError("Asset digest/size conflict")
-    _register_location(db, asset, profile, key, info)
+    _register_location(db, asset, profile, key, info, expected_placement=expected_placement)
     return asset
 
 
@@ -164,7 +201,7 @@ def copy_asset_to(db, asset_id, destination: Path):
         raise ObjectMissing("Asset does not exist")
     for location, profile in asset_locations(db, asset_id):
         try:
-            get_adapter(profile).download_to(location.object_key, destination, version_id=location.version_id)
+            get_adapter(profile).download_to(location.object_key, destination, version_id=location.version_id, max_bytes=asset.size)
             if file_digest(destination) == (asset.sha256, asset.size):
                 return
         except Exception:
@@ -204,6 +241,7 @@ def migrate_asset(db, asset_id, target_profile_id, *, checkpoint=None, on_checkp
 
 def _migrate_asset_locked(db, asset, target_profile_id, *, checkpoint, on_checkpoint):
     target = default_profile(db, target_profile_id)
+    expected_placement = storage_placement(target.kind, target.config)
     adapter, key = get_adapter(target), content_key(asset.sha256)
     try:
         info = adapter.verify(key, asset.sha256, asset.size)
@@ -214,7 +252,7 @@ def _migrate_asset_locked(db, asset, target_profile_id, *, checkpoint, on_checkp
             copy_asset_to(db, asset.id, source)
             info = adapter.put_file(source, key, asset.mime_type, checkpoint=checkpoint, on_checkpoint=on_checkpoint)
             info = adapter.verify(key, asset.sha256, asset.size, version_id=info.version_id)
-    return _register_location(db, asset, target, key, info)
+    return _register_location(db, asset, target, key, info, expected_placement=expected_placement)
 
 
 def probe_profile(db, profile_id):

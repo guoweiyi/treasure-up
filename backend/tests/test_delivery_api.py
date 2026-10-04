@@ -141,3 +141,19 @@ def test_replica_actions_are_worker_jobs_and_purge_requires_retirement(context):
     prepare = db.scalar(select(Job).where(Job.kind=='prepare_media'))
     assert prepare.policy['package'] is True
     assert prepare.target_id == original.id
+
+
+def test_hls_segment_requests_reuse_validated_authorization_index(context, monkeypatch):
+    from app.playback import hls
+    client, db, tmp = context
+    _, part, _, asset = seed_media(db, tmp, hls=True)
+    login(client)
+    data = client.post('/api/v1/playback-sessions', json={'part_id': part.id}).json()
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError('A cached HLS segment must not rescan the whole playlist')
+    monkeypatch.setattr(hls, 'validate_index', unexpected_scan)
+    monkeypatch.setattr(hls, 'read_asset_bytes', unexpected_scan)
+    url = f'/api/v1/playback-sessions/{data["id"]}/assets/{asset.id}'
+    for _ in range(3):
+        response = client.get(url, headers={'Range': 'bytes=7-9'})
+        assert response.status_code == 206 and response.content == bytes([7, 8, 9])

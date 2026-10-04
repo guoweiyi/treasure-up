@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -14,6 +15,9 @@ class PlaybackError(StorageError):
     pass
 
 
+MAX_TOOL_OUTPUT = 8 * 1024**2
+
+
 def run_tool(arguments, *, check_active=None, timeout=7200, capture=False):
     """Poll cancellation while tools run; never expose raw tool diagnostics publicly."""
     guard = check_active or (lambda: None)
@@ -25,18 +29,23 @@ def run_tool(arguments, *, check_active=None, timeout=7200, capture=False):
         except OSError:
             raise PlaybackError("Media processing tool is unavailable") from None
         started = time.monotonic()
+        def check_output_limit():
+            if any(os.fstat(stream.fileno()).st_size > MAX_TOOL_OUTPUT for stream in (output, errors)):
+                raise PlaybackError("Media processing diagnostic output limit exceeded")
         try:
             while process.poll() is None:
                 guard()
+                check_output_limit()
                 if time.monotonic() - started > timeout:
                     raise PlaybackError("Media processing time limit exceeded")
                 time.sleep(0.2)
             guard()
+            check_output_limit()
             if process.returncode:
                 raise PlaybackError("Media processing failed; original asset remains unchanged")
             output.seek(0)
             errors.seek(0)
-            return output.read(8 * 1024**2), errors.read(8 * 1024**2)
+            return output.read(MAX_TOOL_OUTPUT), errors.read(MAX_TOOL_OUTPUT)
         finally:
             if process.poll() is None:
                 process.terminate()

@@ -232,6 +232,9 @@ def login_verify(body: VerificationInput, request: Request, response: Response, 
         if (not verified.user_verified or verified.credential_id != raw_id
                 or verified.credential_device_type.value != credential.device_type):
             raise ValueError("User verification missing")
+        user = db.scalar(select(User).where(User.id == user.id).with_for_update().execution_options(populate_existing=True))
+        if not user or user.disabled:
+            raise ValueError("Account no longer available")
         credential.sign_count, credential.last_used_at = verified.new_sign_count, utcnow()
         credential.backed_up = verified.credential_backed_up
         session, token = create_session(db, user, passkey_credential_id=credential.id)
@@ -288,7 +291,9 @@ def register_verify(body: RegistrationVerificationInput, request: Request, respo
             require_user_presence=True, require_user_verification=True)
         if verified.credential_id != raw_id:
             raise ValueError("Attested credential identifier mismatch")
-        user = db.scalar(select(User).where(User.id == user.id).with_for_update().execution_options(populate_existing=True))
+        # Serialize registrations and credential changes without blocking audit
+        # actor FK checks from a concurrent passkey/session revocation.
+        user = db.scalar(select(User).where(User.id == user.id).with_for_update(key_share=True).execution_options(populate_existing=True))
         current_session = db.scalar(select(UserSession).where(UserSession.id == session.id,
             UserSession.user_id == user.id).with_for_update().execution_options(populate_existing=True)) if user else None
         if (not user or user.disabled or not current_session

@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import { ElButton, ElDialog, ElSwitch, ElPagination } from 'element-plus';
 import { api, write, date, errorText } from '../../api';
 import type { Page, Row } from '../../types';
+import { createScopedInterval } from '../../utils/scopedInterval';
 
 const route = useRoute();
 const items = ref<Row[]>([]),
@@ -19,7 +20,7 @@ const editId = ref(''),
   selected = ref<Row | null>(null),
   history = ref<Row[]>([]);
 const form = reactive<Row>({});
-let timer: ReturnType<typeof setInterval> | undefined;
+const startPolling = createScopedInterval(onBeforeUnmount);
 let generation = 0;
 const labels: Record<string, string> = {
   running: '正在检查',
@@ -195,13 +196,12 @@ onMounted(async () => {
       error.value = errorText(e);
     }
   }
-  timer = setInterval(() => {
+  startPolling(() => {
     if (!document.hidden && !open.value && !selected.value) void load(true);
   }, 30000);
 });
 onBeforeUnmount(() => {
   generation++;
-  clearInterval(timer);
 });
 </script>
 

@@ -95,6 +95,28 @@ def register(client, user, device=None):
     return device, result.json()["item"]
 
 
+def test_login_rechecks_disabled_account_after_signature_verification(context, monkeypatch):
+    from app import passkeys
+    client, db, user, _ = context
+    device, _ = register(client, user)
+    options = client.post("/api/v1/auth/passkeys/login/options", json={}).json()
+    verify = passkeys.verify_authentication_response
+
+    def revoke_account(**kwargs):
+        result = verify(**kwargs)
+        db.execute(update(User).where(User.id == user.id).values(disabled=True),
+                   execution_options={"synchronize_session": False})
+        db.execute(delete(UserSession).where(UserSession.user_id == user.id))
+        db.commit()
+        return result
+
+    monkeypatch.setattr(passkeys, "verify_authentication_response", revoke_account)
+    response = client.post("/api/v1/auth/passkeys/login/verify", json={
+        "challenge_id": options["challenge_id"], "credential": device.response(options, user.id, counter=2)})
+    assert response.status_code == 401
+    assert db.scalar(select(UserSession.id).where(UserSession.user_id == user.id)) is None
+
+
 def test_real_crypto_registration_login_and_revoke_invalidates_issued_sessions(context):
     client, db, user, _ = context
     device, item = register(client, user)

@@ -179,6 +179,29 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
     observation.update(first_seen_at=observation.get("first_seen_at") or now.isoformat(), last_seen_at=now.isoformat(),
                        first_run_id=observation.get("first_run_id") or ctx.run.id,
                        published_at=published, favorited_at=favorited)
+    if scan["initial_strategy"] == "latest":
+        # Window membership follows source positions, including unavailable
+        # items. Persist it before the missing-BVID return so later visibility
+        # changes cannot expand the user's initial N-item scope.
+        if observation.get("archive_decision") == "initial_limit":
+            observation.setdefault("initial_window_eligible", False)
+        if scan["mode"] == "initial":
+            observation.setdefault("initial_window_eligible", position < ctx.policy.get("initial_limit", 100))
+            if observation["initial_window_eligible"]:
+                scan["initial_selected"] += 1
+        elif new_item:
+            # Newly discovered items after the baseline are outside the initial
+            # restriction, including ones whose BVID becomes visible later.
+            observation.setdefault("initial_window_eligible", True)
+        elif observation.get("archive_decision") == "unavailable":
+            # Legacy unavailable rows did not record initial membership. Their
+            # last position cannot prove their original position: do not expand
+            # scope by guessing. A later source event still grants eligibility.
+            observation.setdefault("initial_window_eligible", False)
+        if observation.get("initial_window_eligible") is False and not new_item and new_event:
+            # A genuine later favorite/publication is eligible even if BVID is
+            # still hidden on this scan; keep that grant until it becomes usable.
+            observation["latest_new_event_eligible"] = True
     item.position, item.seen_run_id = position, ctx.run.id
     bvid = raw.get("bvid")
     if not identity.startswith("2:") or not re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid or ""):
@@ -203,7 +226,9 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
         ctx.db.add(VideoCreator(video_id=video.id, creator_id=scan["creator_id"], role="owner"))
 
     decision = observation.get("archive_decision", "existing")
-    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending")
+    # A listing can temporarily hide its BVID. Once available, retry the
+    # archive decision even if its source event timestamp has not advanced.
+    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending", "unavailable")
     if scan["initial_strategy"] == "new_only":
         if not after_baseline:
             eligible = False
@@ -213,11 +238,9 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
             # Also recover items skipped by an earlier initial scan, without
             # counting an unchanged, previously observed event a second time.
             eligible = True
-    elif scan["mode"] == "initial" and scan["initial_strategy"] == "latest":
-        if scan["initial_selected"] >= ctx.policy.get("initial_limit", 100):
+    elif scan["initial_strategy"] == "latest":
+        if observation.get("initial_window_eligible") is False and not observation.get("latest_new_event_eligible"):
             eligible, decision = False, "initial_limit"
-        else:
-            scan["initial_selected"] += 1
     if not ctx.policy.get("archive", True):
         eligible, decision = False, "scan_only"
     if eligible:

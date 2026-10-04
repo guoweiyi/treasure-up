@@ -270,3 +270,76 @@ def test_native_oss_readback_range_and_signing(tmp_path):
     store.verify("asset/a", hashlib.sha256(source.read_bytes()).hexdigest(), 10)
     assert store.read_range("asset/a", 2, 5) == b"2345"
     assert "ttl=30" in store.presign("asset/a", 30)
+
+
+def test_oversized_provider_stream_is_stopped_before_disk_amplification(tmp_path):
+    from contextlib import contextmanager
+    from app.storage.base import ObjectInfo, Storage
+
+    class Endless(io.RawIOBase):
+        read_bytes = 0
+        def read(self, size=-1):
+            assert size > 0, "Unbounded provider read"
+            self.read_bytes += size
+            return b'x' * size
+
+    class Provider(Storage):
+        streams = []
+        def head(self, *args, **kwargs):
+            return ObjectInfo(64)
+        @contextmanager
+        def reader(self, *args, **kwargs):
+            with Endless() as stream:
+                self.streams.append(stream)
+                yield stream
+
+    provider = Provider()
+    target = tmp_path / 'bounded'
+    with pytest.raises(IntegrityError, match='exceeds'):
+        provider.download_to('asset', target, max_bytes=64)
+    assert target.stat().st_size <= 64
+    with pytest.raises(IntegrityError, match='exceeds'):
+        provider.verify('asset', hashlib.sha256(b'x' * 64).hexdigest(), 64)
+    assert all(stream.read_bytes == 65 and stream.closed for stream in provider.streams)
+
+
+def test_placement_snapshot_is_deep_and_ignores_tuning():
+    from app.storage.service import storage_placement
+    config = {'root': '/test', 'read_priority': 1, 'part_size': 5242880, 'nested': {'value': 'old'}}
+    snapshot = storage_placement('local', config)
+    config['nested']['value'] = 'new'
+    assert snapshot == {'kind': 'local', 'config': {'root': '/test', 'nested': {'value': 'old'}}}
+
+
+def test_existing_fallback_profile_does_not_take_configuration_lock(storage_db, tmp_path, monkeypatch):
+    from app.storage import service
+    profile = StorageProfile(name='fallback', kind='local', config={'root': str(tmp_path)}, is_default=False)
+    storage_db.add(profile); storage_db.commit()
+    monkeypatch.setattr(service, 'lock_storage_configuration', lambda _: pytest.fail('Read-only fallback must not lock configuration'))
+    assert service.default_profile(storage_db).id == profile.id
+
+
+@pytest.mark.parametrize('change', ['root', 'disabled', 'tuning'])
+def test_ingest_publication_rechecks_fresh_profile(storage_db, tmp_path, monkeypatch, change):
+    from sqlalchemy import update
+    db = storage_db
+    profile = StorageProfile(name='target', kind='local', config={'root': str(tmp_path / 'old')}, is_default=True)
+    db.add(profile); db.commit()
+    source = tmp_path / 'sample'
+    source.write_bytes(b'new object')
+    put = LocalStorage.put_file
+    def update_during_upload(store, *args, **kwargs):
+        result = put(store, *args, **kwargs)
+        values = {'config': {'root': str(tmp_path / 'new')}} if change == 'root' else (
+            {'enabled': False} if change == 'disabled' else {'config': {**profile.config, 'read_priority': 99}})
+        db.execute(update(StorageProfile).where(StorageProfile.id == profile.id).values(**values)
+                   .execution_options(synchronize_session=False))
+        return result
+    monkeypatch.setattr(LocalStorage, 'put_file', update_during_upload)
+    if change == 'tuning':
+        ingest_file(db, source, kind='media', mime_type='video/mp4')
+        assert len(list(db.scalars(select(AssetLocation)))) == 1
+    else:
+        with pytest.raises(StorageError, match='placement changed'):
+            ingest_file(db, source, kind='media', mime_type='video/mp4')
+        assert not list(db.scalars(select(AssetLocation)))

@@ -154,7 +154,7 @@ def resolve_on_profile(db, asset_id, profile_id, *, expires_in=300):
 
 
 def resolve_session_asset(db, session, asset_id, allowed_asset_ids):
-    allowed = set(allowed_asset_ids)
+    allowed = allowed_asset_ids if isinstance(allowed_asset_ids, frozenset) else frozenset(allowed_asset_ids)
     if asset_id not in allowed or _utc(session.expires_at) <= _now():
         raise StorageError("Playback session does not authorize this asset")
     # Caller authenticates ownership; row lock serializes concurrent fragment failovers.

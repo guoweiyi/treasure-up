@@ -4,6 +4,7 @@ import json
 import math
 import re
 import tempfile
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from uuid import UUID
@@ -17,6 +18,7 @@ from .tools import PlaybackError, probe_media, run_tool
 
 _INDEX_CACHE = OrderedDict()
 _CACHE_BYTES = 0
+_CACHE_LOCK = threading.Lock()
 
 
 def dovi_configuration(stream):
@@ -98,23 +100,36 @@ def validate_index(index):
 
 
 def load_hls_index(db, index_asset_id):
+    return load_hls_package(db, index_asset_id)[0]
+
+
+def load_hls_package(db, index_asset_id):
+    """Cache validation and authorization membership with the immutable index."""
     global _CACHE_BYTES
     asset = db.get(Asset, index_asset_id)
     if not asset:
         raise PlaybackError("HLS index asset is missing")
-    cached = _INDEX_CACHE.get(asset.sha256)
-    if cached is not None:
-        _INDEX_CACHE.move_to_end(asset.sha256)
-        return cached[0]
+    with _CACHE_LOCK:
+        cached = _INDEX_CACHE.get(asset.sha256)
+        if cached is not None:
+            _INDEX_CACHE.move_to_end(asset.sha256)
+            return cached[0], cached[2]
     try:
         index = validate_index(json.loads(read_asset_bytes(db, index_asset_id, max_bytes=32 * 1024**2)))
         # Only immutable content is cached. Authentication and session routes never are.
-        _INDEX_CACHE[asset.sha256] = (index, asset.size)
-        _CACHE_BYTES += asset.size
-        while len(_INDEX_CACHE) > 100 or _CACHE_BYTES > 32 * 1024**2:
-            _, (_, size) = _INDEX_CACHE.popitem(last=False)
-            _CACHE_BYTES -= size
-        return index
+        allowed = frozenset([index["init_asset_id"], *(s["asset_id"] for s in index["segments"])])
+        with _CACHE_LOCK:
+            # Parallel cache misses may finish in either order; count content once.
+            cached = _INDEX_CACHE.get(asset.sha256)
+            if cached is not None:
+                _INDEX_CACHE.move_to_end(asset.sha256)
+                return cached[0], cached[2]
+            _INDEX_CACHE[asset.sha256] = (index, asset.size, allowed)
+            _CACHE_BYTES += asset.size
+            while len(_INDEX_CACHE) > 100 or _CACHE_BYTES > 32 * 1024**2:
+                _, (_, size, _) = _INDEX_CACHE.popitem(last=False)
+                _CACHE_BYTES -= size
+        return index, allowed
     except (ValueError, UnicodeError):
         raise PlaybackError("Invalid HLS package index") from None
 

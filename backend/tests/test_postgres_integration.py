@@ -343,14 +343,14 @@ def test_postgres_sync_and_purge_are_serialized_across_checkpoint_and_publicatio
     purge_started, deleted = threading.Event(), threading.Event()
     original_register, original_delete = service._register_location, LocalStorage.delete
 
-    def paused_register(db, asset, profile, key, info):
+    def paused_register(db, asset, profile, key, info, **kwargs):
         if profile.id == target_id:
             # A multipart checkpoint commits the worker Session while its physical
             # operation remains in progress. The content advisory lock must survive.
             db.commit()
             verified.set()
             assert release_verify.wait(10)
-        return original_register(db, asset, profile, key, info)
+        return original_register(db, asset, profile, key, info, **kwargs)
 
     def tracked_delete(store, key, **kwargs):
         if store.path_for(key) == target_path:

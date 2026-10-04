@@ -230,6 +230,144 @@ def test_new_only_recovers_post_start_item_previously_marked_as_initial_baseline
     assert collection.monitor_state["counts"]["queued"] == 1
 
 
+@pytest.mark.parametrize("strategy", ["all", "new_only"])
+def test_unavailable_source_item_is_archived_when_its_bvid_recovers(db, monkeypatch, strategy):
+    available = [False]
+    class Client(FakeClient):
+        def favorite_page(self, *_):
+            return page([favorite(1, bvid=available[0], added=int((NOW + timedelta(minutes=30)).timestamp()))])
+    monkeypatch.setattr(runner, "BiliClient", Client)
+    monkeypatch.setattr(runner, "_now", lambda: NOW + timedelta(hours=1))
+    policy = {"initial_strategy": strategy}
+    collection, first = source_job(db, policy=policy)
+    db.add(SourceSubscription(collection_id=collection.id, account_id=first.account_id, created_at=NOW))
+    db.commit()
+    complete(db, first)
+    item = db.scalar(select(CollectionItem).where(CollectionItem.collection_id == collection.id))
+    assert item.source_state == "unavailable" and not children(db)
+    available[0] = True
+    _, restored = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, restored)
+    assert item.source_state == "available"
+    assert item.observation["archive_decision"] == "queued"
+    assert collection.monitor_state["counts"]["newly_favorited"] == 0
+    assert len(children(db)) == 1
+    _, repeated = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, repeated)
+    assert len(children(db)) == 1
+
+
+@pytest.mark.parametrize('hidden_position', [0, 1])
+def test_latest_initial_window_counts_unavailable_positions_and_survives_reordering(db, monkeypatch, hidden_position):
+    recovered = [False]
+    identities = [1, 2]
+    class Client(FakeClient):
+        def favorite_page(self, *_):
+            rows = [favorite(identity, bvid=(index != hidden_position or recovered[0]))
+                    for index, identity in enumerate(identities)]
+            return page(list(reversed(rows)) if recovered[0] else rows)
+    monkeypatch.setattr(runner, 'BiliClient', Client)
+    monkeypatch.setattr(runner, '_now', lambda: NOW)
+    policy = {'initial_strategy': 'latest', 'initial_limit': 1}
+    collection, first = source_job(db, policy=policy)
+    complete(db, first)
+    rows = list(db.scalars(select(CollectionItem).order_by(CollectionItem.source_resource_id)))
+    assert [row.observation['initial_window_eligible'] for row in rows] == [True, False]
+    assert len(children(db)) == (0 if hidden_position == 0 else 1)
+    recovered[0] = True
+    _, later = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, later)
+    assert len(children(db)) == 1
+    assert db.get(Video, children(db)[0].target_id).aid == '1'
+    assert rows[1].observation['archive_decision'] == 'initial_limit'
+    assert collection.monitor_state['counts']['newly_favorited'] == 0
+
+
+@pytest.mark.parametrize('kind', ['favorite', 'creator'])
+@pytest.mark.parametrize('recover_with_event', [False, True])
+def test_latest_excluded_item_can_be_archived_after_new_source_event(db, monkeypatch, recover_with_event, kind):
+    phase = [0]
+    new_time = int((NOW + timedelta(hours=1)).timestamp())
+    class Client(FakeClient):
+        def profile(self, uid):
+            return {'mid': uid, 'name': 'creator'}
+        def favorite_page(self, *_):
+            return page([favorite(1), favorite(2, added=new_time if phase[0] else int(NOW.timestamp()),
+                bvid=phase[0] >= 2 or (phase[0] == 1 and recover_with_event))])
+        def creator_page(self, uid, number):
+            items = self.favorite_page()['medias']
+            return {'page': {'pn': number, 'ps': 30, 'count': len(items)}, 'list': {'vlist': [
+                {'aid': item['id'], 'bvid': item['bvid'], 'created': item['fav_time']} for item in items]}}
+    monkeypatch.setattr(runner, 'BiliClient', Client)
+    monkeypatch.setattr(runner, '_now', lambda: NOW + timedelta(hours=phase[0]))
+    policy = {'initial_strategy': 'latest', 'initial_limit': 1}
+    collection, first = source_job(db, kind=kind, policy=policy)
+    complete(db, first)
+    assert len(children(db)) == 1
+    phase[0] = 1
+    _, event = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, event)
+    assert len(children(db)) == (2 if recover_with_event else 1)
+    phase[0] = 2
+    _, recovered = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, recovered)
+    assert len(children(db)) == 2
+    assert collection.monitor_state['counts']['newly_favorited' if kind == 'favorite' else 'newly_published'] == 0
+    item = db.scalar(select(CollectionItem).where(CollectionItem.source_resource_id == '2:2'))
+    assert item.observation['initial_window_eligible'] is False
+    assert item.observation['latest_new_event_eligible'] is True
+    _, repeated = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, repeated)
+    assert len(children(db)) == 2
+
+
+@pytest.mark.parametrize('legacy_decision', ['initial_limit', 'unavailable'])
+def test_latest_legacy_rows_without_window_metadata_do_not_expand_scope(db, monkeypatch, legacy_decision):
+    phase = [0]
+    class Client(FakeClient):
+        def favorite_page(self, *_):
+            return page([favorite(1), favorite(2, bvid=phase[0] > 0 or legacy_decision == 'initial_limit',
+                added=int((NOW + timedelta(hours=phase[0] if phase[0] >= 2 else 0)).timestamp()))])
+    monkeypatch.setattr(runner, 'BiliClient', Client)
+    monkeypatch.setattr(runner, '_now', lambda: NOW + timedelta(hours=phase[0]))
+    policy = {'initial_strategy': 'latest', 'initial_limit': 1}
+    collection, first = source_job(db, policy=policy)
+    complete(db, first)
+    item = db.scalar(select(CollectionItem).where(CollectionItem.source_resource_id == '2:2'))
+    assert item.observation['archive_decision'] == legacy_decision
+    old = dict(item.observation); old.pop('initial_window_eligible')
+    item.observation = old; db.commit()
+    phase[0] = 1
+    _, recovered = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, recovered)
+    assert len(children(db)) == 1 and item.observation['archive_decision'] == 'initial_limit'
+    phase[0] = 2
+    _, new_event = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, new_event)
+    assert len(children(db)) == 2
+
+
+def test_latest_newly_discovered_unavailable_item_remains_eligible_after_baseline(db, monkeypatch):
+    phase = [0]
+    class Client(FakeClient):
+        def favorite_page(self, *_):
+            return page([favorite(1)] + ([favorite(2, bvid=phase[0] == 2,
+                added=int((NOW + timedelta(hours=1)).timestamp()))] if phase[0] else []))
+    monkeypatch.setattr(runner, 'BiliClient', Client)
+    monkeypatch.setattr(runner, '_now', lambda: NOW + timedelta(hours=phase[0]))
+    policy = {'initial_strategy': 'latest', 'initial_limit': 1}
+    collection, first = source_job(db, policy=policy)
+    complete(db, first)
+    phase[0] = 1
+    _, unseen = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, unseen)
+    assert len(children(db)) == 1
+    phase[0] = 2
+    _, recovered = source_job(db, collection=collection, account_id=first.account_id, policy=policy)
+    complete(db, recovered)
+    assert len(children(db)) == 2
+
+
 @pytest.mark.parametrize("kind", ["favorite", "creator"])
 @pytest.mark.parametrize("intermediate_event", [None, int((NOW - timedelta(days=1)).timestamp())])
 def test_event_watermark_survives_missing_or_stale_timestamp(db, monkeypatch, kind, intermediate_event):

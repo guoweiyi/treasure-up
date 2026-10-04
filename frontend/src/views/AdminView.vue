@@ -28,6 +28,7 @@ import type { Row, Page } from '../types';
 import AdminSettings from '../components/admin/AdminSettings.vue';
 import StorageReplicas from '../components/admin/StorageReplicas.vue';
 import SourceMonitor from '../components/admin/SourceMonitor.vue';
+import { createScopedInterval } from '../utils/scopedInterval';
 const route = useRoute();
 const sections = [
   { id: 'overview', name: '总览', group: '运行' },
@@ -114,8 +115,7 @@ const dialog = ref(false),
   storages = ref<Row[]>([]),
   targets = ref<Row[]>([]);
 const settingsRevision = ref(0);
-let sequence = 0,
-  timer: ReturnType<typeof setInterval> | undefined;
+let sequence = 0;
 const endpoint = computed(() =>
   ['videos', 'creators'].includes(section.value) ? `/${section.value}` : `/admin/${section.value}`,
 );
@@ -428,7 +428,12 @@ const can = (job: Row, action: string) =>
   )[action]?.includes(job.status);
 watch(
   section,
-  async () => {
+  async (_, __, onCleanup) => {
+    const startPolling = createScopedInterval(onCleanup);
+    let disposed = false;
+    onCleanup(() => {
+      disposed = true;
+    });
     sequence++;
     rows.value = [];
     q.value = '';
@@ -436,10 +441,10 @@ watch(
     page.value = 1;
     feedback.value = null;
     dialog.value = false;
-    clearInterval(timer);
     await load();
+    if (disposed) return;
     if (['jobs', 'overview'].includes(section.value))
-      timer = setInterval(() => {
+      startPolling(() => {
         if (!document.hidden && !dialog.value && !actionBusy.value) void load(page.value, true);
       }, 10000);
     if (route.query.edit && ['videos', 'creators'].includes(section.value))
@@ -449,7 +454,6 @@ watch(
 );
 onBeforeUnmount(() => {
   sequence++;
-  clearInterval(timer);
 });
 </script>
 <template>

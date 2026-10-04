@@ -1,18 +1,51 @@
 import hashlib
 import hmac
 import secrets
+import threading
+from contextlib import contextmanager
 from datetime import timedelta, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import User, UserSession, utcnow
+from app.models import LoginAttempt, User, UserSession, utcnow
 
 COOKIE_NAME = "treasure_session"
+_password_rate_mutex = threading.RLock()
+
+
+@contextmanager
+def password_attempt_lock(db, client_hash):
+    if db.get_bind().dialect.name == "postgresql":
+        key = int.from_bytes(hashlib.sha256(f"password-rate:{client_hash}".encode()).digest()[:8], "big", signed=True)
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+        yield
+    else:
+        with _password_rate_mutex:
+            yield
+
+
+def reserve_password_attempt(db, request):
+    client = request.client.host if request.client else "unknown"
+    digest = hashlib.sha256(client.encode()).hexdigest()
+    with password_attempt_lock(db, digest):
+        failures = db.scalar(select(func.count()).select_from(LoginAttempt).where(
+            LoginAttempt.client_hash == digest,
+            LoginAttempt.created_at >= utcnow() - timedelta(seconds=settings.login_window_seconds),
+            LoginAttempt.succeeded.is_(False)))
+        if failures >= settings.login_limit:
+            db.rollback()
+            raise HTTPException(429, "登录尝试过于频繁，请稍后再试")
+        # Reserve before scrypt so concurrent requests cannot all see free quota.
+        attempt = LoginAttempt(client_hash=digest, succeeded=False)
+        db.add(attempt)
+        db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < utcnow() - timedelta(days=1)))
+        db.commit()
+    return attempt
 
 
 def encrypt_secret(text: str) -> str:

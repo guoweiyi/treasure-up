@@ -70,7 +70,7 @@ def encrypt_file(source: Path, destination: Path, master: bytes, purpose: str):
     temporary = destination.parent / f".writing-{uuid.uuid4().hex}"
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-        with Path(source).open("rb") as incoming, os.fdopen(fd, "wb") as outgoing:
+        with os.fdopen(fd, "wb") as outgoing, Path(source).open("rb") as incoming:
             outgoing.write(header)
             counter = 0
             while True:
@@ -89,8 +89,10 @@ def encrypt_file(source: Path, destination: Path, master: bytes, purpose: str):
         temporary.unlink(missing_ok=True)
 
 
-def decrypt_to(source: Path, destination, master: bytes, purpose: str) -> tuple[str, int]:
+def decrypt_to(source: Path, destination, master: bytes, purpose: str, *, max_bytes: int | None = None) -> tuple[str, int]:
     digest, size = hashlib.sha256(), 0
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise BackupError("Invalid backup size limit")
     try:
         with Path(source).open("rb") as incoming:
             header = incoming.read(len(MAGIC) + 16)
@@ -114,8 +116,10 @@ def decrypt_to(source: Path, destination, master: bytes, purpose: str) -> tuple[
                     if incoming.read(1):
                         raise BackupError("Trailing encrypted backup data")
                     break
-                digest.update(block)
                 size += len(block)
+                if max_bytes is not None and size > max_bytes:
+                    raise BackupError("Decrypted backup exceeds size limit")
+                digest.update(block)
                 if destination is not None:
                     destination.write(block)
     except BackupError:
@@ -212,12 +216,18 @@ def asset_gc_guard(db):
     deployment and uses an in-process mutex.
     """
     if db.get_bind().dialect.name == "postgresql":
-        with db.get_bind().connect() as connection:
+        with db.get_bind().connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": BACKUP_LOCK})
             try:
                 yield
             finally:
-                connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": BACKUP_LOCK})
+                try:
+                    if not connection.scalar(text("SELECT pg_advisory_unlock(:key)"), {"key": BACKUP_LOCK}):
+                        connection.invalidate()
+                except Exception:
+                    # A pooled connection must never retain a session-level GC lock.
+                    connection.invalidate()
+                    raise
     else:
         with _GC_LOCK:
             yield
@@ -274,7 +284,7 @@ def _create_backup(db, *, destination: Path | None = None, key=None, check_activ
             database_key = f"{set_key}/database.enc"
             encrypt_file(dump, store.path_for(database_key), master, f"database:{backup_id}")
             expected = file_digest(dump)
-            if decrypt_to(store.path_for(database_key), None, master, f"database:{backup_id}") != expected:
+            if decrypt_to(store.path_for(database_key), None, master, f"database:{backup_id}", max_bytes=expected[1]) != expected:
                 raise IntegrityError("Database backup validation failed")
             manifest["database"] = {"key": database_key, "sha256": expected[0], "size": expected[1]}
             for asset in assets:
@@ -291,7 +301,7 @@ def _create_backup(db, *, destination: Path | None = None, key=None, check_activ
                     except FileExistsError:
                         pass
                     source.unlink(missing_ok=True)
-                if decrypt_to(target, None, master, purpose) != (asset["sha256"], asset["size"]):
+                if decrypt_to(target, None, master, purpose, max_bytes=asset["size"]) != (asset["sha256"], asset["size"]):
                     raise IntegrityError("Media backup validation failed")
                 asset["backup_key"] = object_key
             if check_active:
@@ -301,7 +311,7 @@ def _create_backup(db, *, destination: Path | None = None, key=None, check_activ
             manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             manifest_key = f"{set_key}/manifest.enc"
             encrypt_file(manifest_file, store.path_for(manifest_key), master, f"manifest:{backup_id}")
-            if decrypt_to(store.path_for(manifest_key), None, master, f"manifest:{backup_id}") != file_digest(manifest_file):
+            if decrypt_to(store.path_for(manifest_key), None, master, f"manifest:{backup_id}", max_bytes=64 * 1024**2) != file_digest(manifest_file):
                 raise IntegrityError("Backup manifest validation failed")
             # Persist all ciphertext before declaring completion, including directory entries.
             if os.name != "nt":
@@ -338,9 +348,7 @@ def load_backup_manifest(destination: Path, backup_id: str, *, key=None):
         raise BackupError("Invalid backup identifier")
     master, store = _master_key(key), LocalStorage(destination)
     stream = io.BytesIO()
-    decrypt_to(store.path_for(f"sets/{backup_id}/manifest.enc"), stream, master, f"manifest:{backup_id}")
-    if stream.tell() > 64 * 1024**2:
-        raise BackupError("Backup manifest exceeds size limit")
+    decrypt_to(store.path_for(f"sets/{backup_id}/manifest.enc"), stream, master, f"manifest:{backup_id}", max_bytes=64 * 1024**2)
     manifest = json.loads(stream.getvalue())
     if manifest.get("schema_version") != 1 or manifest.get("backup_id") != backup_id or manifest.get("status") != "complete":
         raise BackupError("Backup manifest is not a complete supported backup")
@@ -351,10 +359,10 @@ def verify_backup(destination: Path, backup_id: str, *, key=None):
     master, store = _master_key(key), LocalStorage(destination)
     manifest = load_backup_manifest(destination, backup_id, key=key)
     item = manifest["database"]
-    if decrypt_to(store.path_for(item["key"]), None, master, f"database:{backup_id}") != (item["sha256"], item["size"]):
+    if decrypt_to(store.path_for(item["key"]), None, master, f"database:{backup_id}", max_bytes=item["size"]) != (item["sha256"], item["size"]):
         raise IntegrityError("Database backup mismatch")
     for asset in manifest["assets"]:
-        if decrypt_to(store.path_for(asset["backup_key"]), None, master, f"asset:{asset['sha256']}") != (asset["sha256"], asset["size"]):
+        if decrypt_to(store.path_for(asset["backup_key"]), None, master, f"asset:{asset['sha256']}", max_bytes=asset["size"]) != (asset["sha256"], asset["size"]):
             raise IntegrityError("Media backup mismatch")
     return {"backup_id": backup_id, "snapshot_at": manifest["snapshot_at"], "asset_count": len(manifest["assets"]), "verified": True}
 
@@ -379,13 +387,13 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             temporary = Path(directory)
             dump = temporary / "database.dump"
             with dump.open("wb") as stream:
-                actual = decrypt_to(source.path_for(manifest["database"]["key"]), stream, master, f"database:{backup_id}")
+                actual = decrypt_to(source.path_for(manifest["database"]["key"]), stream, master, f"database:{backup_id}", max_bytes=manifest["database"]["size"])
             if actual != (manifest["database"]["sha256"], manifest["database"]["size"]):
                 raise IntegrityError("Database backup changed during restore")
             for asset in manifest["assets"]:
                 path = temporary / "asset"
                 with path.open("wb") as stream:
-                    actual = decrypt_to(source.path_for(asset["backup_key"]), stream, master, f"asset:{asset['sha256']}")
+                    actual = decrypt_to(source.path_for(asset["backup_key"]), stream, master, f"asset:{asset['sha256']}", max_bytes=asset["size"])
                 if actual != (asset["sha256"], asset["size"]):
                     raise IntegrityError("Media backup changed during restore")
                 target.put_file(path, content_key(asset["sha256"]), asset["mime_type"])

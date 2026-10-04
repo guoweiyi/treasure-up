@@ -6,10 +6,11 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import tempfile
 import threading
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -498,16 +499,41 @@ def _danmaku(ctx, video, part):
         state[part.id], ctx.cp["danmaku"] = checkpoint, state
         ctx.save()
     from app.storage.service import materialize_asset
-    unique = {}
     with tempfile.TemporaryDirectory(prefix="treasure-danmaku-", dir=settings.scratch_dir) as temp:
-        for asset_id in fragments:
-            path = Path(temp) / asset_id
-            materialize_asset(ctx.db, asset_id, path)
-            for item in json.loads(path.read_text(encoding="utf-8")):
-                unique[item["id"]] = item
-    merged = sorted(unique.values(), key=lambda item: (item["time"], item["id"]))
-    asset = ctx.bytes_asset(json.dumps(merged, ensure_ascii=False).encode(), "danmaku", "application/json")
-    snapshot.data_asset_id, snapshot.count, snapshot.status = asset.id, len(merged), "visible_traversal_complete"
+        directory = Path(temp)
+        # Memory is bounded by one source segment. The rebuildable scratch DB
+        # keeps last-seen IDs and sorting off the worker's Python heap.
+        with closing(sqlite3.connect(directory / "merge.sqlite")) as merged:
+            merged.execute("PRAGMA journal_mode=OFF")
+            merged.execute("PRAGMA synchronous=OFF")
+            merged.execute("PRAGMA temp_store=FILE")
+            merged.execute("CREATE TABLE items (id TEXT PRIMARY KEY, time REAL NOT NULL, body TEXT NOT NULL)")
+            merged.execute("CREATE INDEX item_order ON items (time, id)")
+            for asset_id in fragments:
+                ctx.guard()
+                path = directory / asset_id
+                materialize_asset(ctx.db, asset_id, path)
+                items = json.loads(path.read_text(encoding="utf-8"))
+                merged.executemany("INSERT OR REPLACE INTO items (id, time, body) VALUES (?, ?, ?)",
+                    ((item["id"], item["time"], json.dumps(item, ensure_ascii=False)) for item in items))
+                merged.commit()
+                del items
+                path.unlink()
+            output = directory / "danmaku.json"
+            count = 0
+            ctx.guard()
+            with output.open("w", encoding="utf-8", newline="") as target:
+                target.write("[")
+                for (body,) in merged.execute("SELECT body FROM items ORDER BY time, id"):
+                    if count % 1000 == 0:
+                        ctx.guard()
+                    target.write((", " if count else "") + body)
+                    count += 1
+                target.write("]")
+            ctx.guard()
+            asset = ingest_file(ctx.db, output, kind="danmaku", mime_type="application/json",
+                                profile_id=ctx.policy.get("storage_profile_id"))
+    snapshot.data_asset_id, snapshot.count, snapshot.status = asset.id, count, "visible_traversal_complete"
     _ref(ctx.db, asset.id, "danmaku_snapshot", snapshot.id, "playback")
     checkpoint["done"] = True
     state[part.id], ctx.cp["danmaku"] = checkpoint, state
@@ -577,6 +603,14 @@ def _subtitles(ctx, video, part):
     ctx.save()
 
 
+def _raise_capture_errors(ctx, errors):
+    if errors:
+        ctx.job.result = {"components": [error.code for error in errors]}
+        raise PartialCaptureError("部分归档组件尚未完成：" + ", ".join(dict.fromkeys(error.code for error in errors)),
+                                  retryable=any(error.retryable for error in errors),
+                                  blocked=any(error.blocked for error in errors))
+
+
 def _archive(ctx, video):
     if not ctx.cp.get("metadata_done"):
         ctx.guard()
@@ -619,12 +653,15 @@ def _archive(ctx, video):
                 errors.append(error)
         if ctx.policy.get("danmaku", True):
             try:
-                if not _danmaku(ctx, video, part):
-                    return False
+                done = _danmaku(ctx, video, part)
             except IngestError as error:
                 if error.code == "job_stopped" or error.blocked:
                     raise
                 errors.append(error)
+            else:
+                if not done:
+                    _raise_capture_errors(ctx, errors)
+                    return False
         if ctx.policy.get("subtitles", True):
             try:
                 _subtitles(ctx, video, part)
@@ -646,22 +683,26 @@ def _archive(ctx, video):
             errors.append(error)
     if ctx.policy.get("comments", True):
         try:
-            if not _comments(ctx, video):
-                return False
+            done = _comments(ctx, video)
         except IngestError as error:
             if error.code == "job_stopped" or error.blocked:
                 raise
             errors.append(error)
+        else:
+            if not done:
+                _raise_capture_errors(ctx, errors)
+                return False
     try:
-        if not _images(ctx):
-            return False
+        done = _images(ctx)
     except IngestError as error:
         if error.code == "job_stopped" or error.blocked:
             raise
         errors.append(error)
-    if errors:
-        ctx.job.result = {"components": [error.code for error in errors]}
-        raise PartialCaptureError("部分归档组件尚未完成：" + ", ".join(dict.fromkeys(error.code for error in errors)), retryable=any(error.retryable for error in errors), blocked=any(error.blocked for error in errors))
+    else:
+        if not done:
+            _raise_capture_errors(ctx, errors)
+            return False
+    _raise_capture_errors(ctx, errors)
     return True
 
 
