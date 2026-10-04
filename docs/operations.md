@@ -54,7 +54,7 @@ python deploy/start.py --prebuilt
 python deploy/start.py --prebuilt --light
 ```
 
-源码中的镜像默认值为 `ghcr.io/guoweiyi/treasure-up-backend:0.3.2` 和 `ghcr.io/guoweiyi/treasure-up-web:0.3.2`。发布部署包会将这两个默认值固定为本次构建验证过的镜像索引 digest；可通过包内 `release-images.json` 核对。实际镜像与部署包是否已经可用，以 GitHub Release 和镜像仓库的发布结果为准。GHCR 包为公开状态时可匿名拉取；若首次发布仍是私有包，维护者需先调整包可见性，或使用自己的 Docker 登录配置，不要把仓库访问令牌写进启动参数或共享日志。
+源码中的镜像默认值为 `ghcr.io/guoweiyi/treasure-up-backend:0.3.2` 和 `ghcr.io/guoweiyi/treasure-up-web:0.3.2`。发布部署包将这两个默认值固定为本次构建验证过的多架构镜像摘要，可通过包内 `release-images.json` 核对。v0.3.2 镜像与部署包已发布，本仓库两个 GHCR 包现已 Public，可匿名拉取。新 fork 或新包首次创建默认私有，维护者需分别调整包可见性，或使用有权限的 Docker 登录配置；不要把仓库访问令牌写进启动参数或共享日志。
 
 可在现有 `.env` 中显式配置 `TREASURE_BACKEND_IMAGE`、`TREASURE_WEB_IMAGE`，指向自己的镜像仓库、固定版本或 `@sha256:…`。两个镜像应属于同一兼容版本；脚本不会覆盖这些配置。镜像地址不得携带用户名或密码，私有仓库认证由 Docker 管理。
 

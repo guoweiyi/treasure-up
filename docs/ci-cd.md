@@ -1,6 +1,6 @@
 # 自动构建、发版与部署
 
-当前代码版本为 `0.3.2`，[release.json](../release.json) 的 `channel` 为 `preview`。下面说明仓库已有的发布流程；实际可下载的版本、镜像和附件，以 [GitHub Releases](https://github.com/guoweiyi/treasure-up/releases) 及对应 [Actions 运行结果](https://github.com/guoweiyi/treasure-up/actions) 为准。
+当前已发布 [v0.3.2](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.2)，[release.json](../release.json) 的 `channel` 为 `preview`。下面说明仓库已有的发布流程；各版本的镜像和附件，以 [GitHub Releases](https://github.com/guoweiyi/treasure-up/releases) 及对应 [Actions 运行结果](https://github.com/guoweiyi/treasure-up/actions) 为准。
 
 ## 我只想部署
 
@@ -14,7 +14,7 @@ python deploy/start.py --prebuilt --light
 
 部署包只有启动配置和脚本，不需要 Node、Rust、FFmpeg 或后端源码。脚本先拉取镜像，再等待数据库、API 和指定 Worker 队列就绪；替代服务健康后才停用相反模式的处理 Worker。默认访问 `http://localhost:8788`，首次初始化仅在交互式终端显示随机管理员密码。已有 `.env` 和数据卷不被重置。
 
-发布包中的两个镜像默认固定为本次验证过的 **OCI 镜像索引 digest**，Docker 从中选择 `linux/amd64` 或 `linux/arm64`。不要把包内的 `@sha256:…` 换成 `latest` 来实现自动升级；更新前先验证备份，再下载新版本部署包、保留原 `.env`，重新执行上述命令。
+发布包中的两个镜像默认固定为本次验证过的**多架构镜像摘要**，Docker 从中选择 `linux/amd64` 或 `linux/arm64`。不要把包内的 `@sha256:…` 换成 `latest` 来实现自动升级；更新前先验证备份，再下载新版本部署包、保留原 `.env`，重新执行上述命令。
 
 | 参数 | 行为 |
 | --- | --- |
@@ -24,7 +24,7 @@ python deploy/start.py --prebuilt --light
 | `--prebuilt --no-build` | 仍执行预构建镜像拉取；不是离线模式 |
 | `--light` | 下载和媒体处理共用一个 Worker，元数据、备份仍独立 |
 
-GHCR 首次创建的包默认私有。所有者需分别把 `treasure-up-backend`、`treasure-up-web` 的包可见性设为 **Public**，才能免登录拉取；保留私有时，使用有读取权限的账号交互执行 `docker login ghcr.io`。流水线上传成功不等于匿名下载已开放。不要把仓库访问令牌写入 Compose、命令参数、发行附件或共享日志。
+本仓库的 `treasure-up-backend`、`treasure-up-web` 两个 GHCR 包现已 **Public**，已验证可匿名拉取。新 fork 或新包首次创建默认私有，所有者需分别设为 Public 才能免登录拉取；保留私有时，使用有读取权限的账号交互执行 `docker login ghcr.io`。流水线上传成功不等于新包的匿名下载已开放。不要把仓库访问令牌写入 Compose、命令参数、发行附件或共享日志。
 
 如需私有镜像仓库，在 `.env` 中设置 `TREASURE_BACKEND_IMAGE`、`TREASURE_WEB_IMAGE`；它们可以覆盖默认 tag 或 digest。两个镜像必须来自同一个兼容版本。首次站点地址、HTTPS 反代、存储、备份和恢复详见 [部署与维护](operations.md)。不要使用 `docker compose down -v` 升级。
 
@@ -92,9 +92,11 @@ ghcr.io/guoweiyi/treasure-up-web:0.3.2
 | `0.3.2` | 固定版本标签；已存在时只接受同一个 digest，不覆盖不同构建 |
 | `preview` | 只由 `channel: preview` 的发行更新 |
 | `latest` | 只由 `channel: stable` 的发行更新；预览版不会改动它 |
-| `@sha256:…` | 部署 ZIP 默认使用的精确镜像索引，记录在 `release-images.json` |
+| `@sha256:…` | 部署 ZIP 默认使用的精确多架构镜像摘要，记录在 `release-images.json` |
 
-因此当前 `v0.3.2` 会作为 GitHub **Pre-release** 发布，更新 `0.3.2` 和 `preview`，**不更新 `latest`**。将来准备稳定版时显式使用 `--channel stable`；稳定与否由 `release.json` 决定，不靠版本号大小推测。通道检查还会阻止较旧版本覆盖已经指向更新版本的别名。
+当前 `v0.3.2` 已作为 GitHub **Pre-release** 发布，更新 `0.3.2` 和 `preview`，**不更新 `latest`**。将来准备稳定版时显式使用 `--channel stable`；稳定与否由 `release.json` 决定，不靠版本号大小推测。通道检查还会阻止较旧版本覆盖已经指向更新版本的别名。
+
+维护版本通道时，应分别读取 `linux/amd64` 与 `linux/arm64` 镜像的 config labels，核对 `org.opencontainers.image.version`、`org.opencontainers.image.source`、`org.opencontainers.image.revision` 对应的版本、仓库和提交一致；兼容 Docker v2 manifest list 与 OCI index，不能仅依赖顶层索引 annotations。本版实际产物为 Docker v2 manifest list。
 
 ## 下载附件怎么选
 

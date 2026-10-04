@@ -9,6 +9,7 @@ import subprocess
 COMPONENTS = ("backend", "web")
 ARCHES = ("amd64", "arm64")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 
 
 def command(*args):
@@ -96,8 +97,12 @@ def read_candidates(ctx, directory):
 
 
 def validate_index(index, expected=None):
+    if not isinstance(index, dict) or not isinstance(index.get("manifests"), list):
+        raise ValueError("Invalid image index")
     platforms = {}
     for manifest in index.get("manifests", []):
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("platform"), dict):
+            raise ValueError("Invalid image platform")
         platform = manifest.get("platform", {})
         os_name, arch = platform.get("os"), platform.get("architecture")
         if os_name == arch == "unknown" and manifest.get("annotations", {}).get("vnd.docker.reference.type") == "attestation-manifest":
@@ -109,6 +114,50 @@ def validate_index(index, expected=None):
         raise ValueError("Image index does not contain both tested platform images")
 
 
+def inspect_release_metadata(ctx, image, digest, *, index=None, expected=None):
+    """Read both platform labels by digest; Docker manifest lists discard annotations."""
+    if image not in {image_name(ctx, component) for component in COMPONENTS}:
+        raise ValueError("Image metadata points outside the release repository")
+    reference = f"{image}@{require_digest(digest)}"
+    if index is None:
+        index = json.loads(command("docker", "buildx", "imagetools", "inspect", reference, "--raw"))
+    validate_index(index, expected)
+    configs = json.loads(command("docker", "buildx", "imagetools", "inspect", reference, "--format", "{{json .Image}}"))
+    if not isinstance(configs, dict) or set(configs) != {f"linux/{arch}" for arch in ARCHES}:
+        raise ValueError("Image config must contain both release platforms")
+    metadata = None
+    source = f"https://github.com/{ctx['repository']}"
+    for arch in ARCHES:
+        config = configs[f"linux/{arch}"]
+        if not isinstance(config, dict) or config.get("os") != "linux" or config.get("architecture") != arch:
+            raise ValueError("Image config platform does not match its manifest")
+        settings = config.get("config")
+        labels = settings.get("Labels") if isinstance(settings, dict) else None
+        if not isinstance(labels, dict):
+            raise ValueError("Release image config labels are missing")
+        current = {key: labels.get(f"org.opencontainers.image.{key}") for key in ("version", "revision", "source")}
+        if (not isinstance(current["version"], str) or not VERSION.fullmatch(current["version"])
+                or not isinstance(current["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", current["revision"])
+                or not isinstance(current["source"], str) or current["source"].lower() != source):
+            raise ValueError("Release image config labels are invalid or untrusted")
+        current["source"] = source  # GitHub owner/repository names are case-insensitive.
+        if metadata is not None and current != metadata:
+            raise ValueError("Release platform metadata does not agree")
+        metadata = current
+    # OCI index annotations are optional, but must not contradict platform labels.
+    annotations = index.get("annotations", {})
+    if not isinstance(annotations, dict):
+        raise ValueError("Invalid image index annotations")
+    for key, value in metadata.items():
+        annotation = f"org.opencontainers.image.{key}"
+        annotated = annotations.get(annotation)
+        if key == "source" and isinstance(annotated, str):
+            annotated = annotated.lower()
+        if annotation in annotations and annotated != value:
+            raise ValueError("Image index annotations contradict platform labels")
+    return metadata
+
+
 def merge(ctx, directory, output):
     records = read_candidates(ctx, directory)
     images = {}
@@ -116,6 +165,8 @@ def merge(ctx, directory, output):
         image = image_name(ctx, component)
         expected = {arch: records[arch]["images"][component]["digest"] for arch in ARCHES}
         candidate = f"{image}:candidate-{ctx['revision'][:12]}-{ctx['run_id']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+        # Annotations are best effort: Docker schema2 lists omit them. Verify the
+        # immutable config labels below instead of claiming they were preserved.
         command("docker", "buildx", "imagetools", "create", "--tag", candidate,
                 "--annotation", f"index:org.opencontainers.image.version={ctx['tag'][1:]}",
                 "--annotation", f"index:org.opencontainers.image.revision={ctx['revision']}",
@@ -123,7 +174,9 @@ def merge(ctx, directory, output):
                 *(f"{image}@{expected[arch]}" for arch in ARCHES))
         digest = inspect_digest(candidate)
         index = json.loads(command("docker", "buildx", "imagetools", "inspect", f"{image}@{digest}", "--raw"))
-        validate_index(index, expected)
+        metadata = inspect_release_metadata(ctx, image, digest, index=index, expected=expected)
+        if metadata["version"] != ctx["tag"][1:] or metadata["revision"] != ctx["revision"]:
+            raise ValueError("Merged image metadata does not match the tested release")
         images[component] = {"image": image, "digest": digest, "reference": f"{image}@{digest}", "platforms": [f"linux/{arch}" for arch in ARCHES]}
     write_json(output, {**ctx, "images": images})
 
@@ -162,10 +215,7 @@ def promote(ctx, path, channel):
         target = f"{value['image']}:{alias}"
         old = inspect_digest(target, missing=True)
         if old:
-            index = json.loads(command("docker", "buildx", "imagetools", "inspect", target, "--raw"))
-            previous = index.get("annotations", {}).get("org.opencontainers.image.version", "")
-            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", previous):
-                raise ValueError("Channel has no comparable version; refusing blind replacement")
+            previous = inspect_release_metadata(ctx, value["image"], old)["version"]
             if tuple(map(int, previous.split("."))) > tuple(map(int, version.split("."))):
                 continue
         command("docker", "buildx", "imagetools", "create", "--tag", target, value["reference"])

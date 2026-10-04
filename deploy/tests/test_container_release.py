@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,23 @@ def image_manifest(tmp_path):
     return path
 
 
+def platform_index():
+    # Shape returned by --raw for the public v0.3.2 Docker schema2 index.
+    return {"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "manifests": [{"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "platform": {"os": "linux", "architecture": arch}, "digest": digest}
+            for arch, digest in DIGESTS.items()]}
+
+
+def platform_configs(version="0.3.2", revision=CTX["revision"]):
+    # --format '{{json .Image}}' is a platform-keyed map, with capital-L Labels.
+    return {f"linux/{arch}": {"os": "linux", "architecture": arch,
+        "config": {"Labels": {"org.opencontainers.image.version": version,
+            "org.opencontainers.image.revision": revision,
+            "org.opencontainers.image.source": "https://github.com/guoweiyi/treasure-up"}}}
+        for arch in container.ARCHES}
+
+
 def test_promotion_checks_both_immutable_tags_before_any_write(tmp_path, monkeypatch):
     path = image_manifest(tmp_path)
     writes = []
@@ -89,10 +107,14 @@ def test_promotion_checks_both_immutable_tags_before_any_write(tmp_path, monkeyp
 
 def test_older_release_never_moves_channel_backwards(tmp_path, monkeypatch):
     path = image_manifest(tmp_path)
-    writes = []
+    writes, reads = [], []
     def command(*args):
         if "--raw" in args:
-            return json.dumps({"annotations": {"org.opencontainers.image.version": "0.4.0"}})
+            reads.append(args[4])
+            return json.dumps(platform_index())
+        if "--format" in args:
+            reads.append(args[4])
+            return json.dumps(platform_configs("0.4.0"))
         writes.append(args)
         return ""
     monkeypatch.setattr(container, "command", command)
@@ -100,6 +122,8 @@ def test_older_release_never_moves_channel_backwards(tmp_path, monkeypatch):
     container.promote(CTX, path, "preview")
     assert len(writes) == 2
     assert all(any(value.endswith(":0.3.2") for value in args) for args in writes)
+    assert len(reads) == 4
+    assert all(reference.endswith("@" + DIGESTS["amd64"]) for reference in reads)
 
 
 @pytest.mark.parametrize("error", [
@@ -183,3 +207,108 @@ def test_promotion_stops_if_channel_write_cannot_be_verified(tmp_path, monkeypat
         container.promote(CTX, path, channel)
     assert f"{container.image_name(CTX, 'backend')}:{alias}" in writes
     assert f"{container.image_name(CTX, 'web')}:{alias}" not in writes
+
+
+@pytest.mark.parametrize("oci", [False, True])
+def test_reads_actual_multiarch_config_shape_using_only_immutable_digest(monkeypatch, oci):
+    index = platform_index()
+    revision = "45d7b81cf4343706bbbdff920fc648a9835dd929"
+    configs = platform_configs(revision=revision)
+    configs["linux/amd64"]["config"]["Labels"]["org.opencontainers.image.source"] = "https://github.com/Guoweiyi/Treasure-Up"
+    if oci:
+        index["mediaType"] = "application/vnd.oci.image.index.v1+json"
+        index["annotations"] = deepcopy(configs["linux/amd64"]["config"]["Labels"])
+    calls = []
+    def command(*args):
+        calls.append(args)
+        return json.dumps(index if args[-1] == "--raw" else configs)
+    monkeypatch.setattr(container, "command", command)
+    image = container.image_name(CTX, "backend")
+    metadata = container.inspect_release_metadata(CTX, image, DIGESTS["amd64"])
+    assert metadata == {"version": "0.3.2", "revision": revision,
+        "source": "https://github.com/guoweiyi/treasure-up"}
+    assert [args[4:] for args in calls] == [
+        (f"{image}@{DIGESTS['amd64']}", "--raw"),
+        (f"{image}@{DIGESTS['amd64']}", "--format", "{{json .Image}}")]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("version", None), ("version", "0.03.2"), ("version", "0.3.2-rc.1"),
+    ("version", "0.3.2\n"), ("version", "0.3.3"),
+    ("revision", None), ("revision", "a" * 39), ("revision", "b" * 40),
+    ("source", "https://github.com/other/project"), ("source", None),
+    ("source", "https://github.com/guoweiyi/treasure-up?other"),
+    ("source", "https://github.com/guoweiyi/treasure-up/other"),
+])
+def test_rejects_missing_untrusted_or_disagreeing_platform_labels(monkeypatch, field, value):
+    configs = platform_configs()
+    configs["linux/arm64"]["config"]["Labels"][f"org.opencontainers.image.{field}"] = value
+    monkeypatch.setattr(container, "command", lambda *args: json.dumps(configs))
+    with pytest.raises(ValueError, match="labels|metadata"):
+        container.inspect_release_metadata(CTX, container.image_name(CTX, "web"), DIGESTS["amd64"], index=platform_index())
+
+
+@pytest.mark.parametrize("corruption", ["missing_platform", "extra_platform", "wrong_arch", "wrong_os", "missing_labels"])
+def test_rejects_incomplete_or_misidentified_config_platforms(monkeypatch, corruption):
+    configs = platform_configs()
+    if corruption == "missing_platform":
+        configs.pop("linux/arm64")
+    elif corruption == "extra_platform":
+        configs["linux/386"] = deepcopy(configs["linux/amd64"])
+    elif corruption == "wrong_arch":
+        configs["linux/arm64"]["architecture"] = "amd64"
+    elif corruption == "wrong_os":
+        configs["linux/arm64"]["os"] = "windows"
+    else:
+        configs["linux/arm64"]["config"].pop("Labels")
+    monkeypatch.setattr(container, "command", lambda *args: json.dumps(configs))
+    with pytest.raises(ValueError):
+        container.inspect_release_metadata(CTX, container.image_name(CTX, "web"), DIGESTS["amd64"], index=platform_index())
+
+
+def test_oci_annotations_do_not_bypass_platform_validation(monkeypatch):
+    index = platform_index()
+    index["manifests"].pop()
+    index["annotations"] = platform_configs()["linux/amd64"]["config"]["Labels"]
+    def unexpected(*args):
+        pytest.fail("Invalid index must fail before reading configs")
+    monkeypatch.setattr(container, "command", unexpected)
+    with pytest.raises(ValueError, match="both tested"):
+        container.inspect_release_metadata(CTX, container.image_name(CTX, "web"), DIGESTS["amd64"], index=index)
+
+
+def test_oci_annotations_cannot_contradict_platform_labels(monkeypatch):
+    index = platform_index()
+    index["annotations"] = {"org.opencontainers.image.version": "0.3.3"}
+    monkeypatch.setattr(container, "command", lambda *args: json.dumps(platform_configs()))
+    with pytest.raises(ValueError, match="contradict"):
+        container.inspect_release_metadata(CTX, container.image_name(CTX, "web"), DIGESTS["amd64"], index=index)
+
+
+@pytest.mark.parametrize("version,revision,valid", [
+    ("0.3.2", CTX["revision"], True),
+    ("0.3.3", CTX["revision"], False),
+    ("0.3.2", "b" * 40, False),
+])
+def test_merge_verifies_schema2_platform_metadata_before_publishing_record(tmp_path, monkeypatch, version, revision, valid):
+    inputs = candidates(tmp_path / "inputs")
+    output = tmp_path / "release-images.json"
+    reads = []
+    def command(*args):
+        if "--raw" in args:
+            return json.dumps(platform_index())
+        if "--format" in args:
+            reads.append(args[4])
+            return json.dumps(platform_configs(version, revision))
+        return ""
+    monkeypatch.setattr(container, "command", command)
+    monkeypatch.setattr(container, "inspect_digest", lambda *args: "sha256:" + "f" * 64)
+    if valid:
+        container.merge(CTX, inputs, output)
+        assert len(reads) == 2
+        assert set(json.loads(output.read_text())["images"]) == set(container.COMPONENTS)
+    else:
+        with pytest.raises(ValueError, match="does not match the tested release"):
+            container.merge(CTX, inputs, output)
+        assert not output.exists()
+    assert all(reference.endswith("@sha256:" + "f" * 64) for reference in reads)
