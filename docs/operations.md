@@ -41,6 +41,8 @@ docker compose start
 
 来源策略覆盖系统策略，任务入队时固定策略快照，派生下载任务沿用同一快照。`request_budget` / `max_pages` 控制一轮处理量，未遍历完会留下 checkpoint；这不是“请求额度用完就宣告全量成功”。预算主要按页和分段计数，不等于每一个 HTTP 请求的精确计数。
 
+轻量模式用 `python deploy/start.py --light`，恢复完整模式用 `python deploy/start.py`。脚本先等待新 Worker 回报本节点的指定任务队列就绪，再停止旧模式的下载 / 媒体 Worker；新服务不健康时不会执行停用步骤。检查有最长等待时间，失败后保留配置和数据卷，查看状态再重试。`--no-build` 仅适用于已经构建当前版本镜像的情况。
+
 ## 存储配置
 
 后台按存储类型提供表单，填写名称、路径 / 桶、地址、凭据、默认位置与启用状态，无需编辑 JSON。下表用于 API 对接。资产持久化成功且校验后才登记可读位置；修改默认位置不自动迁移已有数据。编辑同类型位置时，凭据留空表示保留；换类型须填写相应的新凭据。
@@ -84,7 +86,7 @@ docker compose exec backup-worker python -m app.cli restore-backup /backups BACK
 
 ## 升级、恢复到旧版本与凭据
 
-升级前先创建并验证备份，保存正在使用的 Git commit / 镜像标签和配置。拉取代码后运行 `docker compose up -d --build`；`init` 自动执行 Alembic。失败时先停止新任务；涉及不兼容数据迁移，应把备份恢复到独立环境配合旧镜像验证，不能假设换回旧镜像就能读新数据库。
+升级前先创建并验证备份，保存正在使用的 Git commit / 镜像标签和配置。拉取代码后运行 `python deploy/start.py`，轻量部署保留 `--light`；`init` 自动执行 Alembic，脚本等待健康检查后才停用相反模式的处理 Worker。失败时先停止新任务；涉及不兼容数据迁移，应把备份恢复到独立环境配合旧镜像验证，不能假设换回旧镜像就能读新数据库。
 
 本地管理员遗失密码可执行交互式维护命令，它会撤销该用户旧会话：
 
@@ -97,6 +99,8 @@ docker compose exec api python -m app.cli reset-password admin
 ## HTTPS 和云端上线前验收
 
 默认 Nginx 只服务本机 HTTP。公网部署需配置证书与可信代理，将 `TREASURE_COOKIE_SECURE=true`，并添加真实域名到 `TREASURE_ALLOWED_HOSTS`。`Host` 和协议必须贯穿代理链；当前 Nginx 使用 `$scheme` 转发，若外层终止 TLS，应修改为仅信任该外层代理的 HTTPS 协议配置，不能接纳客户端任意伪造的 Forwarded 头。完成登录 Origin / CSRF、管理接口鉴权、Range、云端 CORS、过期续签和恢复演练后再开放网络。当前视频库是访客可读的，未引用的原始采集资产不向访客开放。
+
+首次创建配置可使用 `python deploy/start.py --origin https://video.example.com`；此参数只生成站点 / Cookie 配置，不安装证书、不改变默认回环监听。已有 `.env` 始终保留，重复传入 `--origin` 不会重置它。初始化会按浏览器规则去掉默认 `:443` / `:80`，避免通行密钥 Origin 不匹配。手机上的 `localhost` 指手机本身，连接另一台服务器应使用可达的 HTTPS 域名；当前初始化器不接受 HTTP 局域网 IP 作为通行密钥站点。
 
 当前没有完成公网渗透测试、万条视频性能测试或跨浏览器 HDR 兼容验收。多码率转码梯度、CDN 托管、远程字体和公开分享不在本次交付范围。
 

@@ -11,7 +11,7 @@
 | Android ARM64 | 安装 CI SDK/NDK → 生成 Android 项目 → `tauri android build --debug --apk --target aarch64 --ci` | 调试 APK，不能作为已完成签名的商店发布包。 |
 | iOS ARM64 模拟器 | 安装模拟器 Rust 目标/XcodeGen → 生成 iOS 项目 → `tauri ios build --debug --target aarch64-sim --no-sign --ci` | 模拟器 `.app` 的 ZIP；不是可以装到 iPhone 的签名 IPA。 |
 
-本机已执行 `npm test`（4 项，包含安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[第三轮构建 37147760714](https://github.com/guoweiyi/treasure-up/actions/runs/37147760714) 的 5 个 job 已全部成功，验证代码为 `4c6e9e40cc954c3158eb760685204382c2b90001`：Windows NSIS、macOS ARM/Intel DMG、Android ARM64 调试 APK、iOS ARM64 模拟器 ZIP 均已生成并上传。全部构建使用 `--locked`，桌面另通过 2 项 Rust 导航策略测试；macOS ARM 构建结束后的 Cargo.lock 摘要与入库文件一致。这些结果证明编译与打包通过；各系统实机交互、登录、播放及发布签名仍需下述验收。
+本机已执行 `npm test`（7 项，包含连接页初始化/操作竞态、安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[第三轮构建 37147760714](https://github.com/guoweiyi/treasure-up/actions/runs/37147760714) 的 5 个 job 已全部成功，验证代码为 `4c6e9e40cc954c3158eb760685204382c2b90001`：Windows NSIS、macOS ARM/Intel DMG、Android ARM64 调试 APK、iOS ARM64 模拟器 ZIP 均已生成并上传。该次构建使用 `--locked`，桌面另通过 2 项 Rust 导航策略测试；macOS ARM 构建结束后的 Cargo.lock 摘要与入库文件一致。本轮新增的 Rust 连接提交/超时修复及 4 项回归需要由新 CI 验证，不能沿用旧构建结果。各系统实机交互、登录、播放及发布签名仍需下述验收。
 
 npm 与 Cargo 锁均已落盘。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 2026-10-04 通过官方 registry 元数据核实。Cargo.lock 取自第二轮成功的 macOS ARM job `111261288775`，113330 字节、442 个包，SHA-256 为 `8b548b794d163025db6a3f2fa5611a69acebf4367eccb2388b6e4d45e40eb654`；回收后已验证摘要、字节数、TOML、registry 来源和包校验和。生成的 Android/Xcode 工程位于忽略目录 `src-tauri/gen`；发布所需签名材料不得提交。
 
@@ -31,9 +31,13 @@ Rust 在固定 origin 请求 `GET /api/v1/server`，8 秒超时、16 KiB 响应�
 
 本地 capability 只允许 `load_connection`、`connect_server`、`forget_connection` 三个 command。通过 `AppManifest::commands` 将应用 command 纳入权限控制，没有任何 remote capability、文件系统、shell、HTTP 插件或新窗口权限。每个 command 还检查调用窗口 label 和实际本地页面 URL。**单 WebView 不等于共享权限**：能力依据页面来源区分，本地文档有权限，远程服务器页面没有原生 IPC 权限。远端即使可以看到 Tauri 注入的函数，也没有调用授权。
 
-连接页可以重试、清除地址与客户端 WebView 登录数据。普通 Treasure Up 登录 cookie 由系统 WebView 管理，不导出到配置文件；客户端没有读取 B 站 Cookie、云桶密钥的原生接口。清除客户端数据不删除服务器账户，也不是撤销服务器端全部会话。
+连接页初始化读取设置时禁用表单，避免旧地址在输入或清除操作后重新填回；读取失败仍可手动连接或清除。连接页可以重试、清除地址并请求系统清理客户端 WebView 登录数据。普通 Treasure Up 登录 cookie 由系统 WebView 管理，不导出到配置文件；客户端没有读取 B 站 Cookie、云桶密钥的原生接口。Tauri 的清理接口没有返回平台异步清理的完成通知，因此提示只确认请求已发出，不宣称登录数据已同步清空；实际清理完成情况仍需各系统验收。清除客户端数据不删除服务器账户，也不是撤销服务器端全部会话。
 
 前端使用 `https://treasure-up.invalid/connect` 作为“切换服务器”链接；Rust 截获并返回本地，不向该域发请求。桌面还有原生菜单及 `Ctrl/Cmd+Shift+C`，网络 offline 事件和 `Shift+Esc` 也返回连接页；初次加载 20 秒未完成则回退。重启总是进入连接页，因此错误地址不会把应用永久困在远程页面。在线网络下的某些 HTTP 错误页可能被 WebView 视作完成加载，此时用桌面菜单或重启恢复。
+
+验证后的连接提交与超时回退在主线程串行处理，回退执行时重新核对请求代次和加载状态；旧超时不能取消已完成或较新的连接。调用 WebView 导航前释放状态锁，避免导航回调再次取锁时死锁。锁定依赖 Wry 0.57.0 的 [WKWebView 实现](https://github.com/tauri-apps/wry/blob/wry-v0.57.0/src/wkwebview/mod.rs) 已在 iOS 设置 `allowsInlineMediaPlayback=true`，页面仍须保留 `playsinline`，该源码核对不等于 iPhone 实测。
+
+同一版本的 [Android WebChromeClient](https://github.com/tauri-apps/wry/blob/wry-v0.57.0/src/android/kotlin/RustWebChromeClient.kt) 会立即关闭 `onShowCustomView` 全屏请求。播放器因此仅在 Tauri 的 `isTauri === true` 标记与 Android UA 同时存在时隐藏系统全屏按钮，保留网页全屏；普通 Android 浏览器、iOS 和桌面端继续按 API 能力显示。识别不依赖 `client=native` 查询参数或会话存储，也不赋予任何 IPC 权限。
 
 桌面原生 `on_new_window` 拒绝弹窗。该 API 在 Android/iOS 不受支持，移动端使用同一个 WebView，不依赖移动多窗口；另外安装固定、无 IPC 的脚本拒绝 `window.open` 与新窗口链接。平台默认弹窗策略、导航拦截和离线返回仍需各系统实机验收，不能将桌面验证当作移动验证。
 

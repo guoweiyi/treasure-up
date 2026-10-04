@@ -10,8 +10,10 @@ import sys
 from urllib.parse import urlsplit
 
 def normalize_origin(origin):
+    if not isinstance(origin, str) or any(character.isspace() or ord(character) < 32 for character in origin):
+        raise ValueError("Origin must not contain whitespace or control characters")
     parsed = urlsplit(origin.rstrip("/"))
-    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None
         or parsed.path or parsed.query or parsed.fragment):
         raise ValueError("Origin must be a complete HTTPS origin, or http://localhost for local use")
     try:
@@ -23,7 +25,14 @@ def normalize_origin(origin):
     if parsed.scheme == "http" and parsed.hostname != "localhost":
         raise ValueError("Remote origins require HTTPS")
     hostname = parsed.hostname.encode("idna").decode("ascii")
-    port = f":{parsed.port}" if parsed.port else ""
+    if len(hostname) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in hostname.split(".")):
+        raise ValueError("Origin requires a valid DNS hostname")
+    port_number = parsed.port
+    if port_number == 0 or parsed.netloc.endswith(":"):
+        raise ValueError("Origin requires a valid port between 1 and 65535")
+    # Browser Origin/WebAuthn origin serialization removes default ports.
+    default_port = 443 if parsed.scheme == "https" else 80
+    port = f":{port_number}" if port_number is not None and port_number != default_port else ""
     return f"{parsed.scheme}://{hostname}{port}", hostname
 
 

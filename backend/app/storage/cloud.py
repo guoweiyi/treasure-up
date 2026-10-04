@@ -8,6 +8,15 @@ from urllib.parse import urlparse
 from .base import ObjectInfo, ObjectMissing, Storage, StorageError, file_digest, safe_key
 
 
+def _missing_upload(error):
+    # Only the provider's explicit multipart error permits replacing a saved
+    # upload. A generic 404 may instead mean a missing bucket or access policy.
+    response = getattr(error, "response", {})
+    s3_error = response.get("Error", {}) if isinstance(response, dict) else {}
+    return getattr(error, "code", None) == "NoSuchUpload" or (
+        isinstance(s3_error, dict) and s3_error.get("Code") == "NoSuchUpload")
+
+
 def _endpoint(value: str | None):
     if value is not None:
         try:
@@ -76,6 +85,7 @@ class S3Storage(Storage):
             return self.head(key)
         part_size = max(self.part_size, math.ceil(size / 10000))
         state = dict(checkpoint or {})
+        may_restart = bool(state)
         if state and (state.get("key"), state.get("sha256"), state.get("part_size")) != (key, sha, part_size):
             raise StorageError("Multipart checkpoint does not match source")
         if not state:
@@ -87,7 +97,21 @@ class S3Storage(Storage):
                 on_checkpoint(dict(state))
             existing, marker = {}, None
             while True:
-                page = self.client.list_parts(**upload_args, **({"PartNumberMarker": marker} if marker else {}))
+                try:
+                    page = self.client.list_parts(**upload_args, **({"PartNumberMarker": marker} if marker else {}))
+                except Exception as error:
+                    if not may_restart or not _missing_upload(error):
+                        raise
+                    # Lifecycle rules may abort a paused upload. Start once,
+                    # publish its new ID before any bytes, and drop stale parts.
+                    may_restart = False
+                    result = self.client.create_multipart_upload(**args, ContentType=mime_type, Metadata={"sha256": sha})
+                    state = {"key": key, "sha256": sha, "part_size": part_size, "upload_id": result["UploadId"]}
+                    upload_args = {**args, "UploadId": state["upload_id"]}
+                    if on_checkpoint:
+                        on_checkpoint(dict(state))
+                    existing, marker = {}, None
+                    continue
                 existing.update({p["PartNumber"]: p for p in page.get("Parts", [])})
                 if not page.get("IsTruncated"):
                     break
@@ -184,6 +208,7 @@ class OssStorage(Storage):
             return self.head(key)
         part_size = max(self.part_size, math.ceil(size / 10000))
         state = dict(checkpoint or {})
+        may_restart = bool(state)
         if state and (state.get("key"), state.get("sha256"), state.get("part_size")) != (key, sha, part_size):
             raise StorageError("Multipart checkpoint does not match source")
         if not state:
@@ -194,7 +219,18 @@ class OssStorage(Storage):
                 on_checkpoint(dict(state))
             existing, marker = {}, ""
             while True:
-                page = self.bucket.list_parts(object_key, state["upload_id"], marker=marker)
+                try:
+                    page = self.bucket.list_parts(object_key, state["upload_id"], marker=marker)
+                except Exception as error:
+                    if not may_restart or not _missing_upload(error):
+                        raise
+                    may_restart = False
+                    result = self.bucket.init_multipart_upload(object_key, headers={"Content-Type": mime_type, "x-oss-meta-sha256": sha})
+                    state = {"key": key, "sha256": sha, "part_size": part_size, "upload_id": result.upload_id}
+                    if on_checkpoint:
+                        on_checkpoint(dict(state))
+                    existing, marker = {}, ""
+                    continue
                 existing.update({p.part_number: p for p in page.parts})
                 if not page.is_truncated:
                     break

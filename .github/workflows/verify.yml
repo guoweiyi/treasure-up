@@ -1,10 +1,33 @@
 name: Verify
 on:
+  workflow_call:
   push:
+    branches: ['**']
   pull_request:
 permissions:
   contents: read
 jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Audit locked npm dependencies without running package scripts
+        run: |
+          npm --prefix frontend audit --package-lock-only --ignore-scripts
+          npm --prefix native audit --package-lock-only --ignore-scripts
+      - name: Audit locked Python dependencies in a disposable tool environment
+        run: |
+          python3 -m venv .audit
+          .audit/bin/python -m pip install pip-audit==2.10.1 pytest==9.1.1 PyYAML==6.0.3
+          .audit/bin/python -m pip_audit -r backend/requirements.lock --no-deps --disable-pip --progress-spinner off
+      - name: Deployment and release packaging tests
+        run: .audit/bin/python -m pytest deploy/tests -q
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -13,13 +36,9 @@ jobs:
       - name: Create isolated deployment configuration
         run: python3 deploy/bootstrap.py
       - name: Build and start the application
-        run: docker compose up -d --build
+        run: docker compose up -d --build --wait --wait-timeout 180
       - name: Unit and PostgreSQL recovery tests
         run: docker compose exec -T -e TREASURE_RUN_POSTGRES_TESTS=1 backup-worker python -m pytest tests -q
-      - name: Deployment helper tests
-        run: |
-          docker compose cp deploy backup-worker:/tmp/deploy
-          docker compose exec -T backup-worker python -m pytest /tmp/deploy/tests -q
       - name: Verify web readiness
         run: curl --fail --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8788/health
       - name: Stop services

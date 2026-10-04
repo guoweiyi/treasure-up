@@ -1,21 +1,29 @@
-import { reactive } from 'vue';
+import { reactive, ref, watch } from 'vue';
 import type { User } from './types';
 export const session = reactive<{ user: User | null; csrf: string; ready: boolean }>({
   user: null,
   csrf: '',
   ready: false,
 });
+// Fence requests and mounted views when identity, privileges or the login session changes.
+export const sessionRevision = ref(0);
+watch(
+  () => [session.user?.id, session.user?.role, session.csrf],
+  () => sessionRevision.value++,
+  { flush: 'sync' },
+);
 export const display = reactive({ site_name: 'Treasure Up', default_danmaku: true });
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    public status: number,
-    public retryAfterSeconds?: number,
-  ) {
+  status: number;
+  retryAfterSeconds?: number;
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
     super(message);
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const revision = sessionRevision.value;
   const headers = new Headers(options.headers);
   if (options.body) headers.set('Content-Type', 'application/json');
   if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase()))
@@ -24,8 +32,11 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     ...options,
     headers,
     credentials: 'same-origin',
+    cache: 'no-store',
   });
   const data = response.status === 204 ? null : await response.json().catch(() => null);
+  if (revision !== sessionRevision.value)
+    throw new DOMException('会话已切换，已忽略之前的请求', 'AbortError');
   if (!response.ok) {
     if (response.status === 401) {
       session.user = null;
@@ -60,10 +71,11 @@ export async function loadSession() {
     const data = await api<{ user: User; csrf_token: string }>('/auth/me');
     session.user = data.user;
     session.csrf = data.csrf_token;
+    session.ready = true;
   } catch (error) {
     if (!(error instanceof ApiError) || error.status !== 401) throw error;
-  } finally {
     session.ready = true;
+  } finally {
     await loadDisplaySettings();
   }
 }

@@ -4,7 +4,9 @@
 
 技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；Cookie 只在服务端加密保存。
 
-**当前为 0.3 技术预览。** 播放与弹幕设置收进播放器，新增 UP / 收藏夹自动备份、新内容检测、通行密钥、轻量部署模式及独立客户端工程。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
+**当前为 [0.3.1 技术预览](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.1)。** 播放与弹幕设置收进播放器，新增 UP / 收藏夹自动备份、新内容检测、通行密钥、轻量部署模式及独立客户端工程。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
+
+[本版说明与下载选择](docs/releases/v0.3.1.md) 包含各平台安装包、签名状态和升级方式。
 
 ## 本机启动
 

@@ -10,3 +10,5 @@ services:
       file: compose.yaml
       service: collector
     command: [celery, -A, "app.worker:celery", worker, -Q, "download,media", "--concurrency=1", "--loglevel=WARNING"]
+    healthcheck:
+      test: [CMD, python, /app/worker_healthcheck.py, download, media]

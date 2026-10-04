@@ -1,7 +1,9 @@
 name: Native clients
 on:
   workflow_dispatch:
+  workflow_call:
   push:
+    branches: ['**']
     paths: ['native/**', '.github/workflows/native.yml']
   pull_request:
     paths: ['native/**', '.github/workflows/native.yml']
@@ -33,7 +35,7 @@ jobs:
         working-directory: native
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
           cache: npm
@@ -53,7 +55,7 @@ jobs:
       - name: Record public Cargo dependency lock for audit and recovery
         if: matrix.target == 'aarch64-apple-darwin'
         run: node scripts/emit-lock.mjs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: treasure-up-${{ matrix.target }}
           path: |
@@ -70,12 +72,12 @@ jobs:
         working-directory: native
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: native/package-lock.json
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '17'
@@ -101,7 +103,7 @@ jobs:
         run: npm run android:prepare
       - name: Compile ARM64 debug APK without release credentials
         run: npm run tauri -- android build --debug --apk --target aarch64 --ci -- --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: treasure-up-android-debug
           path: native/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
@@ -115,7 +117,7 @@ jobs:
         working-directory: native
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
           cache: npm
@@ -142,7 +144,7 @@ jobs:
           app = apps[0]
           subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), 'ios-simulator.zip'], check=True)
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: treasure-up-ios-simulator-unsigned
           path: native/ios-simulator.zip

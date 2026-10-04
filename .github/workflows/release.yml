@@ -1,0 +1,81 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Validate tag and application versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          test "$RELEASE_REF" = "refs/tags/$RELEASE_TAG"
+          python3 deploy/release.py check "$RELEASE_TAG"
+  verify:
+    needs: validate
+    uses: ./.github/workflows/verify.yml
+  native:
+    needs: validate
+    uses: ./.github/workflows/native.yml
+  package:
+    needs: [verify, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: treasure-up-*
+          path: native-artifacts
+      - name: Package exact-tag source, clients and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 deploy/release.py package "$RELEASE_TAG" --artifacts native-artifacts --output release-assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: release-assets/*
+          if-no-files-found: error
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Publish verified preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          cd release-assets
+          sha256sum --check SHA256SUMS
+          if existing=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            test "$existing" = true || { echo 'Refusing to replace a published release'; exit 1; }
+            gh release upload "$RELEASE_TAG" ./* --clobber
+          else
+            gh release create "$RELEASE_TAG" ./* --draft --prerelease --verify-tag --title "Treasure Up $RELEASE_TAG" --notes-file RELEASE-NOTES.md
+          fi
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/remote-assets"
+          printf '%s\n' * | sort > "$RUNNER_TEMP/expected-assets"
+          diff -u "$RUNNER_TEMP/expected-assets" "$RUNNER_TEMP/remote-assets"
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --notes-file RELEASE-NOTES.md

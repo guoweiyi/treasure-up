@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { session, display, write, errorText } from './api';
+import { session, sessionRevision, display, write, errorText } from './api';
 import UiIcon from './components/UiIcon.vue';
 import { inNativeShell } from './client';
 const route = useRoute(),
@@ -99,7 +99,7 @@ async function logout() {
     </div>
   </header>
   <div v-if="error" class="global-error" role="alert">{{ error }}</div>
-  <RouterView />
+  <RouterView :key="sessionRevision" />
   <a
     v-if="nativeShell && route.path === '/login'"
     class="native-connection-link"

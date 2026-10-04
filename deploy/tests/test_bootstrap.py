@@ -47,3 +47,27 @@ def test_bootstrap_refuses_ambiguous_or_insecure_passkey_origin(tmp_path, origin
     with pytest.raises(ValueError):
         bootstrap.create_environment(tmp_path / ".env", origin=origin, stream=io.StringIO())
     assert not (tmp_path / ".env").exists()
+
+
+@pytest.mark.parametrize("origin,expected", [
+    ("https://EXAMPLE.com:443/", "https://example.com"),
+    ("http://localhost:80", "http://localhost"),
+    ("https://example.com:8443", "https://example.com:8443"),
+])
+def test_origin_matches_browser_default_port_serialization(tmp_path, origin, expected):
+    output = tmp_path / "synthetic.env"
+    bootstrap.create_environment(output, origin=origin, stream=io.StringIO())
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["TREASURE_PASSKEY_ORIGIN"] == expected
+
+
+@pytest.mark.parametrize("origin", [
+    "https://example.com:0", "https://example.com:65536", "https://example.com:",
+    "https://bad host.invalid", "https://a\nb.invalid", "https://@example.com",
+    "https://example.com,other.invalid", "https://${HOSTNAME}.invalid", "https://-bad.invalid",
+])
+def test_invalid_origin_is_rejected_before_creating_secrets(tmp_path, origin):
+    output = tmp_path / "synthetic.env"
+    with pytest.raises(ValueError):
+        bootstrap.create_environment(output, origin=origin, stream=io.StringIO())
+    assert not output.exists()

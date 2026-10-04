@@ -1,7 +1,13 @@
 name: treasure-up
 
+x-worker-health: &worker-health
+  interval: 30s
+  timeout: 10s
+  retries: 4
+  start_period: 30s
+
 x-backend: &backend
-  image: treasure-up-backend:0.3.0
+  image: treasure-up-backend:0.3.1
   restart: unless-stopped
   environment: &environment
     TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}@postgres:5432/treasure
@@ -88,24 +94,36 @@ services:
   collector:
     <<: *backend
     command: [celery, -A, app.worker:celery, worker, -Q, collector, --concurrency=1, --loglevel=WARNING]
+    healthcheck:
+      <<: *worker-health
+      test: [CMD, python, /app/worker_healthcheck.py, collector]
     depends_on:
       init:
         condition: service_completed_successfully
   media-worker:
     <<: *backend
     command: [celery, -A, app.worker:celery, worker, -Q, media, --concurrency=1, --loglevel=WARNING]
+    healthcheck:
+      <<: *worker-health
+      test: [CMD, python, /app/worker_healthcheck.py, media]
     depends_on:
       init:
         condition: service_completed_successfully
   download-worker:
     <<: *backend
     command: [celery, -A, app.worker:celery, worker, -Q, download, --concurrency=1, --loglevel=WARNING]
+    healthcheck:
+      <<: *worker-health
+      test: [CMD, python, /app/worker_healthcheck.py, download]
     depends_on:
       init:
         condition: service_completed_successfully
   backup-worker:
     <<: *backend
     command: [celery, -A, app.worker:celery, worker, -Q, backup, --concurrency=1, --loglevel=WARNING]
+    healthcheck:
+      <<: *worker-health
+      test: [CMD, python, /app/worker_healthcheck.py, backup]
     environment:
       <<: *environment
       TREASURE_BACKUP_KEY: ${TREASURE_BACKUP_KEY:?Set independent backup key}
@@ -117,7 +135,7 @@ services:
       init:
         condition: service_completed_successfully
   web:
-    image: treasure-up-web:0.3.0
+    image: treasure-up-web:0.3.1
     build:
       context: .
       dockerfile: deploy/Dockerfile.web

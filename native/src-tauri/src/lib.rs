@@ -14,6 +14,22 @@ struct Navigation {
     loaded: bool,
 }
 
+impl Navigation {
+    fn reset(&mut self) {
+        self.selected = None;
+        self.generation += 1;
+        self.loaded = false;
+    }
+
+    fn expire(&mut self, generation: u64) -> bool {
+        if self.generation != generation || self.loaded || self.selected.is_none() {
+            return false;
+        }
+        self.reset();
+        true
+    }
+}
+
 #[derive(Default)]
 struct ClientState(Mutex<Navigation>);
 
@@ -41,12 +57,17 @@ fn config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(directory.join("connection.json"))
 }
 
-fn return_to_launcher(app: &tauri::AppHandle) {
-    if let Ok(mut state) = app.state::<ClientState>().0.lock() {
-        state.selected = None;
-        state.generation += 1;
-        state.loaded = false;
+// Call on the UI thread, where navigation commits and page-load events are serialized.
+fn return_to_launcher(app: &tauri::AppHandle, timeout_generation: Option<u64>) {
+    let handle = app.state::<ClientState>();
+    let Ok(mut state) = handle.0.lock() else { return; };
+    if let Some(generation) = timeout_generation {
+        if !state.expire(generation) { return; }
+    } else {
+        state.reset();
     }
+    // Never hold the state lock across a WebView call: navigation callbacks lock it too.
+    drop(state);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.navigate(launcher_url());
     }
@@ -71,10 +92,10 @@ fn forget_connection(app: tauri::AppHandle, window: WebviewWindow) -> Result<(),
     let mut state = handle.0.lock().map_err(|_| "连接状态不可用")?;
     let path = config_path(&app)?;
     if path.exists() { fs::remove_file(path).map_err(|_| "无法清除连接设置")?; }
-    state.generation += 1;
-    state.selected = None;
+    state.reset();
     drop(state);
-    // Explicit user action also clears this app's webview cookies/cache; no cookie is inspected.
+    // Request platform cleanup; Tauri does not expose its asynchronous completion callback.
+    // No cookie is inspected, and a successful request is not proof cleanup has finished.
     window.clear_all_browsing_data().map_err(|_| "地址已清除，但系统未能清除浏览器数据")?;
     Ok(())
 }
@@ -100,24 +121,15 @@ async fn verify_server(origin: &Url) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn connect_server(app: tauri::AppHandle, window: WebviewWindow, origin: String) -> Result<(), String> {
-    require_launcher(&window)?;
-    let selected = normalize_origin(&origin)?;
-    let generation = {
-        let handle = app.state::<ClientState>();
-        let mut state = handle.0.lock().map_err(|_| "连接状态不可用")?;
-        state.generation += 1;
-        state.generation
-    };
-    verify_server(&selected).await?;
+fn complete_connection(app: &tauri::AppHandle, window: &WebviewWindow, selected: Url, generation: u64) -> Result<(), String> {
+    // Revalidate in the same UI-thread turn as committing the selected origin and navigation.
     // A response cannot gain native privileges, and a stale probe cannot overwrite a newer choice.
-    require_launcher(&window)?;
+    require_launcher(window)?;
     {
         let handle = app.state::<ClientState>();
         let mut state = handle.0.lock().map_err(|_| "连接状态不可用")?;
         if state.generation != generation { return Err("连接请求已被取消，请重新连接".into()); }
-        let path = config_path(&app)?;
+        let path = config_path(app)?;
         let temporary = path.with_extension("json.tmp");
         let stored = Connection { origin: selected.origin().ascii_serialization() };
         fs::write(&temporary, serde_json::to_vec(&stored).map_err(|_| "无法保存连接设置")?)
@@ -129,18 +141,36 @@ async fn connect_server(app: tauri::AppHandle, window: WebviewWindow, origin: St
     let mut target = selected;
     target.set_query(Some("client=native"));
     if window.navigate(target).is_err() {
-        return_to_launcher(&app);
+        return_to_launcher(app, None);
         return Err("无法打开服务器页面".into());
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn connect_server(app: tauri::AppHandle, window: WebviewWindow, origin: String) -> Result<(), String> {
+    require_launcher(&window)?;
+    let selected = normalize_origin(&origin)?;
+    let generation = {
+        let handle = app.state::<ClientState>();
+        let mut state = handle.0.lock().map_err(|_| "连接状态不可用")?;
+        state.generation += 1;
+        state.generation
+    };
+    verify_server(&selected).await?;
+    let (result_sender, mut result_receiver) = tauri::async_runtime::channel(1);
+    let commit_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = complete_connection(&commit_app, &window, selected, generation);
+        let _ = result_sender.try_send(result);
+    }).map_err(|_| "无法打开服务器页面")?;
+    result_receiver.recv().await.ok_or("连接请求已取消")??;
     let timeout_app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
-        let timed_out = {
-            let handle = timeout_app.state::<ClientState>();
-            let state = handle.0.lock();
-            state.map(|s| s.generation == generation && !s.loaded && s.selected.is_some()).unwrap_or(false)
-        };
-        if timed_out { return_to_launcher(&timeout_app); }
+        let recover_app = timeout_app.clone();
+        // Check the generation only when the UI task executes, not before queuing it.
+        let _ = timeout_app.run_on_main_thread(move || return_to_launcher(&recover_app, Some(generation)));
     });
     Ok(())
 }
@@ -175,7 +205,7 @@ pub fn run() {
                 .on_navigation(move |url| {
                     if url.as_str() == CONNECT_LINK {
                         let back_app = navigate_app.clone();
-                        let _ = navigate_app.run_on_main_thread(move || return_to_launcher(&back_app));
+                        let _ = navigate_app.run_on_main_thread(move || return_to_launcher(&back_app, None));
                         return false;
                     }
                     let handle = navigate_app.state::<ClientState>();
@@ -205,11 +235,112 @@ pub fn run() {
                 let menu = Menu::with_items(app, &[&connect])?;
                 app.set_menu(menu)?;
                 app.on_menu_event(|app, event| {
-                    if event.id().as_ref() == "connection" { return_to_launcher(app); }
+                    if event.id().as_ref() == "connection" { return_to_launcher(app, None); }
                 });
             }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("native application startup failed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn delayed_timeout_does_not_cancel_a_new_connection() {
+        let mut navigation = Navigation {
+            selected: Some(Url::parse("https://old.example").unwrap()),
+            generation: 3,
+            loaded: false,
+        };
+        // The old timeout has been queued, then a menu action and new probe win the race.
+        navigation.reset();
+        navigation.generation += 1;
+        let current = Url::parse("https://new.example").unwrap();
+        navigation.selected = Some(current.clone());
+        assert!(!navigation.expire(3));
+        assert_eq!(navigation.selected, Some(current));
+        assert_eq!(navigation.generation, 5);
+        assert!(navigation.expire(5));
+        assert!(navigation.selected.is_none());
+        assert_eq!(navigation.generation, 6);
+        assert!(!navigation.expire(5));
+    }
+
+    #[test]
+    fn completed_or_cleared_connection_cannot_expire() {
+        let mut navigation = Navigation {
+            selected: Some(Url::parse("https://loaded.example").unwrap()),
+            generation: 9,
+            loaded: true,
+        };
+        assert!(!navigation.expire(9));
+        assert!(navigation.selected.is_some());
+        navigation.reset();
+        assert!(!navigation.loaded);
+        assert!(!navigation.expire(10));
+        assert_eq!(navigation.generation, 10);
+    }
+
+    fn probe_response(response: String) -> Result<(), String> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "identity probe did not connect");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("identity fixture failed: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                let size = stream.read(&mut buffer).unwrap();
+                assert!(size > 0 && request.len() < 16384);
+                request.extend_from_slice(&buffer[..size]);
+            }
+            assert!(request.starts_with(b"GET /api/v1/server HTTP/1.1\r\n"));
+            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            assert!(!request.contains("\r\ncookie:"));
+            assert!(!request.contains("\r\nauthorization:"));
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let result = tauri::async_runtime::block_on(verify_server(&origin));
+        server.join().unwrap();
+        result
+    }
+
+    fn json_response(body: &str) -> String {
+        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+    }
+
+    #[test]
+    fn identity_probe_rejects_redirects_and_wrong_services_without_credentials() {
+        assert!(probe_response(json_response(r#"{"application":"treasure-up","api_version":1}"#)).is_ok());
+        for body in [r#"{"application":"other","api_version":1}"#, r#"{"application":"treasure-up","api_version":2}"#, "<html>login</html>"] {
+            assert!(probe_response(json_response(body)).is_err());
+        }
+        // The redirect target is never contacted; the error must be the 302 rejection, not DNS/TLS.
+        let redirected = probe_response("HTTP/1.1 302 Found\r\nLocation: https://redirect.invalid\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
+        assert!(redirected.unwrap_err().contains("不跟随跳转"));
+    }
+
+    #[test]
+    fn chunked_identity_response_cannot_bypass_the_size_limit() {
+        let body = " ".repeat(16385);
+        let response = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
+        assert_eq!(probe_response(response).unwrap_err(), "服务器标识响应过大");
+        assert!(probe_response(json_response(&body)).unwrap_err().contains("服务器未返回兼容"));
+    }
 }

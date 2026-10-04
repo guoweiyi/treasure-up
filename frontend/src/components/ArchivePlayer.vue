@@ -11,6 +11,7 @@ import { createMediaAdapter } from '../player/mediaAdapter';
 import { emptyRuntimeStats } from '../player/runtimeStats';
 import { createEndGuard } from '../player/queue';
 import { createPlayback } from '../player/routing';
+import { canUseElementFullscreen } from '../player/nativePlayback';
 import PlaybackOptions from './PlaybackOptions.vue';
 import DanmakuSettings from './DanmakuSettings.vue';
 import PlayerSettingsPanel from './PlayerSettingsPanel.vue';
@@ -480,7 +481,7 @@ async function setup() {
       volume: userVolume.value,
       autoplay: false,
       autoSize: false,
-      fullscreen: typeof container.value.requestFullscreen === 'function',
+      fullscreen: canUseElementFullscreen(container.value, window),
       fullscreenWeb: true,
       pip: true,
       playbackRate: false,
