@@ -302,6 +302,8 @@ mod tests {
                     Err(error) => panic!("identity fixture failed: {error}"),
                 }
             };
+            // Darwin can inherit O_NONBLOCK from the listener; fixture reads and writes block.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut request = Vec::new();
             let mut buffer = [0; 1024];
