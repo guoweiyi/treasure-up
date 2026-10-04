@@ -15,7 +15,7 @@ def queue_for_kind(kind):
         return "backup"
     if kind == "download_media":
         return "download"
-    if kind in {"create_playback", "migrate_storage", "prepare_media", "sync_video",
+    if kind in {"create_playback", "migrate_storage", "prepare_media", "sync_video", "delete_video", "delete_creator",
                 "retire_storage_location", "restore_storage_location", "purge_storage_location"}:
         return "media"
     return "collector"

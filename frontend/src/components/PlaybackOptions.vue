@@ -4,9 +4,11 @@ import type { Playback, Variant, MediaProperties } from '../types';
 import { qualityLabel } from '../utils/format';
 import PlayerChoice from '../player/PlayerChoice.vue';
 import { rateChoices } from '../player/layout';
+import type { RuntimeStats } from '../player/runtimeStats';
 import { bitrate, type MeasuredMedia } from '../player/mediaInfo';
 const props = defineProps<{
   playback: Playback | null;
+  runtimeStats: RuntimeStats;
   variants: Variant[];
   variantId: string;
   subtitle: string;
@@ -135,34 +137,81 @@ const routeChoices = computed(() => [
       原档已保存，暂不支持生成 HDR 浏览器兼容副本。
     </p>
     <details class="player-settings-details">
-      <summary>媒体信息</summary>
+      <summary>播放统计与媒体详情</summary>
       <dl class="player-media-details">
-        <dt>版本</dt>
-        <dd>{{ selectedVariant?.kind === 'playback' ? '兼容副本' : '原档' }}</dd>
-        <dt>视频</dt>
+        <dt>播放引擎</dt>
+        <dd>{{ runtimeStats.engine }}</dd>
+        <dt>MIME</dt>
+        <dd>{{ runtimeStats.mime || media.mime_type || '—' }}</dd>
+        <dt>codecs</dt>
         <dd>
-          {{ selectedVariant?.video_codec || '未记录'
-          }}{{ media?.dolby_vision ? ' · 杜比视界' : media?.hdr ? ' · HDR' : '' }}
+          {{
+            runtimeStats.codecs ||
+            [
+              media.video_codec || selectedVariant?.video_codec,
+              media.audio_codec || selectedVariant?.audio_codec,
+            ]
+              .filter(Boolean)
+              .join(', ') ||
+            '—'
+          }}<small>{{ runtimeStats.codecs ? ' · 当前 MSE 缓冲区' : ' · 归档探测' }}</small>
         </dd>
-        <dt>音频</dt>
+        <dt>画面</dt>
         <dd>
-          {{ selectedVariant?.audio_codec || '未记录'
-          }}{{ media?.dolby_atmos ? ' · 杜比全景声' : '' }}
+          {{
+            runtimeStats.width && runtimeStats.height
+              ? `${runtimeStats.width} × ${runtimeStats.height}`
+              : '—'
+          }}
+          · {{ media.fps ? `${Number(media.fps.toFixed(2))} fps（文件）` : '— fps' }}
         </dd>
-        <dt>码率</dt>
+        <dt>视频码率</dt>
         <dd>
-          {{ bitrate(media?.total_bitrate_bps)
-          }}<span v-if="media?.video_bitrate_bps">
-            · 视频 {{ bitrate(media.video_bitrate_bps) }}</span
-          ><span v-if="media?.audio_bitrate_bps">
-            · 音频 {{ bitrate(media.audio_bitrate_bps) }}</span
-          >
+          {{ media.video_bitrate_bps ? bitrate(media.video_bitrate_bps) : '—' }}
+          <small>文件平均值</small>
         </dd>
-        <dt>传输</dt>
-        <dd>{{ playback?.protocol === 'hls' ? '原码流分片' : '文件直读' }}</dd>
+        <dt>音频码率</dt>
+        <dd>
+          {{ media.audio_bitrate_bps ? bitrate(media.audio_bitrate_bps) : '—' }}
+          <small>文件平均值</small>
+        </dd>
+        <dt>已加载分片</dt>
+        <dd>
+          {{ runtimeStats.loadedFragments ?? '—'
+          }}<template v-if="media.segment_count != null"> / {{ media.segment_count }}</template
+          ><small>{{
+            runtimeStats.loadedFragments == null ? ' · 当前引擎未提供' : ' · 当前会话去重计数'
+          }}</small>
+        </dd>
+        <dt>丢帧 / 总帧</dt>
+        <dd>{{ runtimeStats.droppedFrames ?? '—' }} / {{ runtimeStats.totalFrames ?? '—' }}</dd>
+        <dt>{{ runtimeStats.hostIsFinal ? '分发 host' : '请求 host' }}</dt>
+        <dd>
+          {{ runtimeStats.host || '—' }}
+          <small>{{
+            runtimeStats.hostIsFinal ? '最终媒体响应节点' : '请求入口，最终节点不可见'
+          }}</small>
+        </dd>
+        <dt>网络采样</dt>
+        <dd>
+          {{ runtimeStats.networkBps ? bitrate(runtimeStats.networkBps) : '—'
+          }}<small v-if="runtimeStats.networkBps"> · 最近一次媒体响应体传输</small>
+        </dd>
+        <dt>归档特性</dt>
+        <dd>
+          {{
+            [
+              media.dolby_vision ? 'Dolby Vision' : media.hdr ? 'HDR' : '',
+              media.dolby_atmos ? 'Dolby Atmos' : '',
+            ]
+              .filter(Boolean)
+              .join(' · ') || '—'
+          }}
+        </dd>
       </dl>
       <p class="player-setting-help">
-        格式支持取决于浏览器和设备。播放失败时可手动选择已保存的兼容副本。
+        网络采样来自本站播放请求的浏览器计时，15 秒后过期；缓存、原生分片或跨域计时不可见时显示
+        —。文件平均码率不代表实时网速。格式支持取决于浏览器和设备。
       </p>
     </details>
   </div>

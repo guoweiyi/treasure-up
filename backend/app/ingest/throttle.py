@@ -1,9 +1,7 @@
-"""Persisted, account-serialized pacing and source-request backoff.
+"""Shared source rejection backoff and separate bulk-video pacing.
 
-Jitter spreads scheduled load; it never changes identity or evades challenges.
-Request/video slots are reserved under the shared account request lock. The
-shared request scope waits outside that lock and rechecks before reserving.
-Rejections use a separate short account transaction, without job/capture locks.
+Ordinary API requests have no artificial account-wide interval. Rejections use
+a short independent transaction; video slots are reserved by the download lane.
 """
 import math
 import random
@@ -50,14 +48,8 @@ class AccountPacer:
 
     def before_request(self, url=None):
         self.check_cooldown()
-        if url:
-            host = (urlsplit(url).hostname or "").lower()
-            if host == "hdslb.com" or host.endswith(".hdslb.com"):
-                return  # Public CDN requests never carry account credentials.
-        self._wait_until(self.account.next_request_at)
-        interval = max(1, min(120, float(self.policy.get("request_interval_seconds", 3))))
-        self.account.next_request_at = self.clock() + timedelta(seconds=interval + min(1, self._jitter()))
-        self.db.commit()
+        # next_request_at and request_interval_seconds are legacy fields. Do
+        # not turn an old configured delay into blocking foreground API work.
 
     def before_video(self, *, defer=False):
         self.check_cooldown()

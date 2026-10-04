@@ -123,6 +123,13 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
     for variant in variants:
         properties[variant.id] = {**properties.get(variant.id, {}), **(variant.metadata_json or {})}
     result["media_properties"] = properties
+    access = (video.metadata_json or {}).get("access")
+    charging = access.get("upower_exclusive") if isinstance(access, dict) else None
+    result["content_features"] = {
+        "charging_exclusive": charging if type(charging) is bool else (video.metadata_json or {}).get("is_upower_exclusive") is True,
+        "dolby_vision": any(item.get("dolby_vision") is True for item in properties.values() if isinstance(item, dict)),
+        "dolby_atmos": any(item.get("dolby_atmos") is True for item in properties.values() if isinstance(item, dict)),
+    }
     if detail:
         result.update(notes=note.notes if note else "", source_state=video.source_state,
                       title_override=note.title_override if note else None,
@@ -152,23 +159,42 @@ def comment_views(db, rows):
     snapshots = {snapshot.id: snapshot for snapshot in db.scalars(select(UserSnapshot)
                  .where(UserSnapshot.id.in_({comment.author_snapshot_id for comment in rows if comment.author_snapshot_id})))}
     creators = {creator.user_id: creator for creator in db.scalars(select(Creator).where(Creator.user_id.in_(list(users))))}
-    images = defaultdict(list)
+    images, emotes = defaultdict(list), defaultdict(list)
     for image in db.scalars(select(CommentAsset).where(CommentAsset.comment_id.in_([comment.id for comment in rows]))
                            .order_by(CommentAsset.position)):
-        images[image.comment_id].append(asset_url(image.asset_id))
+        if image.kind in {"image", "attachment"}:
+            images[image.comment_id].append(asset_url(image.asset_id))
+        elif image.kind == "emote":
+            emotes[image.comment_id].append(image.asset_id)
     return [_comment_view(comment, users.get(comment.author_user_id), snapshots.get(comment.author_snapshot_id),
-                          creators.get(comment.author_user_id), images[comment.id]) for comment in rows]
+                          creators.get(comment.author_user_id), images[comment.id], emotes[comment.id]) for comment in rows]
 
 
-def _comment_view(comment, user, snapshot, creator, images):
+def _comment_view(comment, user, snapshot, creator, images, emote_ids=()):
     avatar = snapshot.avatar_asset_id if snapshot else user.avatar_asset_id if user else None
+    allowed, inline, seen = set(emote_ids), [], set()
+    manifest = (comment.raw or {}).get("asset_manifest", [])
+    if isinstance((comment.raw or {}).get("asset_manifest"), list):
+        linked = set(images)
+        images = [asset_url(entry["asset_id"]) for entry in manifest
+                  if isinstance(entry, dict) and entry.get("purpose") == "attachment"
+                  and isinstance(entry.get("asset_id"), str) and asset_url(entry["asset_id"]) in linked]
+    images = list(dict.fromkeys(images))
+    for entry in manifest if isinstance(manifest, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        token = entry.get("token")
+        if (entry.get("purpose") == "emote" and entry.get("asset_id") in allowed
+                and isinstance(token, str) and 0 < len(token) <= 100 and token not in seen):
+            inline.append({"text": token, "asset_url": asset_url(entry["asset_id"])})
+            seen.add(token)
     return {"id": comment.id, "rpid": comment.rpid, "root_rpid": comment.root_rpid, "parent_rpid": comment.parent_rpid,
             "content": comment.content, "posted_at": comment.posted_at, "like_count": comment.like_count,
             "reply_count": comment.reply_count,
             "author": {"uid": user.uid if user else None,
                        "name": snapshot.display_name if snapshot else user.display_name if user else "未知作者",
                        "avatar_url": asset_url(avatar), "creator_id": creator.id if creator else None},
-            "images": images}
+            "images": images, "emotes": inline}
 
 
 def collection_view(db, collection):

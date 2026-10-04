@@ -5,23 +5,24 @@ html:root {
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --accent: #00a1d6;
-  --border: #e3e5e7;
-  --muted: #9499a0;
-  --el-color-primary: #00a1d6;
-  --el-color-primary-light-3: #4fb9dc;
-  --el-color-primary-light-5: #80cee7;
-  --el-color-primary-light-7: #b2e3f3;
-  --el-color-primary-light-9: #e6f7fd;
-  --el-color-primary-dark-2: #008ab8;
-  --el-border-radius-base: 4px;
+  --accent: #16847a;
+  --accent-soft: #edf6f3;
+  --border: #e7eae7;
+  --muted: #7e8782;
+  --el-color-primary: #16847a;
+  --el-color-primary-light-3: #5ca99f;
+  --el-color-primary-light-5: #8bc1ba;
+  --el-color-primary-light-7: #b9dad5;
+  --el-color-primary-light-9: #edf6f3;
+  --el-color-primary-dark-2: #126a62;
+  --el-border-radius-base: 6px;
 }
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 0;
   font-size: 14px;
 }
 button,
@@ -41,7 +42,7 @@ button {
   cursor: pointer;
   border: 1px solid var(--border);
   background: #fff;
-  border-radius: 4px;
+  border-radius: 6px;
   padding: 8px 14px;
   color: #61666d;
   transition:
@@ -62,7 +63,7 @@ button.primary {
   border-color: var(--accent);
 }
 button.primary:hover:not(:disabled) {
-  background: #00aeec;
+  background: #126a62;
   color: #fff;
 }
 input:not([type='range']):not([type='checkbox']):not([type='color']),
@@ -83,7 +84,7 @@ textarea::placeholder {
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 2px solid #b2e3f3;
+  outline: 2px solid #b9dad5;
   outline-offset: 1px;
 }
 input[type='checkbox'],

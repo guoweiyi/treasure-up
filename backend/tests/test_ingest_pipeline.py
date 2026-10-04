@@ -13,6 +13,90 @@ from app.models import Job, MediaVariant, PlatformUser, SourceAccount, UserSnaps
 from test_ingest_runner import FakeClient, db, setup  # noqa: F401
 
 
+@pytest.mark.parametrize("old_response", ["success", "login_required"])
+def test_old_cookie_response_never_changes_rotated_account_identity(db, monkeypatch, old_response):
+    from sqlalchemy import update
+    from app.ingest.errors import IngestError
+    job = setup(db, "verify_account", "unused")
+    class Source(FakeClient):
+        def nav(self):
+            # Credentials rotate after the old request was sent, before either
+            # a successful nav or a source -101 arrives.
+            db.execute(update(SourceAccount).where(SourceAccount.id == job.account_id)
+                .values(secret_encrypted="rotated", uid="999", status="valid")
+                .execution_options(synchronize_session=False))
+            db.commit()
+            if old_response == "login_required":
+                raise IngestError("expired old session", code="login_required", retryable=False)
+            return {"isLogin": True, "mid": "123"}
+    monkeypatch.setattr(runner, "BiliClient", Source)
+    with pytest.raises(IngestDeferred) as error:
+        runner.run_job(db, job)
+    assert error.value.code == "account_changed"
+    db.expire_all()
+    account = db.get(SourceAccount, job.account_id)
+    assert account.uid == "999" and account.status == "valid" and account.risk_failures == 0
+
+
+def test_component_failure_allows_one_media_child_but_preserves_partial_until_repaired(db, monkeypatch):
+    from app.ingest.errors import IngestError, PartialCaptureError
+    from app.models import CaptureRun
+    from app.config import settings
+    monkeypatch.setattr(runner, "BiliClient", FakeClient)
+    video = Video(bvid="BV1234567890", aid="1")
+    db.add(video); db.flush()
+    part = VideoPart(video_id=video.id, cid="1", duration=10)
+    db.add(part); db.flush()
+    job = setup(db, "archive_video", video.id, {"images": False, "subtitles": False, "create_compatible_copy": False})
+    job.checkpoint = {"metadata_done": True, "basics_done": True, "part_ids": [part.id]}; db.commit()
+    def fail(code):
+        def operation(*args): raise IngestError("component failed", code=code)
+        return operation
+    monkeypatch.setattr(runner, "_danmaku", fail("invalid_danmaku"))
+    monkeypatch.setattr(runner, "_comments", fail("pagination_loop"))
+    for _ in range(2):
+        with pytest.raises(PartialCaptureError):
+            runner.run_job(db, job)
+    assert db.scalar(select(func.count()).select_from(Job).where(Job.kind == "download_media")) == 1
+    child = db.get(Job, job.checkpoint["media_job_id"])
+    assert child.checkpoint["metadata_parent_id"] == job.id
+    assert set(job.result["components"]) == {"invalid_danmaku", "pagination_loop"}
+    assert db.get(CaptureRun, job.checkpoint["run_id"]).status == "partial"
+    assert video.metadata_json["ingest_state"]["metadata"] == "partial" and video.capture_status == "partial"
+    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.scratch_dir / "fixture.mp4"; path.write_bytes(b"offline fixture")
+    asset = runner.ingest_file(db, path, kind="media", mime_type="video/mp4")
+    variant = MediaVariant(part_id=part.id, asset_id=asset.id, kind="archive", format_key="fixture")
+    db.add(variant); child.status = "running"; db.commit()
+    monkeypatch.setattr(runner, "archive_media", lambda *args, **kwargs: (variant, False))
+    assert not runner.run_job(db, child)["continuation"]
+    assert video.capture_status == "partial" and video.metadata_json["ingest_state"]["media"] == "complete"
+    child.status = "succeeded"; db.commit()
+    monkeypatch.setattr(runner, "_danmaku", lambda *args: True)
+    monkeypatch.setattr(runner, "_comments", lambda *args: True)
+    assert not runner.run_job(db, job)["continuation"]
+    assert video.capture_status == "complete" and video.metadata_json["ingest_state"]["component_errors"] == []
+    assert child.status == "succeeded" and db.scalar(select(func.count()).select_from(Job).where(Job.kind == "download_media")) == 1
+
+
+def test_source_risk_does_not_spawn_media_from_a_component_failure(db, monkeypatch):
+    from app.ingest.errors import IngestError
+    monkeypatch.setattr(runner, "BiliClient", FakeClient)
+    video = Video(bvid="BV1234567890", aid="1")
+    db.add(video); db.flush()
+    part = VideoPart(video_id=video.id, cid="1", duration=10)
+    db.add(part); db.flush()
+    job = setup(db, "archive_video", video.id)
+    job.checkpoint = {"metadata_done": True, "basics_done": True, "part_ids": [part.id]}; db.commit()
+    def limited(*args): raise IngestError("source rejection", code="rate_limited")
+    monkeypatch.setattr(runner, "_danmaku", limited)
+    with pytest.raises(IngestError):
+        runner.run_job(db, job)
+    assert not job.checkpoint.get("media_job_id")
+    assert db.scalar(select(func.count()).select_from(Job).where(Job.kind == "download_media")) == 0
+    assert db.get(SourceAccount, job.account_id).cooldown_until is not None
+
+
 def test_three_video_cards_and_profiles_are_ready_before_any_media_download(db, monkeypatch):
     events = []
     class Source(FakeClient):
@@ -99,7 +183,7 @@ def test_download_holds_distinct_lane_lock_and_short_api_lock_only(db, monkeypat
     class Source(FakeClient):
         def nav(self):
             with self.request_context("https://api.bilibili.com/x/web-interface/nav"):
-                assert any(key.startswith("account:") for key in held)
+                assert not any(key.startswith("account:") for key in held)
             return super().nav()
     monkeypatch.setattr(runner, "BiliClient", Source)
     video = Video(bvid="BV1234567890", aid="1")
@@ -112,7 +196,7 @@ def test_download_holds_distinct_lane_lock_and_short_api_lock_only(db, monkeypat
         assert any(key.startswith("download-account:") for key in held)
         assert not any(key.startswith("account:") for key in held)
         with client.request_context("https://api.bilibili.com/x/player/wbi/playurl"):
-            assert "account:" + job.account_id in held
+            assert "account:" + job.account_id not in held
         assert "account:" + job.account_id not in held
         with client.request_context("https://example.bilivideo.com/media.m4s"):
             assert "account:" + job.account_id not in held
@@ -224,7 +308,7 @@ def test_resumed_media_does_not_relabel_or_restart_existing_playback(db, monkeyp
 
 
 @pytest.mark.parametrize("interruption", ["reserve_again", "cooldown"])
-def test_request_wait_releases_lock_then_rechecks_deadline_and_credentials(db, monkeypatch, interruption):
+def test_request_ignores_legacy_interval_but_rechecks_cooldown_and_credentials(db, monkeypatch, interruption):
     account = SourceAccount(name="fixture", secret_encrypted="old")
     clock = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
     account.next_request_at = clock[0] + timedelta(seconds=2)
@@ -263,7 +347,7 @@ def test_request_wait_releases_lock_then_rechecks_deadline_and_credentials(db, m
     def request():
         with runner.account_request_scope(db, account, client, pacer,
                 "https://api.bilibili.com/x/web-interface/nav", decryptor=decrypt):
-            assert held
+            assert not held
             pacer.before_request("https://api.bilibili.com/x/web-interface/nav")
     if interruption == "cooldown":
         with pytest.raises(IngestDeferred):
@@ -271,6 +355,6 @@ def test_request_wait_releases_lock_then_rechecks_deadline_and_credentials(db, m
         assert not secrets
     else:
         request()
-        assert len(acquisitions) == 2 and sum(waits) == 4
+        assert len(acquisitions) == 1 and not waits
         assert secrets == ["rotated"]
-    assert not held and waits
+    assert not held and not waits

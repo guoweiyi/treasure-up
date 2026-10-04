@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -6,6 +7,17 @@ import pytest
 from app.ingest.client import BiliClient, clean_raw, cookie_header, parse_cookies, sign_wbi
 from app.ingest.errors import IngestError
 from app.ingest.protobuf import decode_danmaku
+
+
+@pytest.mark.parametrize("status,code,retryable", [(404, "asset_not_found", False), (410, "asset_not_found", False), (500, "http_error", True), (429, "rate_limited", True)])
+def test_public_image_missing_is_distinct_from_transient_failure(status, code, retryable):
+    with_client = BiliClient("", transport=httpx.MockTransport(lambda request: httpx.Response(status)))
+    try:
+        with pytest.raises(IngestError) as caught:
+            with_client.asset("https://i0.hdslb.com/missing.jpg")
+        assert caught.value.code == code and caught.value.retryable is retryable
+    finally:
+        with_client.close()
 
 
 def varint(value):
@@ -107,3 +119,32 @@ def test_image_hosts_no_auth_and_no_redirect_follow():
 
 def test_raw_snapshot_redacts_tokens_and_url_queries():
     assert clean_raw({"url": "https://u:p@i0.hdslb.com/a?sign=SECRET#x", "Cookie": "SECRET", "nested": [{"access_token": "SECRET", "name": "公开昵称"}]}) == {"url": "https://i0.hdslb.com/a", "nested": [{"name": "公开昵称"}]}
+
+
+def test_binary_segment_0a7b_is_not_mistaken_for_json():
+    content = "x" * 119
+    body = blob(1, integer(1, 1) + blob(7, content.encode()))
+    assert body[:2] == b"\x0a\x7b"
+    client = BiliClient(transport=httpx.MockTransport(lambda _: httpx.Response(200,
+        headers={"content-type": "application/octet-stream"}, content=body)))
+    client.images = {"img_url": "https://i0.hdslb.com/" + "a" * 32 + ".png", "sub_url": "https://i0.hdslb.com/" + "b" * 32 + ".png"}
+    client.images_at = time.monotonic()
+    try:
+        assert decode_danmaku(client.segment("1", "2", 2))[0]["text"] == content
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("mime", ["application/json", "application/octet-stream"])
+@pytest.mark.parametrize("code,expected", [(-352, "rate_limited"), (-401, "rate_limited"), (-101, "login_required"), (-500, "invalid_danmaku")])
+def test_real_json_danmaku_errors_keep_authentication_and_backoff_semantics(mime, code, expected):
+    client = BiliClient(transport=httpx.MockTransport(lambda _: httpx.Response(200,
+        headers={"content-type": mime}, content=json.dumps({"code": code, "message": "SECRET"}).encode())))
+    client.images = {"img_url": "https://i0.hdslb.com/" + "a" * 32 + ".png", "sub_url": "https://i0.hdslb.com/" + "b" * 32 + ".png"}
+    client.images_at = time.monotonic()
+    try:
+        with pytest.raises(IngestError) as error:
+            client.segment("1", "2", 1)
+        assert error.value.code == expected and "SECRET" not in str(error.value)
+    finally:
+        client.close()

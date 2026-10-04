@@ -1,8 +1,19 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api, write, errorText, statusText, session, date } from '../api';
-import { bitrate, formatSpecification, type VideoDetail } from '../player/mediaInfo';
+import { compactSpecification, type VideoDetail } from '../player/mediaInfo';
+import {
+  playlistScope,
+  playlistQuery,
+  queueTarget,
+  queuePreferenceKey,
+  readQueuePreferences,
+  type QueuePreferences,
+  type QueueTarget,
+} from '../player/queue';
+import { usePlaylist, playlistPath, type PlaylistPage } from '../player/usePlaylist';
+import PlaybackQueue from '../player/PlaybackQueue.vue';
 import ArchivePlayer from '../components/ArchivePlayer.vue';
 import CommentsPanel from '../components/CommentsPanel.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -20,37 +31,105 @@ const route = useRoute(),
   error = ref(''),
   actionError = ref(''),
   busy = ref(false);
-let seq = 0;
+const player = ref<InstanceType<typeof ArchivePlayer>>(),
+  playing = ref(false),
+  autoStart = ref(false),
+  resume = ref(true),
+  transitioning = ref(false);
+const preferences = ref<QueuePreferences>(readQueuePreferences(null));
+const scope = computed(() => playlistScope(route.query));
+const currentVideoId = computed(() => String(route.params.id));
+const queue = usePlaylist(scope, currentVideoId, (scope, page, signal) =>
+  api<PlaylistPage>(playlistPath(scope, page), { signal }),
+);
+const {
+  items: queueItems,
+  title: queueTitle,
+  total: queueTotal,
+  busy: queueBusy,
+  error: queueError,
+} = queue;
+let seq = 0,
+  controller = new AbortController();
+let pendingNavigation: { id: string; start: boolean; resume: boolean } | null = null;
 const part = computed(() => video.value?.parts?.find((p) => p.id === partId.value));
-const sourcePart = computed(() => video.value?.source_quality?.parts?.[partId.value]);
-const maximum = computed(() => sourcePart.value?.maximum);
 const measured = computed(() => video.value?.media_properties?.[activeVariantId.value]);
 const archivedVariant = computed(() =>
   part.value?.variants.find((variant) => variant.id === activeVariantId.value),
 );
 const archiveSpecification = computed(() =>
-  formatSpecification({ ...archivedVariant.value, fps: measured.value?.fps }),
-);
-const sourceObserved = computed(
-  () => sourcePart.value?.observed_at || video.value?.source_quality?.observed_at,
+  compactSpecification({ ...archivedVariant.value, ...measured.value }),
 );
 const canEdit = computed(() => ['admin', 'editor'].includes(session.user?.role || ''));
 const description = computed(() => {
   const text = video.value?.description?.trim();
   return text && text !== '-' ? text : '';
 });
+const target = (direction: -1 | 1, ended = false) =>
+  queueTarget(
+    video.value?.parts || [],
+    partId.value,
+    queueItems.value,
+    currentVideoId.value,
+    direction,
+    ended ? preferences.value.mode : undefined,
+  );
+const hasPrevious = computed(() => target(-1).kind !== 'stop');
+const hasNext = computed(
+  () =>
+    target(1).kind !== 'stop' ||
+    (!!scope.value &&
+      queueItems.value.some((item) => item.id === currentVideoId.value) &&
+      queueItems.value.length < queueTotal.value),
+);
+watch(
+  () => session.user?.id,
+  (id) => {
+    try {
+      preferences.value = readQueuePreferences(localStorage.getItem(queuePreferenceKey(id)));
+    } catch {
+      preferences.value = readQueuePreferences(null);
+    }
+  },
+  { immediate: true },
+);
+function updatePreferences(value: Partial<QueuePreferences>) {
+  preferences.value = { ...preferences.value, ...value };
+  try {
+    localStorage.setItem(queuePreferenceKey(session.user?.id), JSON.stringify(preferences.value));
+  } catch {
+    /* Optional browser storage. */
+  }
+}
+function requestedPart(data: VideoDetail) {
+  const parts = data.parts || [],
+    requested = route.query.p || route.query.part;
+  if (requested === 'last') return parts.filter((item) => item.variants.length).at(-1)?.id || '';
+  return (
+    parts.find((item) => item.id === requested || String(item.position) === requested)?.id ||
+    parts.find((item) => item.variants.length)?.id ||
+    parts[0]?.id ||
+    ''
+  );
+}
 async function load() {
-  const n = ++seq;
+  const n = ++seq,
+    id = currentVideoId.value;
+  controller.abort();
+  controller = new AbortController();
+  const navigation = pendingNavigation?.id === id ? pendingNavigation : null;
+  pendingNavigation = null;
+  autoStart.value = navigation?.start ?? preferences.value.autoStart;
+  resume.value = navigation?.resume ?? true;
   video.value = null;
   actionError.value = '';
   activeVariantId.value = '';
   error.value = '';
   try {
-    const data = await api<VideoDetail>(`/videos/${route.params.id}`);
+    const data = await api<VideoDetail>(`/videos/${id}`, { signal: controller.signal });
     if (n !== seq) return;
     video.value = data;
-    partId.value =
-      data.parts?.find((p) => p.id === route.query.part)?.id || data.parts?.[0]?.id || '';
+    partId.value = requestedPart(data);
   } catch (e) {
     if (n === seq) error.value = errorText(e);
   }
@@ -77,21 +156,83 @@ async function star() {
     busy.value = false;
   }
 }
-function selectPart(id: string) {
+
+function selectPart(id: string, automatic = false) {
   if (partId.value === id) return;
+  autoStart.value = automatic || preferences.value.autoStart;
+  resume.value = !automatic;
   partId.value = id;
   activeVariantId.value = '';
-  void router.replace({ query: { ...route.query, part: id } });
-  if (window.matchMedia('(max-width: 1024px)').matches)
+  const selected = video.value?.parts?.find((item) => item.id === id);
+  const { part: _legacy, ...query } = route.query;
+  void router.replace({ query: { ...query, p: String(selected?.position || id) } });
+  if (!automatic && window.matchMedia('(max-width: 1024px)').matches)
     heading.value?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
+async function selectVideo(id: string, automatic = false, last = false) {
+  if (id === currentVideoId.value) return;
+  pendingNavigation = { id, start: automatic || preferences.value.autoStart, resume: !automatic };
+  await router.push({
+    path: `/videos/${id}`,
+    query: { ...playlistQuery(scope.value), ...(last ? { p: 'last' } : {}) },
+  });
+}
+async function executeTarget(value: QueueTarget, automatic: boolean, direction: -1 | 1) {
+  if (value.kind === 'part') selectPart(value.id, automatic);
+  else if (value.kind === 'video') await selectVideo(value.id, automatic, direction === -1);
+  else if (value.kind === 'replay') await player.value?.replay();
+}
+async function advance(direction: -1 | 1, automatic = false) {
+  if (transitioning.value) return;
+  const id = currentVideoId.value,
+    currentPart = partId.value,
+    key = seq,
+    scopeKey = JSON.stringify(scope.value);
+  transitioning.value = true;
+  try {
+    if (
+      direction === 1 &&
+      target(1, automatic).kind !== 'part' &&
+      scope.value &&
+      (!automatic || preferences.value.mode === 'continuous')
+    )
+      await queue.ensureNext();
+    if (
+      key !== seq ||
+      id !== currentVideoId.value ||
+      currentPart !== partId.value ||
+      scopeKey !== JSON.stringify(scope.value)
+    )
+      return;
+    if (automatic && !player.value?.isEnded(currentPart)) return;
+    await executeTarget(target(direction, automatic), automatic, direction);
+  } catch (e) {
+    if (key === seq) actionError.value = errorText(e);
+  } finally {
+    transitioning.value = false;
+  }
+}
+function ended(id: string) {
+  if (id === partId.value) void advance(1, true);
+}
 watch(
-  () => route.query.part,
-  (id) => {
-    if (video.value?.parts?.some((item) => item.id === id)) partId.value = String(id);
+  () => [route.query.p, route.query.part],
+  () => {
+    if (!video.value) return;
+    const id = requestedPart(video.value);
+    if (id !== partId.value) {
+      autoStart.value = preferences.value.autoStart;
+      resume.value = true;
+      partId.value = id;
+      activeVariantId.value = '';
+    }
   },
 );
 watch(() => route.params.id, load, { immediate: true });
+onBeforeUnmount(() => {
+  seq++;
+  controller.abort();
+});
 </script>
 <template>
   <main class="content-shell watch-shell">
@@ -103,6 +244,15 @@ watch(() => route.params.id, load, { immediate: true });
       <div class="watch-main">
         <header ref="heading" class="watch-heading">
           <h1>{{ video.title }}</h1>
+          <div v-if="video.content_features" class="media-feature-badges">
+            <span v-if="video.content_features.charging_exclusive" title="充电专属内容"
+              >充电专属</span
+            ><span v-if="video.content_features.dolby_vision" title="归档包含杜比视界"
+              >Dolby Vision</span
+            ><span v-if="video.content_features.dolby_atmos" title="归档包含杜比全景声"
+              >Dolby Atmos</span
+            >
+          </div>
           <div class="video-meta">
             <span v-if="video.stats?.view != null"
               ><UiIcon name="play" />{{ count(video.stats.view) }} 播放</span
@@ -120,62 +270,46 @@ watch(() => route.params.id, load, { immediate: true });
         </header>
         <ArchivePlayer
           v-if="part?.variants?.length"
+          ref="player"
           :key="video.id"
+          :auto-start="autoStart"
+          :resume="resume"
           :part="part"
           :poster="video.cover_url"
           :media-properties="video.media_properties"
           @variant="activeVariantId = $event"
+          @ended="ended"
+          @playing="playing = $event"
         />
         <div v-else class="unavailable-player">
           <UiIcon name="play" /><span>此分 P 还没有可播放的归档</span>
           <p>{{ statusText(video.capture_status) }}</p>
         </div>
-        <div class="video-specification" aria-label="画质与码率信息">
-          <div>
-            <span class="specification-label">最高可用</span
-            ><strong>{{
-              formatSpecification(maximum) ||
-              (sourcePart?.status === 'unavailable' ? '本次未能获取' : '尚未探测')
-            }}</strong>
-          </div>
-          <div v-if="archivedVariant">
-            <span class="specification-label">当前归档</span
-            ><span
-              >{{ archiveSpecification || '原始规格'
-              }}<template v-if="measured?.total_bitrate_bps">
-                · {{ bitrate(measured.total_bitrate_bps) }}</template
-              ><template v-else> · 码率未记录</template></span
-            >
-          </div>
-          <details v-if="maximum || measured" class="specification-details">
-            <summary>规格详情</summary>
-            <dl>
-              <template v-if="maximum"
-                ><dt>可用规格范围</dt>
-                <dd>
-                  该账号最近探测<template v-if="sourceObserved">
-                    · {{ date(sourceObserved) }}</template
-                  >
-                </dd>
-                <dt>源视频码率</dt>
-                <dd>{{ bitrate(maximum.video_bitrate_bps) }}（源站估算）</dd>
-                <dt>最高音频</dt>
-                <dd>
-                  {{ sourcePart?.maximum_audio?.audio_codec || '未记录' }} ·
-                  {{ bitrate(sourcePart?.maximum_audio?.audio_bitrate_bps) }}
-                </dd></template
-              >
-              <template v-if="measured"
-                ><dt>文件平均码率</dt>
-                <dd>{{ bitrate(measured.total_bitrate_bps) }}（含封装开销）</dd>
-                <dt>当前视频码率</dt>
-                <dd>{{ bitrate(measured.video_bitrate_bps) }}</dd>
-                <dt>当前音频码率</dt>
-                <dd>{{ bitrate(measured.audio_bitrate_bps) }}</dd></template
-              >
-            </dl>
-          </details>
+        <div v-if="archivedVariant" class="video-specification" aria-label="当前播放规格">
+          <span>{{ archiveSpecification }}</span>
         </div>
+        <PlaybackQueue
+          :items="queueItems"
+          :current-id="video.id"
+          :current-title="video.title"
+          :part-title="part?.title"
+          :part-position="part?.position"
+          :part-count="video.parts?.length"
+          :playing="playing"
+          :title="queueTitle"
+          :total="queueTotal"
+          :busy="queueBusy"
+          :error="queueError"
+          :preferences="preferences"
+          :previous="hasPrevious"
+          :next="hasNext"
+          :transitioning="transitioning"
+          @preferences="updatePreferences"
+          @previous="advance(-1)"
+          @next="advance(1)"
+          @select="selectVideo"
+          @more="queueItems.some((item) => item.id === video?.id) ? queue.more() : queue.locate()"
+        />
         <PartSelector
           v-if="video.parts && video.parts.length > 1"
           class="mobile-parts"

@@ -205,6 +205,13 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
             observation["latest_new_event_eligible"] = True
     item.position, item.seen_run_id = position, ctx.run.id
     bvid = raw.get("bvid")
+    from app.library_deletion import is_suppressed
+    source_uid = collection.source_id if collection.kind == "creator" else str((raw.get("upper") or {}).get("mid") or "")
+    if is_suppressed(ctx.db, bvid=bvid, uid=source_uid):
+        item.source_state, observation["archive_decision"] = "deleted_locally", "deleted_locally"
+        scan["counts"]["skipped"] += 1
+        item.observation = observation
+        return
     if not identity.startswith("2:") or not re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid or ""):
         item.source_state = "unavailable" if identity.startswith("2:") else "unsupported"
         observation["archive_decision"] = item.source_state
@@ -229,7 +236,7 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
     decision = observation.get("archive_decision", "existing")
     # A listing can temporarily hide its BVID. Once available, retry the
     # archive decision even if its source event timestamp has not advanced.
-    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending", "unavailable")
+    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending", "unavailable", "deleted_locally")
     if scan["initial_strategy"] == "new_only":
         if not after_baseline:
             eligible = False

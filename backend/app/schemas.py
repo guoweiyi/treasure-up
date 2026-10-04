@@ -81,6 +81,7 @@ class IngestPolicy(Input):
     prefer_dolby_vision: bool = True
     prefer_dolby_atmos: bool = True
     request_interval_seconds: float = Field(default=3, ge=1, le=120)
+    asset_interval_seconds: float = Field(default=0.1, ge=0.05, le=5)
     video_interval_seconds: float = Field(default=60, ge=10, le=3600)
     interval_jitter_seconds: float = Field(default=10, ge=0, le=300)
     risk_cooldown_seconds: int = Field(default=900, ge=60, le=86400)
@@ -90,6 +91,12 @@ class IngestPolicy(Input):
     request_budget: int = Field(default=100, ge=1, le=10000)
     download_media: bool = True
     fetch_comments: bool = True
+    comment_top_limit: int = Field(default=500, ge=0, le=10000)
+    comment_scan_limit: int = Field(default=2000, ge=1, le=100000)
+    comment_reply_total_limit: int = Field(default=200, ge=0, le=100000)
+    comment_reply_per_root_limit: int = Field(default=10, ge=0, le=1000)
+    comment_asset_count_limit: int = Field(default=300, ge=0, le=10000)
+    comment_asset_bytes_limit: int = Field(default=25 * 1024**2, ge=0, le=1024**3)
     fetch_danmaku: bool = True
     fetch_subtitles: bool = True
     include_auto_subtitles: bool = True

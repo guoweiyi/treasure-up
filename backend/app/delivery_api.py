@@ -138,12 +138,24 @@ def create_playback(body: schemas.PlaybackInput, identity=Depends(playback_ident
     db.commit()
     metadata = dict(selected.metadata_json or {})
     video = required(db, Video, required(db, VideoPart, body.part_id).video_id)
-    source_info = (video.metadata_json or {}).get("media_properties", {}).get(base.id, {})
+    media_source = selected
+    if index:
+        media_source = next((v for v in variants if v.kind != "hls" and v.id == metadata.get("source_variant_id")), None)
+        if media_source is None:
+            media_source = next((v for v in variants if v.kind != "hls" and v.asset_id == metadata.get("source_asset_id")), selected)
+    properties = (video.metadata_json or {}).get("media_properties", {})
+    media = {**properties.get(media_source.id, {}), **(media_source.metadata_json or {}),
+             **properties.get(selected.id, {}), **metadata}
+    media.update(width=selected.width or media_source.width, height=selected.height or media_source.height,
+                 video_codec=selected.video_codec or media_source.video_codec,
+                 audio_codec=selected.audio_codec or media_source.audio_codec,
+                 mime_type="video/mp4" if index else required(db, Asset, selected.asset_id).mime_type,
+                 segment_count=len(index["segments"]) if index else None)
     url = f"/api/v1/playback-sessions/{session.id}/manifest.m3u8" if index else f"/api/v1/playback-sessions/{session.id}/assets/{selected.asset_id}"
     return {"id": session.id, "session_id": session.id, "asset_id": selected.asset_id, "variant_id": selected.id,
-            "source_variant_id": base.id, "protocol": session.protocol, "url": url,
+            "source_variant_id": media_source.id, "protocol": session.protocol, "url": url,
             "expires_at": session.expires_at, "routes": routes, "selected_route_id": session.profile_id,
-            "media": {**source_info, **metadata}, "loudness": metadata.get("loudness") or (base.metadata_json or {}).get("loudness"),
+            "media": media, "loudness": media.get("loudness"),
             "danmaku_url": f"/api/v1/parts/{body.part_id}/danmaku",
             "subtitles": [{"id": s.id, "label": s.label, "language": s.language, "is_auto": s.is_auto,
                            "url": catalog.asset_url(s.asset_id)} for s in db.scalars(select(SubtitleTrack).where(SubtitleTrack.part_id == body.part_id))]}

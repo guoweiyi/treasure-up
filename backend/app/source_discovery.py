@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.ingest.client import BiliClient
 from app.ingest.errors import IngestDeferred, IngestError
-from app.ingest.runner import _lock, account_request_scope
+from app.ingest.runner import account_request_scope, credential_lock, update_account_identity
 from app.ingest.throttle import AccountPacer, utc
 from app.models import Setting, SourceAccount, utcnow
 from app.security import decrypt_secret, require_admin
@@ -131,8 +131,8 @@ def _response_cache_key(db, account, client, *parts):
     db.refresh(account, attribute_names=["secret_encrypted"])
     if _key(account) != client.discovery_generation:
         raise _changed_account()
-    # Always bind responses to the credentials used while the HTTP lock was
-    # held. A rotation after this check cannot place old data under a new key.
+    # Bind responses to the credential generation captured before HTTP. A
+    # rotation after this check cannot place old data under a new cache key.
     return (*client.discovery_generation, *parts)
 
 
@@ -140,20 +140,20 @@ def _response_cache_key(db, account, client, *parts):
 def _client(db, account):
     client, pacer = None, None
     try:
-        with _lock(db, "account:" + account.id):
+        with credential_lock(db, account.id):
             db.refresh(account)
             _account(db, account.id)
             try:
                 secret = decrypt_secret(account.secret_encrypted)
             except ValueError:
                 raise IngestError("账号凭据不可用", code="invalid_cookie", retryable=False) from None
+            initial_generation = _key(account)
         client = BiliClient(secret, interval=0)
-        # The shared request scope waits outside the account lock, then rechecks
-        # both persisted pacing and rotated credentials immediately before HTTP.
+        client.credential_generation = initial_generation
+        # Ordinary discovery calls only share actual source rejection cooldown.
+        # Long media transfers and legacy next_request_at do not block them.
         def guard():
-            deadline = utc(account.next_request_at)
-            if deadline and (deadline - utcnow()).total_seconds() > 5:
-                raise IngestDeferred("账号请求正在等待", retry_after_seconds=30)
+            pass
         system = db.get(Setting, "ingest")
         policy = dict(system.value) if system and isinstance(system.value, dict) else {}
         pacer = AccountPacer(db, account, policy, guard, jitter=lambda _: 0)
@@ -163,9 +163,8 @@ def _client(db, account):
         def request_scope(url):
             nonlocal last_sent_generation
             with account_request_scope(db, account, client, pacer, url, decryptor=decrypt_secret):
-                # Capture before before_request commits/expires the ORM object,
-                # while credential rotation is still excluded by the mutex.
-                sent = _key(account)
+                # Captured under the short credential mutex before HTTP starts.
+                sent = client.credential_generation
                 if generation is not None and sent != generation:
                     raise _changed_account()
                 last_sent_generation = sent
@@ -179,21 +178,15 @@ def _client(db, account):
                 verified = client.nav()
                 nav = {"mid": _id(verified.get("mid")), "uname": source_title(verified.get("uname"))}
                 generation = last_sent_generation or identity_key[:2]
-                with _lock(db, "account:" + account.id):
-                    db.refresh(account)
-                    if _key(account) != generation:
-                        raise _changed_account()
-                    account.uid, account.status, account.last_verified_at = nav["mid"], "valid", utcnow()
-                    db.commit()
-                    _remember((*generation, "identity"), nav)
+                update_account_identity(db, account, generation, nav=nav)
+                _remember((*generation, "identity"), nav)
             else:
                 generation = identity_key[:2]
             client.discovery_generation = generation
             yield client, nav
         except IngestError as error:
             if error.code in {"login_required", "invalid_cookie"}:
-                account.status = "invalid"
-                db.commit()
+                update_account_identity(db, account, client.credential_generation, invalid=True)
             elif not getattr(error, "account_backoff_applied", False):
                 pacer.failed(error)
             raise

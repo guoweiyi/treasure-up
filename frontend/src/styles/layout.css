@@ -5,7 +5,7 @@
   gap: 30px;
   padding: 0 32px;
   background: #fff;
-  border-bottom: 1px solid #f1f2f3;
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 50;
@@ -14,11 +14,11 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-weight: 750;
+  font-weight: 650;
   font-size: 21px;
   white-space: nowrap;
-  color: var(--accent);
-  letter-spacing: -0.6px;
+  color: #273d37;
+  letter-spacing: -0.5px;
 }
 .brand-mark {
   display: inline-flex;
@@ -26,11 +26,13 @@
   height: 30px;
   align-items: center;
   justify-content: center;
-  color: var(--accent);
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8px;
 }
 .brand-mark .ui-icon {
-  width: 28px;
-  height: 28px;
+  width: 21px;
+  height: 21px;
   stroke-width: 1.9;
 }
 .topbar nav {
@@ -60,8 +62,8 @@
   flex: 1;
   height: 38px;
   margin: 0 auto;
-  background: #f1f2f3;
-  border: 1px solid #e3e5e7;
+  background: #f4f6f3;
+  border: 1px solid transparent;
   border-radius: 7px;
   padding: 3px 4px;
 }
@@ -101,7 +103,7 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: #e6f7fd;
+  background: var(--accent-soft);
   color: var(--accent);
   font-weight: 600;
   margin-right: -8px;
@@ -117,7 +119,7 @@
 }
 .content-shell {
   max-width: 1680px;
-  padding: 28px 40px 48px;
+  padding: 32px 40px 48px;
   margin: 0 auto;
   min-height: calc(100vh - 140px);
 }

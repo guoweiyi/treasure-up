@@ -97,7 +97,7 @@ def test_failed_refresh_does_not_mark_media_archive_partial(db, monkeypatch):
     assert db.scalar(select(func.count()).select_from(VideoStatSnapshot)) == 0
 
 
-def test_account_spacing_persists_across_pacer_instances(db):
+def test_only_bulk_video_spacing_persists_across_pacer_instances(db):
     account, video, job = setup(db)
     clock = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
     pauses = []
@@ -110,7 +110,7 @@ def test_account_spacing_persists_across_pacer_instances(db):
     db.expire(account)
     other = AccountPacer(db, account, policy, lambda: None, clock=lambda: clock[0], sleep=sleep, jitter=lambda limit: 0)
     other.before_request()
-    assert clock[0] == datetime(2026, 1, 1, 0, 0, 3, tzinfo=timezone.utc)
+    assert clock[0] == datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     other.before_video()
     assert clock[0] == datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
     assert max(pauses) <= 0.5

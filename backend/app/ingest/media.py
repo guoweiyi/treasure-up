@@ -62,9 +62,33 @@ def record_available_formats(video, part, info):
     quality.update(observed_at=datetime.now(timezone.utc).isoformat(), scope="current_account")
     quality.setdefault("parts", {})[part.id] = {"cid": part.cid, "observed_at": quality["observed_at"], "status": "available" if formats else "unavailable",
         "formats": formats,
+        "features": {"dolby_vision_available": any(f["dynamic_range"] == "DV" for f in videos),
+            "hdr10_available": any(f["dynamic_range"] == "HDR10" for f in videos),
+            "dolby_atmos_candidate": any(str(f["audio_codec"]).startswith(("ec-3", "eac3")) for f in audios)},
         "maximum": max(videos, key=lambda f: (min(f["width"], f["height"]), f["fps"] or 0, f["total_bitrate_bps"] or 0), default=None),
         "maximum_audio": max(audios, key=lambda f: f["audio_bitrate_bps"] or 0, default=None)}
     video.metadata_json = metadata
+
+
+def record_access(video, source):
+    video.metadata_json = {**(video.metadata_json or {}), "access": {
+        "upower_exclusive": source.get("is_upower_exclusive") if type(source.get("is_upower_exclusive")) is bool else None,
+        "can_play": source.get("is_upower_play") if type(source.get("is_upower_play")) is bool else None,
+        "is_preview": source.get("is_upower_preview") if type(source.get("is_upower_preview")) is bool else None,
+        "source": "view", "observed_at": datetime.now(timezone.utc).isoformat()}}
+
+
+def validate_supporter_playinfo(source, playinfo, duration):
+    if source.get("is_upower_play") is not True or source.get("is_upower_preview") is not False:
+        raise IngestError("当前账号没有该充电专属视频的完整观看权限", code="supporter_access_required", retryable=False)
+    if not isinstance(playinfo, dict) or playinfo.get("is_drm") or playinfo.get("drm_tech_type"):
+        raise IngestError("充电视频未提供可归档的完整码流", code="unsupported_media", retryable=False)
+    labels = playinfo.get("accept_description") or []
+    if any("试看" in str(label) or "preview" in str(label).lower() for label in labels):
+        raise IngestError("源站仅返回试看格式，未下载媒体", code="preview_only", retryable=False)
+    lengths = [_positive(playinfo.get("timelength"), .001), _positive((playinfo.get("dash") or {}).get("duration"))]
+    if not lengths[0] or not duration or any(value is not None and abs(value - duration) > 2 for value in lengths):
+        raise IngestError("充电视频播放源与分P完整时长不符", code="preview_only", retryable=False)
 
 
 def _measured_properties(video, audio, duration, size):
@@ -277,11 +301,23 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
                 if getattr(client, "before_video", None):
                     client.before_video()
                 current = client.view(video.bvid)
+                record_access(video, current)
                 matching = [p for p in current.get("pages", []) if str(p.get("cid")) == part.cid]
                 if len(matching) != 1:
                     raise IngestError("分P来源已变化，请创建新归档轮次", code="source_changed", retryable=False)
                 position = int(matching[0].get("page") or part.position)
-                info = downloader.extract_info(f"https://www.bilibili.com/video/{video.bvid}/?p={position}", download=False)
+                if current.get("is_upower_exclusive") is True:
+                    if current.get("is_upower_play") is not True or current.get("is_upower_preview") is not False:
+                        raise IngestError("当前账号没有该充电视频完整观看权限", code="supporter_access_required", retryable=False)
+                    playinfo = client.playurl(video.bvid, part.cid)
+                    validate_supporter_playinfo(current, playinfo, part.duration)
+                    from yt_dlp.extractor.bilibili import BiliBiliIE
+                    formats = BiliBiliIE(downloader).extract_formats(playinfo)
+                    info = downloader.process_ie_result({"id": f"{video.bvid}_{part.cid}", "title": video.title,
+                        "duration": playinfo["timelength"] / 1000, "formats": formats,
+                        "webpage_url": f"https://www.bilibili.com/video/{video.bvid}/"}, download=False)
+                else:
+                    info = downloader.extract_info(f"https://www.bilibili.com/video/{video.bvid}/?p={position}", download=False)
                 if not isinstance(info, dict) or info.get("_type") in ("playlist", "multi_video"):
                     raise IngestError("下载器未返回指定分P", code="invalid_media")
                 checked = client.view(video.bvid).get("pages", [])

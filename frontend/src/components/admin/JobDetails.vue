@@ -77,6 +77,9 @@ const checkNames: Record<string, string> = {
     <p v-if="job.result?.old_locations_retained || job.result?.originals_retained">
       原存储位置的文件保留。
     </p>
+    <p v-if="job.result?.unavailable_images" class="muted small">
+      {{ job.result.unavailable_images }} 张图片在源站已失效，已保留对应文字资料。
+    </p>
     <p v-if="job.error" class="form-error" role="alert">{{ job.error }}</p>
     <dl class="job-metrics muted small">
       <dt>创建时间</dt>

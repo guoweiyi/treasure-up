@@ -11,7 +11,9 @@ defineProps<{
     | 'user'
     | 'like'
     | 'coin'
-    | 'share';
+    | 'share'
+    | 'edit'
+    | 'trash';
 }>();
 const paths = {
   search: 'm20 20-4.5-4.5M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
@@ -26,6 +28,8 @@ const paths = {
   like: 'M7 10v11H3V10h4Zm0 1 5-8c2 0 3 1 2 4l-1 3h6c2 0 2 1 2 3l-2 6c0 1-1 2-2 2H7',
   coin: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9 8h6v8H9V8Z',
   share: 'M4 19v-5a4 4 0 0 1 4-4h11m-5-5 5 5-5 5',
+  edit: 'm15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14v6Z',
+  trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7',
 };
 </script>
 <template>

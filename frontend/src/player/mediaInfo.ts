@@ -13,6 +13,12 @@ export interface SourceFormat {
   total_bitrate_bps?: number | null;
 }
 export interface MeasuredMedia extends MediaProperties {
+  mime_type?: string | null;
+  width?: number | null;
+  height?: number | null;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+  segment_count?: number | null;
   fps?: number | null;
   video_bitrate_bps?: number | null;
   audio_bitrate_bps?: number | null;
@@ -37,10 +43,25 @@ export interface SourceQuality {
   >;
 }
 export type VideoDetail = Video & {
+  content_features?: {
+    charging_exclusive?: boolean;
+    dolby_vision?: boolean;
+    dolby_atmos?: boolean;
+  };
   published_at?: string | null;
   source_quality?: SourceQuality | null;
   media_properties?: Record<string, MeasuredMedia>;
 };
+export function compactSpecification(format?: SourceFormat | null) {
+  if (!format) return '—';
+  const resolution =
+    format.width && format.height
+      ? `${format.width} × ${format.height}`
+      : format.height
+        ? `${format.height}P`
+        : '—';
+  return `${resolution} · ${format.fps && format.fps > 0 ? `${Number(format.fps.toFixed(2))} fps` : '— fps'} · ${format.total_bitrate_bps ? bitrate(format.total_bitrate_bps) : format.video_bitrate_bps ? bitrate(format.video_bitrate_bps) : '— Mbps'}`;
+}
 export type VideoCreator = Creator & { role_title?: string | null };
 
 export function bitrate(value?: number | null) {

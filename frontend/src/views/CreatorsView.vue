@@ -47,11 +47,11 @@ watch(() => route.fullPath, load, { immediate: true });
         <p class="muted">已收录 {{ total }} 位 UP 主</p>
       </div>
       <form class="search-form" @submit.prevent="search()">
-        <input
-          v-model="q"
-          placeholder="搜索昵称、曾用名、UID 或简介"
-          aria-label="搜索 UP 主"
-        /><button class="primary">搜索</button>
+        <input v-model="q" placeholder="搜索 UP 主" aria-label="搜索 UP 主" /><button
+          class="primary"
+        >
+          搜索
+        </button>
       </form>
     </div>
     <EmptyState v-if="error" title="UP 目录暂时无法读取" :text="error" error

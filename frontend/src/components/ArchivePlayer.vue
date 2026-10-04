@@ -8,6 +8,8 @@ import artplayerPluginDanmuku, {
 import { api, write, errorText, display, session } from '../api';
 import type { Part, Playback, Danmaku, MediaProperties } from '../types';
 import { createMediaAdapter } from '../player/mediaAdapter';
+import { emptyRuntimeStats } from '../player/runtimeStats';
+import { createEndGuard } from '../player/queue';
 import { createPlayback } from '../player/routing';
 import PlaybackOptions from './PlaybackOptions.vue';
 import DanmakuSettings from './DanmakuSettings.vue';
@@ -28,8 +30,16 @@ const props = defineProps<{
   part: Part;
   poster?: string | null;
   mediaProperties?: Record<string, MediaProperties>;
+  autoStart?: boolean;
+  resume?: boolean;
 }>();
-const emit = defineEmits<{ variant: [id: string] }>();
+const emit = defineEmits<{
+  variant: [id: string];
+  ended: [partId: string];
+  playing: [value: boolean];
+}>();
+const runtimeStats = ref(emptyRuntimeStats());
+const endGuard = createEndGuard();
 const container = ref<HTMLDivElement>(),
   error = ref(''),
   note = ref(''),
@@ -58,7 +68,10 @@ let danmakuReload: ReturnType<typeof setTimeout> | undefined;
 let danmakuLoading = false,
   danmakuReloadRequested = false;
 let rejectMediaLoad: ((error: Error) => void) | null = null;
-const mediaAdapter = createMediaAdapter(handleMediaFailure);
+const mediaAdapter = createMediaAdapter(
+  handleMediaFailure,
+  (value) => (runtimeStats.value = value),
+);
 const playerHost = ref<HTMLElement | null>(null),
   settingsOpen = ref(false),
   panelMode = ref<'settings' | 'rate'>('settings'),
@@ -366,12 +379,19 @@ async function renew() {
   } catch (e) {
     if (key === request) error.value = `无法恢复播放：${errorText(e)}`;
   } finally {
-    renewing = false;
-    switching.value = false;
+    if (key === request && currentPlayer === art) {
+      renewing = false;
+      switching.value = false;
+    }
   }
 }
 async function setup() {
   const key = ++request;
+  const endKey = endGuard.reset();
+  const partAtStart = props.part.id;
+  const shouldStart = props.autoStart;
+  const shouldResume = props.resume !== false;
+  emit('playing', false);
   playbackController.abort();
   playbackController = new AbortController();
   rejectMediaLoad?.(new Error('播放内容已切换'));
@@ -383,6 +403,9 @@ async function setup() {
   subtitle.value = '';
   playback.value = null;
   recoveries = 0;
+  renewing = false;
+  switching.value = false;
+  runtimeStats.value = emptyRuntimeStats();
   await saveProgress();
   if (key !== request) return;
   closeSettings();
@@ -398,12 +421,14 @@ async function setup() {
   try {
     const data = await createPlayback(
       {
-        part_id: props.part.id,
+        part_id: partAtStart,
         variant_id: variantId.value || undefined,
         route_id: routeId.value || undefined,
       },
       playbackController.signal,
-      (value) => (probing.value = value),
+      (value) => {
+        if (key === request) probing.value = value;
+      },
     );
     if (key !== request) return;
     if (typeof data.url !== 'string' || !data.url) throw new Error('此分 P 尚无有效的播放地址');
@@ -411,7 +436,9 @@ async function setup() {
     variantId.value = data.source_variant_id || data.variant_id || '';
     let danmaku: Danmaku[] = [];
     try {
-      danmaku = await api<Danmaku[]>(`/parts/${props.part.id}/danmaku`);
+      danmaku = await api<Danmaku[]>(`/parts/${partAtStart}/danmaku`, {
+        signal: playbackController.signal,
+      });
       if (key !== request) return;
       dmCount.value = danmaku.length;
     } catch (e) {
@@ -435,7 +462,7 @@ async function setup() {
               ? d.color
               : '#ffffff',
       }));
-    activePartId = props.part.id;
+    activePartId = partAtStart;
     // Renewal is bounded here, so disable the player's separate reconnect loop.
     Artplayer.RECONNECT_TIME_MAX = 0;
     art = new Artplayer({
@@ -498,36 +525,90 @@ async function setup() {
       if (art) playbackRate.value = art.playbackRate;
     });
     art.on('ready', async () => {
+      if (key !== request || !art) return;
+      const player = art;
       applyPreferences();
       setRate(playbackRate.value);
-      if (!session.user) return;
-      try {
-        const progress = await api<{ position: number }>(`/progress/${props.part.id}`);
-        if (key === request && art && progress.position > 0 && progress.position < art.duration - 3)
-          art.currentTime = progress.position;
-      } catch {
-        /* Missing progress does not block playback. */
+      if (session.user && shouldResume) {
+        try {
+          const progress = await api<{ position: number }>(`/progress/${partAtStart}`, {
+            signal: playbackController.signal,
+          });
+          if (
+            key === request &&
+            player === art &&
+            player.video.paused &&
+            player.currentTime < 1 &&
+            progress.position > 0 &&
+            progress.position < player.duration - 3
+          )
+            player.currentTime = progress.position;
+        } catch {
+          /* Missing progress does not block playback. */
+        }
+      }
+      if (shouldStart && key === request && player === art) {
+        try {
+          await player.play();
+        } catch {
+          if (key === request) note.value = '浏览器暂未允许自动播放，请点击播放继续。';
+        }
       }
     });
-    art.on('video:pause', saveProgress);
+    art.on('video:ended', () => {
+      if (key === request && art && endGuard.consume(endKey, art.video.ended)) {
+        emit('playing', false);
+        void saveProgress();
+        emit('ended', partAtStart);
+      }
+    });
+    art.on('video:playing', () => {
+      if (key === request) emit('playing', true);
+    });
+    art.on('video:waiting', () => {
+      if (key === request) emit('playing', false);
+    });
+    art.on('video:pause', () => {
+      if (key !== request) return;
+      emit('playing', false);
+      void saveProgress();
+    });
     art.on('video:timeupdate', () => {
+      if (key !== request || !art) return;
+      endGuard.rearm(endKey, art.currentTime, art.duration, art.video.ended);
       if (Date.now() - lastSaved > 15000) {
         lastSaved = Date.now();
         void saveProgress();
       }
     });
-    art.on('video:error', () =>
+    art.on('video:error', () => {
+      if (key !== request) return;
+      emit('playing', false);
       handleMediaFailure(
         art?.video.error?.code === 3 ? 'media' : 'network',
         '当前浏览器无法解码此归档版本，可手动选择已保存的兼容版本。',
-      ),
-    );
+      );
+    });
   } catch (e) {
     if (key === request) error.value = errorText(e);
   } finally {
     if (key === request) busy.value = false;
   }
 }
+async function replay() {
+  const player = art;
+  if (!player) return;
+  player.currentTime = 0;
+  try {
+    await player.play();
+  } catch {
+    if (art === player) note.value = '请点击播放继续。';
+  }
+}
+defineExpose({
+  replay,
+  isEnded: (partId: string) => activePartId === partId && !!art?.video.ended,
+});
 function selectSubtitle() {
   if (!art) return;
   if (!subtitle.value) {
@@ -555,6 +636,7 @@ onMounted(() => {
   });
 });
 onBeforeUnmount(() => {
+  emit('playing', false);
   screenQuery?.removeEventListener('change', screenChanged);
   closeSettings();
   request++;
@@ -633,6 +715,7 @@ onBeforeUnmount(() => {
               :volume="userVolume"
               :fit="fit"
               :media-properties="mediaProperties"
+              :runtime-stats="runtimeStats"
               @variant="selectVariant"
               @route="selectRoute"
               @balance="volumeBalance = $event"

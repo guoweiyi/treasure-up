@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import type { VideoDetail } from '../player/mediaInfo';
+import { computed } from 'vue';
+import { playlistQuery, type PlaylistScope } from '../player/queue';
 import { duration, statusText } from '../api';
 import { count, shortDate } from '../utils/format';
 import UiIcon from './UiIcon.vue';
-defineProps<{ video: VideoDetail }>();
+const props = defineProps<{ video: VideoDetail; playlist?: PlaylistScope | null }>();
+const destination = computed(() => ({
+  path: `/videos/${props.video.id}`,
+  query: playlistQuery(props.playlist || null),
+}));
 </script>
 <template>
   <article class="video-card">
-    <RouterLink :to="`/videos/${video.id}`" class="cover-link"
+    <RouterLink :to="destination" class="cover-link"
       ><img
         v-if="video.cover_url"
         :src="video.cover_url"
@@ -29,7 +35,12 @@ defineProps<{ video: VideoDetail }>();
       <span class="duration">{{ duration(video.duration) }}</span
       ><span v-if="!video.playable" class="cover-state">{{ statusText(video.capture_status) }}</span
       ><span v-if="video.starred" class="card-star" aria-label="已星标">★</span></RouterLink
-    ><RouterLink :to="`/videos/${video.id}`" class="video-title">{{ video.title }}</RouterLink>
+    ><RouterLink :to="destination" class="video-title">{{ video.title }}</RouterLink>
+    <div v-if="video.content_features" class="media-feature-badges card-features">
+      <span v-if="video.content_features.charging_exclusive">充电专属</span
+      ><span v-if="video.content_features.dolby_vision">Dolby Vision</span
+      ><span v-if="video.content_features.dolby_atmos">Dolby Atmos</span>
+    </div>
     <div class="video-byline">
       <RouterLink v-if="video.creators?.length" :to="`/creators/${video.creators[0]!.id}`"
         ><span class="up-label">UP</span>{{ video.creators[0]!.name }}</RouterLink

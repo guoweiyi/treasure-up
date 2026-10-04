@@ -5,13 +5,7 @@ defineProps<{ value: Row }>();
 </script>
 <template>
   <div class="form-two-columns">
-    <el-form-item label="请求最小间隔（秒）"
-      ><el-input-number
-        v-model="value.request_interval_seconds"
-        :min="1"
-        :max="120"
-        :step="0.1" /></el-form-item
-    ><el-form-item label="视频之间的间隔（秒）"
+    <el-form-item label="视频之间的间隔（秒）"
       ><el-input-number
         v-model="value.video_interval_seconds"
         :min="10"

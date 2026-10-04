@@ -143,7 +143,11 @@ def run_job_id(job_id: str):
         # Covers commits made inside ingestion and backup modules as well as jobs.py.
         event.listen(db, "before_commit", guard_commit)
         try:
-            if job.kind == "backup":
+            from app.library_deletion import check_job_allowed, run_deletion
+            check_job_allowed(db, job)
+            if job.kind in {"delete_video", "delete_creator"}:
+                result = run_deletion(db, job)
+            elif job.kind == "backup":
                 from app.backup import create_backup
                 backup = create_backup(db, check_active=lambda: ensure_active(db, job_id, owner))
                 result = {"backup_id": backup.id, "status": backup.status}
@@ -326,10 +330,14 @@ def recover_and_dispatch(db, send):
         if job.status == "queued":
             db.add(OutboxEvent(job_id=job.id))
     db.commit()
-    # Republish queued work even after Redis was emptied. A conditional DB claim rejects duplicates.
+    # New continuation/retry events obey available_at without the lost-message
+    # fallback delay. A conditional DB claim rejects duplicate delivery hints.
     last_publication = select(func.max(OutboxEvent.published_at)).where(OutboxEvent.job_id == Job.id).correlate(Job).scalar_subquery()
+    unpublished = select(OutboxEvent.id).where(OutboxEvent.job_id == Job.id,
+                                             OutboxEvent.published_at.is_(None)).correlate(Job).exists()
     eligible = select(Job).where(Job.status == "queued", Job.available_at <= now,
-                                or_(last_publication.is_(None), last_publication <= now - timedelta(seconds=60)))
+                                or_(unpublished, last_publication.is_(None),
+                                    last_publication <= now - timedelta(seconds=60)))
     for job in db.scalars(eligible.order_by(Job.available_at, Job.created_at, Job.id).limit(100)):
         send(job.id, job.kind)
         pending = db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job.id, OutboxEvent.published_at.is_(None))).all()

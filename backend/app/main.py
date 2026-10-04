@@ -16,6 +16,7 @@ from app import catalog, schemas
 from app.config import settings
 from app.db import get_db
 from app.jobs import enqueue
+from app.source_labels import display_source_title
 from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, Collection, CollectionItem, Comment, Creator,
                         DanmakuSnapshot, Job, MediaVariant, OutboxEvent, PlatformUser, Setting,
                         SourceAccount, SourceSubscription, StorageProfile, SubtitleTrack, User, UserSession,
@@ -173,6 +174,33 @@ def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_
 def video(video_id: str, identity=Depends(optional_identity), db: Session = Depends(get_db)):
     result = catalog.video_view(db, required(db, Video, video_id), detail=True)
     catalog.personalize_videos(db, [result], identity)
+    return result
+
+
+@app.get(P + "/playlists")
+def playlist(collection_id: str = "", creator_id: str = "", page: int = Query(1, ge=1),
+             page_size: int = Query(100, ge=1, le=100), identity=Depends(optional_identity), db: Session = Depends(get_db)):
+    if bool(collection_id) == bool(creator_id):
+        raise HTTPException(422, "请选择一个收藏夹或 UP 主")
+    playable = select(MediaVariant.id).join(VideoPart, VideoPart.id == MediaVariant.part_id).where(VideoPart.video_id == Video.id).exists()
+    stmt = select(Video).where(playable)
+    if collection_id:
+        collection = required(db, Collection, collection_id)
+        # A source can mention the same archived video more than once. Rank it
+        # once by its first source position, then paginate deterministically.
+        members = (select(CollectionItem.video_id, func.min(CollectionItem.position).label("position"))
+                   .where(CollectionItem.collection_id == collection_id, CollectionItem.video_id.is_not(None))
+                   .group_by(CollectionItem.video_id).subquery())
+        stmt = stmt.join(members, members.c.video_id == Video.id).order_by(members.c.position, Video.id)
+        title = display_source_title(collection)
+    else:
+        creator = required(db, Creator, creator_id)
+        stmt = stmt.where(Video.id.in_(select(VideoCreator.video_id).where(VideoCreator.creator_id == creator_id)))
+        stmt = stmt.order_by(Video.published_at.desc().nullslast(), Video.id)
+        title = catalog.creator_view(db, creator)["name"]
+    result = catalog.page(db, stmt, page, page_size, batch_mapper=catalog.video_views)
+    catalog.personalize_videos(db, result["items"], identity)
+    result["scope_title"] = title
     return result
 
 
@@ -355,7 +383,7 @@ def update_account(account_id: str, body: schemas.AccountUpdate, user=Depends(re
             audit(db, user, "update_credentials" if body.cookie else "rename", "source_account", account.id)
             commit(db)
     except IngestDeferred:
-        raise HTTPException(409, "该账号正在采集，请暂停相关任务并等待停止后更新凭据") from None
+        raise HTTPException(409, "账号凭据正在更新，请稍后重试") from None
     return account_view(account)
 
 
@@ -786,3 +814,5 @@ from app.passkeys import router as passkeys_router
 app.include_router(passkeys_router)
 from app.source_discovery import router as source_discovery_router
 app.include_router(source_discovery_router)
+from app.library_deletion import router as library_deletion_router
+app.include_router(library_deletion_router)

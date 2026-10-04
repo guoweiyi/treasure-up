@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ElFormItem, ElInputNumber, ElOption, ElSelect } from 'element-plus';
 import type { Row } from '../../types';
+import CommentBudgetFields from './CommentBudgetFields.vue';
 defineProps<{ value: Row }>();
 const booleans = [
   ['download_media', '下载视频原档'],
@@ -14,7 +15,6 @@ const booleans = [
   ['prefer_dolby_atmos', '优先杜比全景声'],
 ] as const;
 const numbers = [
-  { key: 'request_interval_seconds', label: '请求间隔（秒）', min: 1, max: 120 },
   { key: 'video_interval_seconds', label: '视频间隔（秒）', min: 10, max: 3600 },
   { key: 'interval_jitter_seconds', label: '随机延迟上限（秒）', min: 0, max: 300 },
   { key: 'risk_cooldown_seconds', label: '风险冷却（秒）', min: 60, max: 86400 },
@@ -45,6 +45,7 @@ const numbers = [
             label="关闭" /></el-select
       ></el-form-item>
     </div>
+    <CommentBudgetFields :value="value" inherit />
     <details>
       <summary>请求与下载限制</summary>
       <div class="form-two-columns">

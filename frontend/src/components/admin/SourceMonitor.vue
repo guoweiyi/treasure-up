@@ -6,6 +6,8 @@ import { api, write, date, errorText } from '../../api';
 import type { Page, Row } from '../../types';
 import { createScopedInterval } from '../../utils/scopedInterval';
 import SourcePicker from './SourcePicker.vue';
+import CommentBudgetFields from './CommentBudgetFields.vue';
+import { commentBudgetDefaults } from '../../utils/commentBudget';
 
 const route = useRoute();
 const items = ref<Row[]>([]),
@@ -44,6 +46,7 @@ const reasons: Record<string, string> = {
   risk_control: '来源触发风控，等待冷却',
 };
 const defaults = {
+  ...commentBudgetDefaults,
   initial_strategy: 'all',
   initial_limit: 100,
   incremental_pages: 3,
@@ -387,6 +390,7 @@ onBeforeUnmount(() => {
             ><label><input v-model="form.policy.fetch_subtitles" type="checkbox" /> 字幕</label>
           </div>
         </fieldset>
+        <CommentBudgetFields :value="form.policy" />
         <details>
           <summary>画质与检查策略</summary>
           <div class="source-grid">
@@ -414,14 +418,6 @@ onBeforeUnmount(() => {
                 type="number"
                 min="1"
                 max="100"
-                required /></label
-            ><label
-              >请求最小间隔（秒）<input
-                v-model.number="form.policy.request_interval_seconds"
-                type="number"
-                min="1"
-                max="120"
-                step="0.1"
                 required /></label
             ><label
               >视频间隔（秒）<input

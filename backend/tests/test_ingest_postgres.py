@@ -83,7 +83,7 @@ def test_stats_resume_and_pacing_do_not_lock_out_heartbeat(postgres_workspace, m
     with space.sessions() as db:
         assert db.scalar(select(func.count()).select_from(VideoStatSnapshot)) == 1
         assert db.get(Video, video.id).capture_status == "complete"
-    assert len(views) == 1 and segments == [1, 2] and len(heartbeat_checks) >= 10
+    assert len(views) == 1 and segments == [1, 2] and len(heartbeat_checks) >= 6
 
 
 def test_media_transfer_releases_account_for_a_second_worker(postgres_workspace, monkeypatch):
@@ -128,7 +128,7 @@ def test_media_transfer_releases_account_for_a_second_worker(postgres_workspace,
         assert db.get(Job, download_id).checkpoint["part_ids"] == [part.id]
 
 
-def test_account_interval_wait_does_not_hold_postgres_advisory_lock(postgres_workspace):
+def test_http_does_not_hold_credential_mutex_or_wait_for_legacy_interval(postgres_workspace):
     import hashlib
     from types import SimpleNamespace
     space = postgres_workspace
@@ -156,9 +156,9 @@ def test_account_interval_wait_does_not_hold_postgres_advisory_lock(postgres_wor
         with runner.account_request_scope(db, account, client, pacer,
                 "https://api.bilibili.com/x/web-interface/nav", decryptor=lambda _: "SESSDATA=fixture"):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                assert not pool.submit(probe).result(timeout=5)
+                assert pool.submit(probe).result(timeout=5)
             pacer.before_request("https://api.bilibili.com/x/web-interface/nav")
-        assert sum(waits) == 2 and probe()
+        assert not waits and probe()
 
 
 def test_rejection_persists_cooldown_without_committing_capture_or_reacquiring_http_lock(postgres_workspace):
@@ -193,3 +193,70 @@ def test_rejection_persists_cooldown_without_committing_capture_or_reacquiring_h
         finally:
             event.remove(db, "before_commit", forbid_caller_commit)
             db.rollback()
+
+
+def test_ordinary_api_requests_can_overlap_after_short_credential_snapshots(postgres_workspace):
+    import threading
+    import httpx
+    from app.ingest.client import BiliClient
+    space = postgres_workspace
+    with space.sessions() as db:
+        account = SourceAccount(name="fixture", secret_encrypted="fixture", status="valid",
+            next_request_at=utcnow() + timedelta(hours=1))
+        db.add(account); db.commit()
+        account_id = account.id
+    arrived = threading.Barrier(2)
+    def request():
+        with space.sessions() as db:
+            account = db.get(SourceAccount, account_id)
+            def transport(incoming):
+                assert incoming.headers["cookie"] == "SESSDATA=fixture"
+                # Both real HTTP scopes must enter before either can finish.
+                arrived.wait(timeout=5)
+                return httpx.Response(200, json={"code": 0, "data": {"isLogin": True, "mid": "123"}})
+            client = BiliClient("SESSDATA=fixture", transport=httpx.MockTransport(transport))
+            pacer = AccountPacer(db, account, {"request_interval_seconds": 120}, lambda: None,
+                sleep=lambda _: pytest.fail("ordinary APIs must not wait on the legacy request interval"))
+            client.before_request = pacer.before_request
+            client.request_context = lambda url: runner.account_request_scope(db, account, client, pacer, url,
+                decryptor=lambda _: "SESSDATA=fixture")
+            try:
+                return client.nav()["mid"]
+            finally:
+                client.close()
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        tasks = [workers.submit(request) for _ in range(2)]
+        assert [task.result(timeout=10) for task in tasks] == ["123", "123"]
+
+
+@pytest.mark.parametrize("old_result", ["success", "expired"])
+def test_cookie_rotation_during_http_cannot_overwrite_new_account_in_postgres(postgres_workspace, monkeypatch, old_result):
+    import httpx
+    from app.ingest.client import BiliClient
+    space = postgres_workspace
+    with space.sessions() as db:
+        account = SourceAccount(name="old", secret_encrypted="old-cipher", status="valid", uid="123")
+        db.add(account); db.flush()
+        job = jobs.enqueue(db, "verify_account", account.id, account.id)
+        db.commit()
+        account_id, job_id = account.id, job.id
+    def rotate():
+        with space.sessions() as db:
+            with runner.credential_lock(db, account_id):
+                account = db.get(SourceAccount, account_id)
+                account.secret_encrypted, account.uid, account.status = "new-cipher", "999", "valid"
+                db.commit()
+    def transport(incoming):
+        assert incoming.headers["cookie"] == "SESSDATA=old"
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(rotate).result(timeout=5)
+        return httpx.Response(200, json={"code": 0 if old_result == "success" else -101,
+            "data": {"isLogin": True, "mid": "123"} if old_result == "success" else None})
+    monkeypatch.setattr(runner, "decrypt_secret", lambda _: "SESSDATA=old")
+    monkeypatch.setattr(runner, "BiliClient", lambda secret, **kwargs: BiliClient(secret,
+        transport=httpx.MockTransport(transport), **kwargs))
+    assert jobs.run_job_id(job_id)["status"] == "queued"
+    with space.sessions() as db:
+        account, job = db.get(SourceAccount, account_id), db.get(Job, job_id)
+        assert (account.uid, account.status, account.risk_failures) == ("999", "valid", 0)
+        assert job.attempts == 0

@@ -144,7 +144,12 @@ watch(() => route.fullPath, load, { immediate: true });
     >
     <div v-else-if="busy" class="loading-block" role="status">正在加载…</div>
     <div v-else-if="items.length" class="video-grid">
-      <VideoCard v-for="video in items" :key="video.id" :video="video" />
+      <VideoCard
+        v-for="video in items"
+        :key="video.id"
+        :video="video"
+        :playlist="collection ? { type: 'collection', id: collection } : undefined"
+      />
     </div>
     <EmptyState
       v-else

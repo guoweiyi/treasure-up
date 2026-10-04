@@ -17,6 +17,8 @@ import {
 import { api, write, errorText, loadDisplaySettings } from '../../api';
 import type { Row, Page } from '../../types';
 import IngestThrottleFields from './IngestThrottleFields.vue';
+import CommentBudgetFields from './CommentBudgetFields.vue';
+import { commentBudgetDefaults } from '../../utils/commentBudget';
 const busy = ref(false),
   saving = ref(false),
   error = ref(''),
@@ -26,6 +28,7 @@ const busy = ref(false),
 const form = reactive<Row>({
   display: { site_name: 'Treasure Up', default_danmaku: true },
   ingest: {
+    ...commentBudgetDefaults,
     quality: 'best',
     create_compatible_copy: true,
     prefer_h264: false,
@@ -187,6 +190,7 @@ onMounted(load);
         以账号实际可见的源版本为准。杜比偏好用于保存对应原档，不代表当前浏览器具备解码能力。兼容副本保留原档并增加处理时间和空间占用；暂不支持的
         HDR 转换会记录具体状态。
       </p>
+      <CommentBudgetFields :value="form.ingest" />
     </section>
     <section class="admin-panel">
       <h2>采集节奏</h2>

@@ -30,7 +30,7 @@
 }
 .collection-chips button.selected {
   color: var(--accent);
-  background: #e6f7fd;
+  background: var(--accent-soft);
 }
 .library-tools {
   display: flex;
@@ -58,7 +58,7 @@
   position: relative;
   aspect-ratio: 16/9;
   background: #f1f2f3;
-  border-radius: 6px;
+  border-radius: 9px;
   overflow: hidden;
 }
 .cover-link > img {
@@ -66,6 +66,15 @@
   height: 100%;
   object-fit: cover;
   display: block;
+  transition: transform 0.2s ease;
+}
+.cover-link:hover > img {
+  transform: scale(1.025);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cover-link > img {
+    transition: none;
+  }
 }
 .cover-placeholder {
   height: 100%;
@@ -136,9 +145,9 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: 15px;
-  font-weight: 400;
-  line-height: 1.5;
-  margin: 9px 0 6px;
+  font-weight: 500;
+  line-height: 1.6;
+  margin: 10px 0 7px;
   overflow-wrap: anywhere;
 }
 .video-byline {
@@ -166,7 +175,10 @@
   display: flex;
   gap: 18px;
   padding: 24px 0;
-  border-bottom: 1px solid #f1f2f3;
+  border-bottom: 1px solid var(--border);
+}
+.creator-card:hover h2 {
+  color: var(--accent);
 }
 .creator-card > div {
   min-width: 0;
@@ -270,9 +282,13 @@
   display: flex;
   gap: 18px;
   align-items: center;
-  padding: 24px;
+  padding: 20px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 9px;
+}
+.collection-card:hover {
+  border-color: #b9d4cb;
+  background: #fafcfb;
 }
 .collection-card > div:not(.folder-icon) {
   min-width: 0;
@@ -288,8 +304,8 @@
 }
 .folder-icon {
   font-size: 30px;
-  color: #00a1d6;
-  background: #f1f8fb;
+  color: var(--accent);
+  background: var(--accent-soft);
   border-radius: 6px;
   width: 54px;
   height: 54px;

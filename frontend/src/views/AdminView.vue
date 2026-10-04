@@ -32,6 +32,10 @@ import StorageFields from '../components/admin/StorageFields.vue';
 import OperationResult from '../components/admin/OperationResult.vue';
 import JobDetails from '../components/admin/JobDetails.vue';
 import IngestPolicyFields from '../components/admin/IngestPolicyFields.vue';
+import VideoEditorFields from '../components/admin/VideoEditorFields.vue';
+import DeletionDialog from '../components/admin/DeletionDialog.vue';
+import UiIcon from '../components/UiIcon.vue';
+import { videoEditorDraft, videoEditorPayload } from '../utils/videoEditor';
 import { storageDraft, storagePayload, storageKindName } from '../utils/storageForm';
 import { jobNames, jobPhase } from '../utils/jobDisplay';
 import { createScopedInterval } from '../utils/scopedInterval';
@@ -41,7 +45,7 @@ const sections = [
   { id: 'accounts', name: 'B 站账号', group: '采集' },
   { id: 'sources', name: '自动备份', group: '采集' },
   { id: 'jobs', name: '任务中心', group: '采集' },
-  { id: 'videos', name: '视频标注', group: '内容' },
+  { id: 'videos', name: '视频资料', group: '内容' },
   { id: 'creators', name: 'UP 主整理', group: '内容' },
   { id: 'storage', name: '存储位置', group: '维护' },
   { id: 'replicas', name: '副本与分发', group: '维护' },
@@ -63,12 +67,12 @@ const descriptions: Record<string, string> = {
   overview: '查看归档运行状态与最近任务。',
   accounts: '授权账号仅用于后台采集，凭据不会返回浏览器。',
   sources: '关注 UP 主的新投稿和收藏夹更新。',
-  jobs: '查看实际进度、错误原因和可恢复的检查点。',
-  videos: '本地标注与来源信息分开保存，后续同步保留你的整理。',
-  creators: '整理 UP 主的别名、简介、笔记和标签。',
+  jobs: '下载、同步与整理进度。',
+  videos: '整理标题、封面与标签。',
+  creators: '管理已保存的 UP 主与投稿。',
   storage: '配置本地、S3 或原生 OSS。切换默认位置不自动移动已有文件。',
-  replicas: '查看视频在各节点的副本，准备原码流分片，执行同步、停用与恢复。',
-  backups: '记录真实备份任务。已完成的备份不等于已经通过恢复演练。',
+  replicas: '管理各个存储位置的视频副本。',
+  backups: '查看备份记录与恢复验证结果。',
   settings: '展示设置、采集默认策略与独立备份目录。',
   users: '本站账号与 B 站采集账号相互独立。',
   audit: '查看本站记录的管理操作。',
@@ -83,6 +87,8 @@ const rows = ref<Row[]>([]),
   actionBusy = ref(''),
   overview = ref<Row | null>(null),
   feedback = ref<Row | null>(null);
+const savedVideo = ref('');
+const deletionTarget = ref<{ kind: 'videos' | 'creators'; id: string } | null>(null);
 const statuses = [
   'queued',
   'running',
@@ -107,6 +113,7 @@ const dialog = ref(false),
   targets = ref<Row[]>([]);
 const settingsRevision = ref(0);
 let sequence = 0;
+let editorSequence = 0;
 const endpoint = computed(() =>
   ['videos', 'creators'].includes(section.value) ? `/${section.value}` : `/admin/${section.value}`,
 );
@@ -178,16 +185,19 @@ function tags(value: string) {
   ];
 }
 function resetForm() {
+  editorSequence++;
   Object.keys(form).forEach((k) => delete form[k]);
   formError.value = '';
   storageForm.value.credentials = {};
 }
 async function openEditor(kind = section.value, row?: Row) {
   resetForm();
+  const editorTicket = editorSequence;
   editId.value = row?.id || '';
   dialogKind.value = kind;
-  dialogTitle.value = `${row ? '编辑' : '添加'}${({ accounts: 'B 站账号', sources: '收藏来源', jobs: '任务', storage: '存储位置', users: '本站用户', videos: '视频标注', creators: 'UP 主资料' } as Row)[kind] || ''}`;
+  dialogTitle.value = `${row ? '编辑' : '添加'}${({ accounts: 'B 站账号', sources: '收藏来源', jobs: '任务', storage: '存储位置', users: '本站用户', videos: '视频资料', creators: 'UP 主资料' } as Row)[kind] || ''}`;
   if (['accounts', 'sources', 'jobs', 'storage', 'users'].includes(kind)) await loadChoices();
+  if (editorTicket !== editorSequence) return;
   if (kind === 'accounts') Object.assign(form, { name: row?.name || '', cookie: '' });
   if (kind === 'sources')
     Object.assign(form, {
@@ -216,22 +226,17 @@ async function openEditor(kind = section.value, row?: Row) {
   if (kind === 'videos') {
     try {
       const d = await api<Row>(`/videos/${row!.id}`);
-      Object.assign(form, {
-        source_title: d.source_title || d.title,
-        source_description: d.source_description || '',
-        title_override: d.title_override ?? (d.source_title !== d.title ? d.title : ''),
-        description_override: d.description_override ?? '',
-        notes: d.notes || '',
-        tags_text: (d.tags || []).join('，'),
-      });
+      if (editorTicket !== editorSequence) return;
+      Object.assign(form, videoEditorDraft(d));
     } catch (e) {
-      ElMessage.error(errorText(e));
+      if (editorTicket === editorSequence) ElMessage.error(errorText(e));
       return;
     }
   }
   if (kind === 'creators') {
     try {
       const d = await api<Row>(`/creators/${row!.id}`);
+      if (editorTicket !== editorSequence) return;
       Object.assign(form, {
         source_name: d.source_name,
         alias: d.alias ?? (d.source_name !== d.name ? d.name : ''),
@@ -240,11 +245,11 @@ async function openEditor(kind = section.value, row?: Row) {
         tags_text: (d.tags || []).join('，'),
       });
     } catch (e) {
-      ElMessage.error(errorText(e));
+      if (editorTicket === editorSequence) ElMessage.error(errorText(e));
       return;
     }
   }
-  dialog.value = true;
+  if (editorTicket === editorSequence) dialog.value = true;
 }
 async function loadTargets() {
   targets.value = [];
@@ -302,12 +307,7 @@ async function submit() {
         ? { role: form.role, disabled: form.disabled }
         : { username: form.username.trim(), password: form.password, role: form.role };
     } else if (kind === 'videos')
-      payload = {
-        title_override: form.title_override || null,
-        description_override: form.description_override || null,
-        notes: form.notes,
-        tags: tags(form.tags_text),
-      };
+      payload = videoEditorPayload(form as ReturnType<typeof videoEditorDraft>);
     else if (kind === 'creators')
       payload = {
         alias: form.alias || null,
@@ -337,7 +337,10 @@ async function submit() {
     storageForm.value.credentials = {};
     form.password = '';
     dialog.value = false;
-    ElMessage.success(kind === 'jobs' ? '任务已创建' : '已保存');
+    if (kind === 'videos') savedVideo.value = d.title || form.title;
+    ElMessage.success(
+      kind === 'jobs' ? '任务已创建' : kind === 'videos' ? '视频资料已保存' : '已保存',
+    );
     await load(page.value);
   } catch (e) {
     formError.value = errorText(e);
@@ -397,11 +400,14 @@ watch(
       disposed = true;
     });
     sequence++;
+    editorSequence++;
     rows.value = [];
     q.value = '';
     status.value = '';
     page.value = 1;
     feedback.value = null;
+    savedVideo.value = '';
+    deletionTarget.value = null;
     operationOpen.value = false;
     dialog.value = false;
     await load();
@@ -417,6 +423,7 @@ watch(
 );
 onBeforeUnmount(() => {
   sequence++;
+  editorSequence++;
 });
 </script>
 <template>
@@ -486,6 +493,14 @@ onBeforeUnmount(() => {
           class="mb"
         />
         <template v-if="allowed">
+          <el-alert
+            v-if="section === 'videos' && savedVideo"
+            :title="`已保存《${savedVideo}》的资料`"
+            type="success"
+            show-icon
+            class="mb"
+            @close="savedVideo = ''"
+          />
           <template v-if="section === 'overview'"
             ><div v-if="overview" class="overview-summary">
               <span
@@ -748,8 +763,20 @@ onBeforeUnmount(() => {
               <template v-else-if="section === 'videos'"
                 ><el-table-column label="视频" min-width="290"
                   ><template #default="{ row }"
-                    ><RouterLink :to="`/videos/${row.id}`">{{ row.title }}</RouterLink
-                    ><small class="table-subtitle">{{ row.bvid }}</small></template
+                    ><div class="admin-video-cell">
+                      <img
+                        v-if="row.cover_url"
+                        :src="row.cover_url"
+                        alt=""
+                        loading="lazy"
+                        width="104"
+                        height="59"
+                      />
+                      <div>
+                        <RouterLink :to="`/videos/${row.id}`">{{ row.title }}</RouterLink
+                        ><small class="table-subtitle">{{ row.bvid }}</small>
+                      </div>
+                    </div></template
                   ></el-table-column
                 ><el-table-column label="标签" min-width="130"
                   ><template #default="{ row }">{{
@@ -763,19 +790,42 @@ onBeforeUnmount(() => {
                   ><template #default="{ row }">{{
                     row.starred ? '★' : '—'
                   }}</template></el-table-column
-                ><el-table-column label="操作" width="105"
+                ><el-table-column label="操作" width="156" fixed="right"
                   ><template #default="{ row }"
-                    ><el-button size="small" @click="openEditor('videos', row)"
-                      >编辑标注</el-button
-                    ></template
+                    ><div class="content-row-actions">
+                      <button class="row-action" @click="openEditor('videos', row)">
+                        <UiIcon name="edit" />编辑
+                      </button>
+                      <button
+                        v-if="isAdministrator"
+                        class="row-action row-delete"
+                        :aria-label="`删除视频：${row.title}`"
+                        @click="deletionTarget = { kind: 'videos', id: row.id }"
+                      >
+                        <UiIcon name="trash" />删除
+                      </button>
+                    </div></template
                   ></el-table-column
                 ></template
               >
               <template v-else-if="section === 'creators'"
                 ><el-table-column label="UP 主" min-width="220"
                   ><template #default="{ row }"
-                    ><RouterLink :to="`/creators/${row.id}`">{{ row.name }}</RouterLink
-                    ><small class="table-subtitle">UID {{ row.uid }}</small></template
+                    ><div class="admin-creator-cell">
+                      <img
+                        v-if="row.avatar_url"
+                        :src="row.avatar_url"
+                        alt=""
+                        class="avatar"
+                        loading="lazy"
+                      /><span v-else class="avatar fallback">{{
+                        row.name?.slice(0, 1) || '?'
+                      }}</span>
+                      <div>
+                        <RouterLink :to="`/creators/${row.id}`">{{ row.name }}</RouterLink
+                        ><small class="table-subtitle">UID {{ row.uid }}</small>
+                      </div>
+                    </div></template
                   ></el-table-column
                 ><el-table-column
                   prop="description"
@@ -790,11 +840,21 @@ onBeforeUnmount(() => {
                   ><template #default="{ row }">{{
                     row.tags?.join('、') || '—'
                   }}</template></el-table-column
-                ><el-table-column label="操作" width="100"
+                ><el-table-column label="操作" width="156" fixed="right"
                   ><template #default="{ row }"
-                    ><el-button size="small" @click="openEditor('creators', row)"
-                      >编辑资料</el-button
-                    ></template
+                    ><div class="content-row-actions">
+                      <button class="row-action" @click="openEditor('creators', row)">
+                        <UiIcon name="edit" />编辑
+                      </button>
+                      <button
+                        v-if="isAdministrator"
+                        class="row-action row-delete"
+                        :aria-label="`删除 UP 主：${row.name}`"
+                        @click="deletionTarget = { kind: 'creators', id: row.id }"
+                      >
+                        <UiIcon name="trash" />删除
+                      </button>
+                    </div></template
                   ></el-table-column
                 ></template
               >
@@ -897,10 +957,15 @@ onBeforeUnmount(() => {
       </main>
     </div>
     <OperationResult v-model:open="operationOpen" :job="feedback" @completed="load(page, true)" />
+    <DeletionDialog
+      :target="deletionTarget"
+      @close="deletionTarget = null"
+      @started="showOperation"
+    />
     <el-dialog
       v-model="dialog"
       :title="dialogTitle"
-      width="min(680px, 94vw)"
+      :width="dialogKind === 'videos' ? 'min(760px, 94vw)' : 'min(680px, 94vw)'"
       :close-on-click-modal="!submitting"
       :close-on-press-escape="!submitting"
       @closed="resetForm"
@@ -1025,22 +1090,7 @@ onBeforeUnmount(() => {
               v-model="form.disabled"
               :disabled="editId === session.user?.id" /></el-form-item
         ></template>
-        <template v-if="dialogKind === 'videos'"
-          ><p class="field-help">来源标题：{{ form.source_title }}</p>
-          <el-form-item label="本地标题（留空恢复来源）"
-            ><el-input v-model="form.title_override" /></el-form-item
-          ><el-form-item label="本地简介（留空恢复来源）"
-            ><el-input
-              v-model="form.description_override"
-              type="textarea"
-              :rows="4" /></el-form-item
-          ><el-form-item label="收藏笔记"
-            ><el-input v-model="form.notes" type="textarea" :rows="4" /></el-form-item
-          ><el-form-item label="标签（逗号分隔）"
-            ><el-input v-model="form.tags_text"
-          /></el-form-item>
-          <p class="field-help">个人星标请在视频页设置；这里的标注用于共享资料整理。</p></template
-        >
+        <VideoEditorFields v-if="dialogKind === 'videos'" :value="form" />
         <template v-if="dialogKind === 'creators'"
           ><p class="field-help">平台昵称：{{ form.source_name }}</p>
           <el-form-item label="本地别名（留空恢复来源）"
@@ -1071,3 +1121,27 @@ onBeforeUnmount(() => {
     ></el-config-provider
   >
 </template>
+<style scoped>
+.admin-video-cell {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.admin-video-cell img {
+  flex: 0 0 104px;
+  width: 104px;
+  height: 59px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+.admin-video-cell > div {
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .admin-video-cell img {
+    flex-basis: 72px;
+    width: 72px;
+    height: 41px;
+  }
+}
+</style>

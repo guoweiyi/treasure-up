@@ -103,6 +103,7 @@ export interface Comment {
   like_count: number;
   reply_count: number;
   images: (string | { url?: string; asset_url?: string })[];
+  emotes?: { text: string; asset_url: string }[];
 }
 export interface Danmaku {
   text: string;

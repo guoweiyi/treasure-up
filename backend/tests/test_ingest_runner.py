@@ -52,7 +52,7 @@ def test_account_rotation_is_read_after_acquiring_account_lock(db, monkeypatch):
 
     @contextmanager
     def rotate_before_lock(_db, key):
-        if key == "collector-account:" + account.id:
+        if observed:
             yield
             return
         assert key == "account:" + account.id

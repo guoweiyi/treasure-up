@@ -3,8 +3,10 @@ import { ref, onMounted } from 'vue';
 import { api, errorText, session } from '../api';
 import type { Collection, Page } from '../types';
 import EmptyState from '../components/EmptyState.vue';
+import PlaylistStartButton from '../player/PlaylistStartButton.vue';
 import Pagination from '../components/Pagination.vue';
 import SourceStatus from '../components/SourceStatus.vue';
+import UiIcon from '../components/UiIcon.vue';
 import type { SourceMonitorState } from '../components/source-monitor';
 type MonitoredCollection = Collection & {
   monitor?: SourceMonitorState;
@@ -51,32 +53,29 @@ onMounted(() => load());
     >
     <div v-else-if="busy" class="loading-block">正在加载…</div>
     <div v-else-if="items.length" class="collection-grid">
-      <RouterLink
-        v-for="item in items"
-        :key="item.id"
-        :to="{ path: '/', query: { collection_id: item.id } }"
-        class="collection-card"
-        ><img
-          v-if="item.cover_url"
-          :src="item.cover_url"
-          alt=""
-          class="collection-cover"
-          loading="lazy"
-        />
-        <div v-else class="folder-icon" aria-hidden="true">▤</div>
-        <div>
-          <p class="muted small">{{ kinds[item.kind] || '视频集合' }}</p>
-          <h2>{{ item.title }}</h2>
-          <p class="muted">已保存 {{ item.saved_count }} 条视频</p>
-          <SourceStatus
-            v-if="session.user?.role === 'admin'"
-            :monitor="item.monitor"
-            :last-scan-at="item.last_scan_at"
-            :creator="item.kind === 'creator'"
-          />
-        </div>
-        <span class="collection-arrow">→</span></RouterLink
-      >
+      <article v-for="item in items" :key="item.id" class="collection-with-playlist">
+        <RouterLink :to="{ path: '/', query: { collection_id: item.id } }" class="collection-card"
+          ><img
+            v-if="item.cover_url"
+            :src="item.cover_url"
+            alt=""
+            class="collection-cover"
+            loading="lazy" />
+          <div v-else class="folder-icon" aria-hidden="true"><UiIcon name="folder" /></div>
+          <div>
+            <p class="muted small">{{ kinds[item.kind] || '视频集合' }}</p>
+            <h2>{{ item.title }}</h2>
+            <p class="muted">已保存 {{ item.saved_count }} 条视频</p>
+            <SourceStatus
+              v-if="session.user?.role === 'admin'"
+              :monitor="item.monitor"
+              :last-scan-at="item.last_scan_at"
+              :creator="item.kind === 'creator'"
+            />
+          </div>
+          <span class="collection-arrow"><UiIcon name="arrow" /></span></RouterLink
+        ><PlaylistStartButton :scope="{ type: 'collection', id: item.id }" />
+      </article>
     </div>
     <EmptyState
       v-else
@@ -86,6 +85,12 @@ onMounted(() => load());
   </main>
 </template>
 <style scoped>
+.collection-with-playlist {
+  min-width: 0;
+}
+.collection-with-playlist :deep(.playlist-entry) {
+  padding: 8px 0;
+}
 .collection-cover {
   width: 112px;
   aspect-ratio: 16 / 10;

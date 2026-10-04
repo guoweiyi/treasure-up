@@ -1,43 +1,37 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { api, errorText, date } from '../api';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { api, query, date } from '../api';
 import type { Comment, Page } from '../types';
+import { createCommentFeed, emptyCommentFeed } from '../utils/commentFeed';
+import { commentGalleryImages } from '../utils/commentGallery';
+import CommentContent from './CommentContent.vue';
+import CommentImagePreview from './CommentImagePreview.vue';
 const props = defineProps<{ comment: Comment; videoId: string; reply?: boolean }>();
-const open = ref(false),
-  items = ref<Comment[]>([]),
-  page = ref(0),
-  total = ref(0),
-  error = ref(''),
-  busy = ref(false);
+const open = ref(false);
+const previewIndex = ref<number | null>(null);
+const state = reactive(emptyCommentFeed<Comment>());
+const feed = createCommentFeed<Comment>(state, ({ videoId, ...params }, signal) =>
+  api<Page<Comment>>(`/videos/${videoId}/comments?${query(params)}`, { signal }),
+);
+watch(
+  () => [props.videoId, props.comment.rpid],
+  () => {
+    open.value = false;
+    previewIndex.value = null;
+    void feed.reset({ videoId: props.videoId, root: props.comment.rpid }, false);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(feed.dispose);
 async function expand() {
   if (open.value) {
     open.value = false;
     return;
   }
   open.value = true;
-  if (!page.value) await load();
+  if (!state.page) await feed.more();
 }
-async function load() {
-  if (busy.value) return;
-  busy.value = true;
-  error.value = '';
-  try {
-    const data = await api<Page<Comment>>(
-      `/videos/${props.videoId}/comments?root=${encodeURIComponent(props.comment.rpid)}&page=${page.value + 1}&page_size=20`,
-    );
-    items.value.push(
-      ...data.items.filter((item) => !items.value.some((existing) => existing.id === item.id)),
-    );
-    page.value = data.page;
-    total.value = data.total;
-  } catch (e) {
-    error.value = errorText(e);
-  } finally {
-    busy.value = false;
-  }
-}
-const imageUrl = (image: Comment['images'][number]) =>
-  typeof image === 'string' ? image : image.url || image.asset_url;
+const images = computed(() => commentGalleryImages(props.comment.images));
 </script>
 <template>
   <article class="comment" :class="{ reply }">
@@ -51,15 +45,17 @@ const imageUrl = (image: Comment['images'][number]) =>
       comment.author?.name?.slice(0, 1) || '?'
     }}</span>
     <div class="comment-body">
-      <div class="comment-author">
+      <div
+        class="comment-author"
+        :title="comment.author?.uid ? `UID ${comment.author.uid}` : undefined"
+      >
         <RouterLink
           v-if="comment.author?.creator_id"
           :to="`/creators/${comment.author.creator_id}`"
           >{{ comment.author.name || '未知作者' }}</RouterLink
-        ><span v-else>{{ comment.author?.name || '未知作者' }}</span
-        ><span v-if="comment.author?.uid" class="muted small">UID {{ comment.author.uid }}</span>
+        ><span v-else>{{ comment.author?.name || '未知作者' }}</span>
       </div>
-      <p class="preserve-lines">{{ comment.content }}</p>
+      <CommentContent :content="comment.content" :emotes="comment.emotes" />
       <p
         v-if="
           reply &&
@@ -67,47 +63,237 @@ const imageUrl = (image: Comment['images'][number]) =>
           comment.parent_rpid !== comment.root_rpid &&
           comment.parent_rpid !== '0'
         "
-        class="muted small"
+        class="comment-reply-context"
       >
-        回复评论 #{{ comment.parent_rpid }}
+        回复楼中评论
       </p>
-      <div v-if="comment.images?.length" class="comment-images">
-        <a
-          v-for="(image, index) in comment.images"
-          :key="index"
-          :href="imageUrl(image)"
-          target="_blank"
-          rel="noopener noreferrer"
-          ><img :src="imageUrl(image)" alt="评论附图" loading="lazy"
-        /></a>
+      <div v-if="images.length" class="comment-images">
+        <button
+          v-for="(image, index) in images"
+          :key="image"
+          type="button"
+          class="comment-image-button"
+          :aria-label="`预览评论附图 ${index + 1}`"
+          @click="previewIndex = index"
+        >
+          <img
+            :src="image"
+            alt="评论附图"
+            loading="lazy"
+            decoding="async"
+            width="180"
+            height="140"
+          />
+        </button>
       </div>
       <div class="comment-meta">
-        <time>{{ date(comment.posted_at) }}</time
-        ><span>赞 {{ comment.like_count }}（采集时）</span
-        ><button v-if="!reply && comment.reply_count" class="text-button" @click="expand">
-          {{ open ? '收起回复' : `查看回复（来源记录 ${comment.reply_count} 条）` }}
+        <time :datetime="comment.posted_at || undefined">{{ date(comment.posted_at) }}</time>
+        <span
+          class="comment-likes"
+          title="归档时的点赞数"
+          :aria-label="`归档点赞 ${comment.like_count}`"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M7 10v11H3V10zm0 0 5-7c.5-.7 1.5-.5 1.5.5V9H19a2 2 0 0 1 2 2.4l-1.5 7.8A2 2 0 0 1 17.5 21H7"
+            />
+          </svg>
+          {{ comment.like_count.toLocaleString() }}
+        </span>
+        <button
+          v-if="!reply && comment.reply_count"
+          type="button"
+          class="text-button comment-reply-button"
+          :aria-expanded="open"
+          title="来源记录的回复数；展开查看已保存的内容"
+          @click="expand"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M20 4H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4l4 3v-3h8a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1Z"
+            />
+            <path d="M7 9h10M7 13h6" />
+          </svg>
+          {{ open ? '收起回复' : `${comment.reply_count.toLocaleString()} 条回复` }}
         </button>
       </div>
       <div v-if="open" class="replies">
-        <p v-if="page" class="muted small" style="padding-top: 14px; margin: 0">
-          本站已保存 {{ total }} 条回复
-        </p>
+        <p v-if="state.page" class="saved-reply-count">已保存 {{ state.total }} 条回复</p>
         <CommentThread
-          v-for="item in items"
+          v-for="item in state.items"
           :key="item.id"
           :comment="item"
           :video-id="videoId"
           reply
         />
-        <p v-if="error" class="form-error" role="alert">
-          {{ error }} <button @click="load">重试</button>
+        <p v-if="state.error" class="form-error" role="alert">
+          {{ state.error }} <button type="button" @click="feed.more">重试</button>
         </p>
-        <p v-if="!busy && !items.length && !error" class="muted small">尚未保存这层回复。</p>
-        <button v-if="page * 20 < total" :disabled="busy" @click="load">
-          {{ busy ? '正在加载…' : '加载更多回复' }}
+        <p v-if="!state.loading && !state.items.length && !state.error" class="muted small">
+          尚未保存这层回复。
+        </p>
+        <button
+          v-if="state.hasMore && !state.error"
+          type="button"
+          :disabled="state.loading"
+          @click="feed.more"
+        >
+          {{ state.loading ? '正在加载…' : '加载更多回复' }}
         </button>
-        <p v-else-if="busy" class="muted">正在读取回复…</p>
+        <p v-else-if="state.loading" class="muted">正在读取回复…</p>
       </div>
     </div>
+    <CommentImagePreview
+      v-if="previewIndex !== null"
+      :images="images"
+      :initial-index="previewIndex"
+      @close="previewIndex = null"
+    />
   </article>
 </template>
+<style scoped>
+.comment {
+  gap: 15px;
+  padding: 25px 0;
+  border-bottom-color: #edf0f2;
+}
+.comment-author {
+  min-height: 20px;
+  color: #61666d;
+  font-weight: 500;
+  font-size: 13px;
+}
+.comment-author a {
+  color: inherit;
+  text-decoration: none;
+}
+.comment-author a:hover {
+  color: var(--accent);
+}
+.comment-images {
+  gap: 9px;
+  margin: 12px 0 14px;
+}
+.comment-image-button {
+  display: block;
+  padding: 0;
+  border: 1px solid #edf0f2;
+  background: #f6f7f8;
+  border-radius: 7px;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+.comment-image-button:hover {
+  border-color: #c5cecf;
+  background: #f6f7f8;
+}
+.comment-image-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.comment-image-button img {
+  display: block;
+  width: 156px;
+  height: 124px;
+  max-width: 100%;
+  max-height: none;
+  object-fit: cover;
+  border-radius: 0;
+}
+.comment-meta {
+  gap: 20px;
+  font-size: 12px;
+  line-height: 20px;
+  color: #9499a0;
+}
+.comment-meta time {
+  font-variant-numeric: tabular-nums;
+}
+.comment-likes,
+.comment-reply-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.comment-likes {
+  cursor: default;
+}
+.comment-meta .comment-reply-button {
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font-weight: 400;
+  line-height: 20px;
+  min-height: 0;
+}
+.comment-meta .comment-reply-button:hover {
+  color: var(--accent);
+}
+.comment-body > .comment-reply-context {
+  color: #9499a0;
+  font-size: 12px;
+  margin: 5px 0 8px;
+}
+.replies {
+  padding: 0 14px;
+  margin-top: 15px;
+  background: #f7f8fa;
+  border-radius: 8px;
+}
+.saved-reply-count {
+  margin: 0;
+  padding-top: 12px;
+  color: #9499a0;
+  font-size: 12px;
+}
+.comment.reply {
+  padding: 15px 0;
+  gap: 10px;
+  border-bottom-color: #e9edf0;
+}
+.comment.reply .comment-avatar {
+  width: 30px;
+  height: 30px !important;
+  font-size: 13px !important;
+}
+@media (max-width: 600px) {
+  .comment {
+    gap: 10px;
+    padding: 20px 0;
+  }
+  .comment-meta {
+    gap: 12px;
+    font-size: 11px;
+  }
+  .comment-image-button img {
+    width: 124px;
+    height: 106px;
+  }
+  .comment-image-button {
+    max-width: calc(50% - 5px);
+  }
+  .replies {
+    padding: 0 10px;
+  }
+}
+</style>

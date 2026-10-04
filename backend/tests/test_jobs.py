@@ -160,6 +160,34 @@ def test_failed_broker_send_does_not_mark_outbox_published(job_sessions):
         assert len(sent) == 1
 
 
+def test_new_continuation_event_dispatches_when_due_without_sixty_second_delay(job_sessions, monkeypatch):
+    job_id = new_job(job_sessions)
+    clock = [utcnow() + timedelta(seconds=1)]
+    monkeypatch.setattr(jobs, "utcnow", lambda: clock[0])
+    monkeypatch.setattr("app.ingest.runner.run_job", lambda db, job: {"continuation": True})
+    sent = []
+    with job_sessions() as db:
+        jobs.recover_and_dispatch(db, lambda *message: sent.append(message))
+    assert sent == [(job_id, "archive_video")]
+    assert jobs.run_job_id(job_id)["status"] == "queued"
+    with job_sessions() as db:
+        assert db.scalar(select(func.count()).select_from(OutboxEvent).where(
+            OutboxEvent.job_id == job_id, OutboxEvent.published_at.is_(None))) == 1
+        # The continuation is real, but its two-second availability gate still applies.
+        clock[0] += timedelta(seconds=1)
+        jobs.recover_and_dispatch(db, lambda *message: sent.append(message))
+        assert len(sent) == 1
+        clock[0] += timedelta(seconds=1)
+        jobs.recover_and_dispatch(db, lambda *message: sent.append(message))
+        assert sent == [(job_id, "archive_video"), (job_id, "archive_video")]
+        assert db.scalar(select(func.count()).select_from(OutboxEvent).where(
+            OutboxEvent.job_id == job_id, OutboxEvent.published_at.is_(None))) == 0
+        # Once the new event was published, a queued job is not sent again immediately.
+        clock[0] += timedelta(seconds=1)
+        jobs.recover_and_dispatch(db, lambda *message: sent.append(message))
+        assert len(sent) == 2
+
+
 def test_recently_dispatched_first_page_does_not_starve_later_jobs(job_sessions):
     with job_sessions() as db:
         for index in range(101):
@@ -245,7 +273,10 @@ def test_component_failure_is_not_erased_by_comment_budget_continuation(job_sess
             db.commit()
     assert comments == ["", "cursor-1"] and len(subtitles) == 2
     with job_sessions() as db:
-        assert db.scalar(select(func.count()).select_from(Comment)) == 2
+        # Selection waits for the bounded sample to finish. A failed sibling
+        # component preserves candidates without archiving every scanned row.
+        assert db.scalar(select(func.count()).select_from(Comment)) == 0
+        assert len(db.get(Job, job_id).checkpoint["comments"]["candidates"]) == 2
 
 
 def test_account_cooldown_deferrals_honor_deadline_without_using_failure_budget(job_sessions, monkeypatch):

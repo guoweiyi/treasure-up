@@ -138,7 +138,7 @@ def retry_after(value, now=None):
 
 
 class BiliClient:
-    def __init__(self, cookie_text="", *, interval=1.5, transport=None, sleep=time.sleep):
+    def __init__(self, cookie_text="", *, interval=0, transport=None, sleep=time.sleep):
         self.cookies = parse_cookies(cookie_text) if cookie_text else []
         self.interval = max(0, interval)
         self.sleep = sleep
@@ -149,6 +149,7 @@ class BiliClient:
         self.before_video = None
         self.request_context = lambda url: nullcontext()
         self.last_asset_request = 0
+        self.asset_interval = 0.1
         self.http = httpx.Client(timeout=httpx.Timeout(30, connect=10), follow_redirects=False, transport=transport, headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
 
     def close(self):
@@ -165,7 +166,7 @@ class BiliClient:
         # interval. Keep their serial requests gently paced without per-image
         # multi-second account jitter.
         asset_request = (urlsplit(url).hostname or "").endswith(".hdslb.com")
-        delay = (0.1 if asset_request else self.interval) - (time.monotonic() - (self.last_asset_request if asset_request else self.last_request))
+        delay = (self.asset_interval if asset_request else self.interval) - (time.monotonic() - (self.last_asset_request if asset_request else self.last_request))
         if delay > 0:
             self.sleep(delay)
         if asset_request:
@@ -177,6 +178,8 @@ class BiliClient:
             with self.http.stream("GET", url, params=params, headers=headers) as response:
                 if response.status_code in (403, 412, 429):
                     raise IngestError("源站限流或风控，请稍后恢复任务", code="rate_limited", retry_after_seconds=retry_after(response.headers.get("retry-after")))
+                if asset_request and not authenticated and response.status_code in (404, 410):
+                    raise IngestError("源站图片已不存在", code="asset_not_found", retryable=False)
                 if response.status_code != 200:
                     raise IngestError(f"源站 HTTP 请求失败（{response.status_code}）", code="http_error")
                 output = bytearray()
@@ -237,7 +240,7 @@ class BiliClient:
             "order_avoided": "true", "platform": "web", "web_location": "1550101"}, wbi=True)
 
     def comment_page(self, aid, offset=""):
-        return self.json("/x/v2/reply/wbi/main", {"oid": aid, "type": 1, "mode": 2, "pagination_str": json.dumps({"offset": offset}, separators=(",", ":"))}, wbi=True)
+        return self.json("/x/v2/reply/wbi/main", {"oid": aid, "type": 1, "mode": 3, "pagination_str": json.dumps({"offset": offset}, separators=(",", ":"))}, wbi=True)
 
     def replies_page(self, aid, root, page):
         return self.json("/x/v2/reply/reply", {"oid": aid, "type": 1, "root": root, "pn": page, "ps": 20})
@@ -248,13 +251,33 @@ class BiliClient:
     def player(self, aid, cid):
         return self.json("/x/player/wbi/v2", {"aid": aid, "cid": cid}, wbi=True)
 
+    def playurl(self, bvid, cid):
+        return self.json("/x/player/wbi/playurl", {"bvid": bvid, "cid": cid,
+            "qn": 127, "fnval": 4048, "fnver": 0, "fourk": 1}, wbi=True)
+
     def segment(self, aid, cid, index):
         if self.images is None or time.monotonic() - self.images_at > 30:
             self.nav(allow_anonymous=True)
         params = sign_wbi({"type": 1, "pid": aid, "oid": cid, "segment_index": index}, self.images)
         body, mime = self._request(API + "/x/v2/dm/wbi/web/seg.so", params=params, limit=32 * 1024 * 1024, authenticated=True)
-        if mime in ("text/html", "application/json") or body.lstrip().startswith((b"<", b"{")):
+        if mime == "text/html":
             raise IngestError("弹幕接口返回了错误页面", code="invalid_danmaku")
+        # Protobuf's tag 0x0a is ASCII newline and a valid following length may
+        # be 0x7b ('{'). Whitespace sniffing must never classify those bytes as
+        # JSON without actually decoding the complete response.
+        if mime == "application/json" or body.lstrip().startswith((b"{", b"[")):
+            try:
+                payload = json.loads(body)
+            except (ValueError, UnicodeError):
+                if mime == "application/json":
+                    raise IngestError("弹幕接口返回无效 JSON", code="invalid_danmaku") from None
+            else:
+                code = payload.get("code") if isinstance(payload, dict) else None
+                if code in (-352, -401, -403):
+                    raise IngestError("弹幕源站风控，请稍后恢复", code="rate_limited")
+                if code == -101:
+                    raise IngestError("账号登录已失效", code="login_required", retryable=False)
+                raise IngestError("弹幕接口返回 JSON 错误响应", code="invalid_danmaku")
         return body
 
     def asset(self, url, *, limit=16 * 1024 * 1024):

@@ -82,7 +82,7 @@ def test_admin_required_and_private_responses_not_cached_by_browser(context):
     assert calls == []
 
 
-def test_real_client_waits_between_nav_and_list_without_holding_account_lock(context, monkeypatch):
+def test_real_client_has_no_global_wait_or_account_lock_during_http(context, monkeypatch):
     import httpx
     from app.ingest import runner
     from app.ingest.client import BiliClient
@@ -101,11 +101,10 @@ def test_real_client_waits_between_nav_and_list_without_holding_account_lock(con
         waits.append(seconds)
         clock[0] += timedelta(seconds=seconds)
     def transport(incoming):
-        assert held and incoming.headers.get("cookie") == "SESSDATA=fixture"
+        assert not held and incoming.headers.get("cookie") == "SESSDATA=fixture"
         paths.append(incoming.url.path)
         data = {"isLogin": True, "mid": "123", "uname": "fixture"} if incoming.url.path.endswith("/nav") else {"count": 0, "list": []}
         return httpx.Response(200, json={"code": 0, "data": data})
-    monkeypatch.setattr(discovery, "_lock", lock)
     monkeypatch.setattr(runner, "_lock", lock)
     monkeypatch.setattr(discovery, "decrypt_secret", lambda _: "SESSDATA=fixture")
     monkeypatch.setattr(discovery, "BiliClient", lambda secret, **kwargs: BiliClient(secret, transport=httpx.MockTransport(transport), **kwargs))
@@ -113,7 +112,7 @@ def test_real_client_waits_between_nav_and_list_without_holding_account_lock(con
         AccountPacer(db, account, policy, guard, clock=lambda: clock[0], sleep=sleep, **kwargs))
     assert request(context).status_code == 200
     assert paths == ["/x/web-interface/nav", "/x/v3/fav/folder/created/list-all"]
-    assert sum(waits) == 3 and not held
+    assert not waits and not held
 
 
 @pytest.mark.parametrize("rotation", ["after_nav", "before_list", "after_list"])
@@ -148,16 +147,15 @@ def test_rotation_never_caches_old_identity_or_list_under_new_credentials(contex
         assert not held
         clock[0] += timedelta(seconds=seconds)
     def transport(incoming):
-        assert held
+        assert not held
         nav = incoming.url.path.endswith("/nav")
         identity = "456" if incoming.headers.get("cookie") == "SESSDATA=new" else "123"
         paths.append(("nav" if nav else "list", identity, incoming.url.params.get("up_mid")))
         if not change["done"] and ((rotation == "after_nav" and nav) or (rotation == "after_list" and not nav)):
-            change["pending"] = True
+            rotate()  # A real rotation can complete while HTTP is in flight.
         data = {"isLogin": True, "mid": identity, "uname": "fixture"} if nav else {
             "count": 1, "list": [{"id": 1, "title": "fixture " + identity, "media_count": 0}]}
         return httpx.Response(200, json={"code": 0, "data": data})
-    monkeypatch.setattr(discovery, "_lock", lock)
     monkeypatch.setattr(runner, "_lock", lock)
     monkeypatch.setattr(discovery, "decrypt_secret", lambda value: "SESSDATA=new" if value == "new-ciphertext" else "SESSDATA=old")
     monkeypatch.setattr(discovery, "BiliClient", lambda secret, **kwargs: BiliClient(secret, transport=httpx.MockTransport(transport), **kwargs))
@@ -174,6 +172,27 @@ def test_rotation_never_caches_old_identity_or_list_under_new_credentials(contex
     assert response.status_code == 200 and response.json()["items"][0]["title"] == "fixture 456"
     assert paths[-1] == ("list", "456", "456")
     assert not any(path == "list" and identity == "456" and uid == "123" for path, identity, uid in paths)
+
+
+def test_old_login_failure_does_not_invalidate_rotated_credentials(context, monkeypatch):
+    import httpx
+    from app.ingest.client import BiliClient
+    _, db, account, *_ = context
+    def transport(incoming):
+        assert incoming.headers["cookie"] == "SESSDATA=old"
+        db.execute(update(SourceAccount).where(SourceAccount.id == account.id)
+            .values(secret_encrypted="rotated", uid="999", status="valid")
+            .execution_options(synchronize_session=False))
+        db.commit()
+        return httpx.Response(200, json={"code": -101, "data": None})
+    monkeypatch.setattr(discovery, "decrypt_secret", lambda _: "SESSDATA=old")
+    monkeypatch.setattr(discovery, "BiliClient", lambda secret, **kwargs: BiliClient(secret,
+        transport=httpx.MockTransport(transport), **kwargs))
+    response = request(context)
+    assert response.status_code == 429 and response.headers["X-Source-Error"] == "account_changed"
+    db.refresh(account)
+    assert account.uid == "999" and account.status == "valid" and account.risk_failures == 0
+    assert not discovery._cache
 
 
 def test_created_all_is_cached_then_sliced_and_deduplicated(context):
@@ -233,7 +252,8 @@ def test_account_reload_under_worker_mutex_precedes_decryption(context, monkeypa
                          .execution_options(synchronize_session=False))
         database.commit()
         yield
-    monkeypatch.setattr(discovery, "_lock", rotate)
+    from app.ingest import runner
+    monkeypatch.setattr(runner, "_lock", rotate)
     monkeypatch.setattr(discovery, "decrypt_secret", lambda value: observed.append(value) or "mock-cookie")
     assert request(context).status_code == 200
     assert observed == ["rotated"]
@@ -256,25 +276,11 @@ def test_nav_failure_is_safe_closes_client_and_observes_cooldown(context, code, 
         assert len(calls) == 1
 
 
-def test_long_configured_pacing_defers_without_repeating_nav_or_bypassing_deadline(context, monkeypatch):
+def test_legacy_long_pacing_does_not_delay_ordinary_source_requests(context, monkeypatch):
     _, db, account, _, calls, _, _ = context
-    base = discovery.BiliClient
-    class PacedClient(base):
-        def nav(self):
-            self.before_request()
-            return super().nav()
-        def json(self, path, params):
-            self.before_request()
-            return super().json(path, params)
-    monkeypatch.setattr(discovery, "BiliClient", PacedClient)
-    db.add(Setting(key="ingest", value={"request_interval_seconds": 60})); db.commit()
-    response = request(context)
-    assert response.status_code == 429 and response.headers["X-Source-Error"] == "account_cooldown"
-    assert [path for path, _ in calls] == ["nav"]
-    assert request(context).status_code == 429
-    assert len(calls) == 1
-    # Simulate elapsed time; do not sleep or contact any source.
-    account.next_request_at = utcnow() - timedelta(seconds=1); db.commit()
+    db.add(Setting(key="ingest", value={"request_interval_seconds": 60}))
+    account.next_request_at = utcnow() + timedelta(hours=1)
+    db.commit()
     assert request(context).status_code == 200
     assert [path for path, _ in calls] == ["nav", "/x/v3/fav/folder/created/list-all"]
 

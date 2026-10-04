@@ -2,6 +2,8 @@ type Row = Record<string, any>;
 export const jobNames: Record<string, string> = {
   scan_collection: '检查备份来源',
   archive_video: '归档视频资料',
+  delete_video: '删除视频归档',
+  delete_creator: '删除 UP 主归档',
   download_media: '下载视频原档',
   create_playback: '生成兼容副本',
   refresh_comments: '补采评论',
@@ -19,6 +21,10 @@ export const jobNames: Record<string, string> = {
   purge_storage_location: '永久删除副本',
 };
 const phases: Record<string, string> = {
+  deletion_wait: '等待关联任务停止',
+  deletion_records: '清理归档资料',
+  deletion_assets: '清理不再使用的文件',
+  deletion_complete: '归档清理完成',
   metadata: '读取视频资料',
   profiles: '读取 UP 主资料',
   cover_and_avatars: '保存封面与头像',
@@ -39,7 +45,8 @@ export function jobPhase(job: Row) {
   const phase =
     job.checkpoint?.progress?.phase ||
     job.result?.progress?.phase ||
-    job.checkpoint?.source_scan?.phase;
+    job.checkpoint?.source_scan?.phase ||
+    job.checkpoint?.phase;
   return (
     phases[phase] ||
     (job.status === 'queued'
@@ -73,6 +80,24 @@ export function jobCounts(job: Row) {
   if (completed != null)
     pairs.push(['已完成', total != null ? `${completed} / ${total}` : completed]);
   if (typeof progress.pending === 'number') pairs.push(['待处理', progress.pending]);
+  if (job.kind === 'delete_video' || job.kind === 'delete_creator') {
+    if (typeof result.deleted_videos === 'number')
+      pairs.push([
+        '已清理视频',
+        `${result.deleted_videos} / ${result.total_videos ?? result.deleted_videos}`,
+      ]);
+    if (typeof result.processed_assets === 'number')
+      pairs.push([
+        '已核对文件',
+        `${result.processed_assets} / ${result.total_assets ?? result.processed_assets}`,
+      ]);
+    if (typeof result.deleted_assets === 'number')
+      pairs.push(['已删除文件', result.deleted_assets]);
+    if (result.retained_shared_assets) pairs.push(['保留共用文件', result.retained_shared_assets]);
+    if (result.retained_backup_assets) pairs.push(['保留备份文件', result.retained_backup_assets]);
+    if (result.collaborations_detached)
+      pairs.push(['移除联合署名', result.collaborations_detached]);
+  }
   return pairs;
 }
 export function finishedJob(job: Row) {

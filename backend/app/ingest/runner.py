@@ -11,16 +11,16 @@ import tempfile
 import threading
 import time
 from copy import deepcopy
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext, ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import (AssetRef, CaptureRun, Collection, CollectionItem, Comment,
+from app.models import (Asset, AssetRef, CaptureRun, Collection, CollectionItem, Comment,
     CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job, MediaVariant, OutboxEvent,
     PlatformUser, SourceAccount, SourceSubscription, SubtitleTrack, UserSnapshot,
     Video, VideoCreator, VideoPart, VideoStatSnapshot)
@@ -81,12 +81,43 @@ def _halt(error):
 
 
 @contextmanager
-def account_request_scope(db, account, client, pacer, url, *, decryptor=None):
-    """Wait outside the shared account lock, then recheck before a real request.
+def credential_lock(db, account_id):
+    """A brief credential race should not become a 30-second foreground 429."""
+    with ExitStack() as stack:
+        for attempt in range(50):
+            try:
+                stack.enter_context(_lock(db, "account:" + account_id))
+                break
+            except IngestDeferred as error:
+                if error.code != "resource_busy":
+                    raise
+                if attempt == 49:
+                    raise IngestDeferred("账号凭据正在更新，请重试", code="account_changed", retry_after_seconds=1) from None
+                time.sleep(.01)
+        yield
 
-    Both background ingestion and foreground source discovery use this scope.
-    Another lane can reserve a slot during our wait; in that case we release
-    the lock and wait for the new deadline, rather than holding it while idle.
+
+def update_account_identity(db, account, generation, *, nav=None, invalid=False):
+    """Commit only account identity, never caller job/capture rows under mutex."""
+    with credential_lock(db, account.id):
+        with Session(db.get_bind()) as writer:
+            current = writer.get(SourceAccount, account.id)
+            if current is None or (current.id, hashlib.sha256(current.secret_encrypted.encode()).hexdigest()) != generation:
+                raise IngestDeferred("账号凭据已更新，请重新验证", code="account_changed", retry_after_seconds=1)
+            values = {"status": "invalid"} if invalid else {"uid": _id(nav.get("mid")), "status": "valid", "last_verified_at": _now()}
+            writer.execute(update(SourceAccount).where(SourceAccount.id == current.id,
+                SourceAccount.secret_encrypted == current.secret_encrypted).values(**values))
+            writer.commit()
+    db.refresh(account, attribute_names=["uid", "status", "last_verified_at"])
+
+
+@contextmanager
+def account_request_scope(db, account, client, pacer, url, *, decryptor=None):
+    """Snapshot credentials under a short mutex; never hold it over HTTP.
+
+    A rotation may overlap an in-flight request. Its immutable generation binds
+    the response to the credentials actually sent; identity-sensitive callers
+    must reject that response if they observe a different generation later.
     """
     host = (urlsplit(url).hostname or "").lower()
     if host != "bilibili.com" and not host.endswith(".bilibili.com"):
@@ -99,28 +130,27 @@ def account_request_scope(db, account, client, pacer, url, *, decryptor=None):
                 error.account_backoff_applied = True
             raise
         return
-    while True:
-        db.refresh(account, attribute_names=["next_request_at", "cooldown_until", "risk_failures"])
-        pacer.check_cooldown()
-        pacer._wait_until(account.next_request_at)
-        with _lock(db, "account:" + account.id):
-            db.refresh(account)
-            pacer.check_cooldown()
-            deadline = utc(account.next_request_at)
-            if deadline and deadline > pacer.clock():
-                continue
-            try:
-                client.cookies = parse_cookies((decryptor or decrypt_secret)(account.secret_encrypted))
-            except Exception:
-                raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
-            try:
-                yield
-            except IngestError as error:
-                if error.code == "rate_limited":
-                    pacer.failed(error)
-                    error.account_backoff_applied = True
-                raise
-            return
+    pacer.guard()
+    with credential_lock(db, account.id):
+        db.refresh(account, attribute_names=["secret_encrypted", "status", "cooldown_until", "risk_failures"])
+        if account.status in {"invalid", "expired", "disabled"}:
+            raise IngestError("账号凭据已失效或停用", code="login_required", retryable=False)
+        # No job guard/flush or capture commit while holding the credential lock.
+        if account.cooldown_until and utc(account.cooldown_until) > pacer.clock():
+            raise IngestDeferred("账号仍在源站冷却期", code="account_cooldown",
+                retry_after_seconds=math.ceil((utc(account.cooldown_until) - pacer.clock()).total_seconds()))
+        try:
+            client.cookies = parse_cookies((decryptor or decrypt_secret)(account.secret_encrypted))
+        except Exception:
+            raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
+        client.credential_generation = (account.id, hashlib.sha256(account.secret_encrypted.encode()).hexdigest())
+    try:
+        yield
+    except IngestError as error:
+        if error.code == "rate_limited":
+            pacer.failed(error)
+            error.account_backoff_applied = True
+        raise
 
 
 class Context:
@@ -204,11 +234,27 @@ class Context:
                 fence_transaction(progress_db, self.job_id, self.owner)
                 progress_db.commit()
 
-    def image(self, url, entity, entity_id, purpose="avatar"):
+    def image(self, url, entity, entity_id, purpose="avatar", *, comment_asset=False):
         if not url or not self.policy.get("images", True):
             return
         url = safe_source_url("https:" + url if url.startswith("//") else url)
         item = {"url": url, "entity": entity, "id": entity_id, "purpose": purpose}
+        if comment_asset:
+            from .comment_capture import budget
+            video = self.db.get(Video, self.run.video_id) if self.run.video_id else None
+            ledger = _comment_ledger(self, video)
+            key = hashlib.sha256(url.encode()).hexdigest()
+            if key not in ledger:
+                if sum(item.get("count", 1) for item in ledger.values()) >= budget(self.policy, "comment_asset_count_limit"):
+                    self.cp["comment_assets_limited"] = True
+                    return
+                ledger[key] = {"status": "pending", "bytes": 0}
+            if ledger[key].get("status") == "budget_skipped":
+                return
+            self.cp["comment_assets"] = ledger
+            if video:
+                video.metadata_json = {**(video.metadata_json or {}), "comment_assets": ledger}
+            item["comment_asset_key"] = key
         if item not in self.cp["images"]:
             self.cp["images"].append(item)
 
@@ -220,13 +266,17 @@ class Context:
             return ingest_file(self.db, path, kind=kind, mime_type=mime, profile_id=self.policy.get("storage_profile_id"))
 
 
-def _user(ctx, raw, *, creator=False, full_profile=False):
+def _user(ctx, raw, *, creator=False, full_profile=False, comment_assets=False):
     if not isinstance(raw, dict):
         return None, None, None
     uid = _id(raw.get("mid"), required=False)
     if uid == "0":
         return None, None, None
     db = ctx.db
+    if creator:
+        from app.library_deletion import is_suppressed
+        if is_suppressed(db, uid=uid):
+            return None, None, None
     user = db.scalar(select(PlatformUser).where(PlatformUser.uid == uid))
     if not user:
         user = PlatformUser(uid=uid, display_name="", signature="", raw={})
@@ -251,8 +301,8 @@ def _user(ctx, raw, *, creator=False, full_profile=False):
         db.add(snapshot)
         db.flush()
     if avatar and not user.avatar_asset_id:
-        ctx.image(avatar, "user", user.id)
-        ctx.image(avatar, "user_snapshot", snapshot.id)
+        ctx.image(avatar, "user", user.id, comment_asset=comment_assets)
+        ctx.image(avatar, "user_snapshot", snapshot.id, comment_asset=comment_assets)
     entity = None
     if creator:
         entity = db.scalar(select(Creator).where(Creator.user_id == user.id))
@@ -274,8 +324,23 @@ def _images(ctx):
             ctx.save()
             return False
         ctx.guard()
+        key = task.get("comment_asset_key")
+        ledger = deepcopy(ctx.cp.get("comment_assets", {}))
+        entry = ledger.get(key, {}) if key else {}
+        from .comment_capture import budget
+        remaining = budget(ctx.policy, "comment_asset_bytes_limit") - sum(item.get("bytes", 0) for item in ledger.values())
+        if key and (entry.get("status") == "budget_skipped" or (remaining <= 0 and not entry.get("asset_id"))):
+            ledger[key] = {"status": "budget_skipped", "bytes": 0}
+            ctx.cp["comment_assets_limited"] = True
+            _image_ledger(ctx, ledger)
+            ctx.cp["images"] = failed + pending[index + 1:]
+            ctx.save()
+            continue
         try:
-            if task["url"] in cache:
+            saved = ctx.db.get(Asset, entry["asset_id"]) if entry.get("asset_id") else None
+            if saved:
+                asset = saved
+            elif task["url"] in cache:
                 asset = cache[task["url"]]
             else:
                 url = task["url"]
@@ -283,7 +348,13 @@ def _images(ctx):
                     # CDN thumbnail transformations preserve the source URL in
                     # observations while archiving a display-sized raster.
                     url = url.split("@", 1)[0] + "@160w_160h_1c.webp"
-                body, mime = ctx.client.asset(url, limit=10 * 1024 * 1024)
+                elif task["purpose"] == "emote":
+                    url = url.split("@", 1)[0] + "@96w.webp"
+                elif task["purpose"] in {"attachment", "image"}:
+                    url = url.split("@", 1)[0] + "@960w.webp"
+                body, mime = ctx.client.asset(url, limit=min(10 * 1024 * 1024, remaining) if key else 10 * 1024 * 1024)
+                if key and len(body) > remaining:
+                    raise IngestError("评论素材达到字节预算", code="response_too_large", retryable=False)
                 # Never serve HTML/SVG under a trusted origin as an image.
                 if body.startswith(b"\x89PNG\r\n\x1a\n"):
                     mime = "image/png"
@@ -297,6 +368,13 @@ def _images(ctx):
                     raise IngestError("图片格式不受支持或响应无效", code="invalid_image", retryable=False)
                 asset = ctx.bytes_asset(body, "image", mime)
                 cache[task["url"]] = asset
+            if key and not entry.get("asset_id"):
+                if asset.size > remaining:
+                    # A non-comment cover/avatar may already be in this slice's
+                    # cache. Reuse must not bypass comment inventory accounting.
+                    raise IngestError("评论素材达到字节预算", code="response_too_large", retryable=False)
+                ledger[key] = {"status": "saved", "asset_id": asset.id, "bytes": asset.size}
+                _image_ledger(ctx, ledger)
             cls = {"user": PlatformUser, "user_snapshot": UserSnapshot, "video": Video}.get(task["entity"])
             if cls:
                 target = ctx.db.get(cls, task["id"])
@@ -305,16 +383,64 @@ def _images(ctx):
             elif task["entity"] == "comment":
                 if not ctx.db.scalar(select(CommentAsset).where(CommentAsset.comment_id == task["id"], CommentAsset.asset_id == asset.id, CommentAsset.kind == task["purpose"])):
                     ctx.db.add(CommentAsset(comment_id=task["id"], asset_id=asset.id, kind=task["purpose"], position=task.get("position", 0)))
+                comment = ctx.db.get(Comment, task["id"])
+                if comment:
+                    manifest = [{**item, "asset_id": asset.id} if item.get("source_url") == task["url"] and item.get("purpose") == task["purpose"] else item
+                        for item in (comment.raw or {}).get("asset_manifest", [])]
+                    comment.raw = {**(comment.raw or {}), "asset_manifest": manifest}
             _ref(ctx.db, asset.id, task["entity"], task["id"], task["purpose"])
         except IngestError as error:
             if _halt(error):
                 raise
-            failed.append(task)
+            if key and error.code == "response_too_large":
+                ledger[key] = {"status": "budget_skipped", "bytes": 0}
+                ctx.cp["comment_assets_limited"] = True
+                _image_ledger(ctx, ledger)
+            elif error.code == "asset_not_found":
+                # A permanent CDN 404/410 must not repeatedly block an otherwise
+                # usable archive. Keep an explicit record of the missing image.
+                missing = dict(ctx.cp.get("unavailable_images", {}))
+                identity = f"{task['entity']}:{task['id']}:{task['purpose']}:{task.get('position', 0)}"
+                missing[identity] = {"entity": task["entity"], "id": task["id"], "purpose": task["purpose"], "reason": "source_missing"}
+                ctx.cp["unavailable_images"] = missing
+                if key:
+                    ledger[key] = {"status": "unavailable", "bytes": 0}
+                    _image_ledger(ctx, ledger)
+            else:
+                failed.append(task)
         ctx.cp["images"] = failed + pending[index + 1:]
         ctx.save()
     if failed:
         raise PartialCaptureError("部分图片未归档，可单独重试当前任务", code="images_incomplete")
     return True
+
+
+def _image_ledger(ctx, ledger):
+    ctx.cp["comment_assets"] = ledger
+    if ctx.run.video_id:
+        video = ctx.db.get(Video, ctx.run.video_id)
+        video.metadata_json = {**(video.metadata_json or {}), "comment_assets": ledger}
+
+
+def _comment_ledger(ctx, video):
+    if video is None:
+        return deepcopy(ctx.cp.get("comment_assets", {}))
+    if "comment_assets" in (video.metadata_json or {}):
+        return deepcopy(video.metadata_json["comment_assets"])
+    # Existing comment images/avatars must consume the new budget too. Do not
+    # delete or silently exempt pre-upgrade assets when a refresh starts.
+    asset_ids = set(ctx.db.scalars(select(CommentAsset.asset_id).join(Comment, Comment.id == CommentAsset.comment_id)
+        .where(Comment.video_id == video.id)))
+    asset_ids.update(ctx.db.scalars(select(PlatformUser.avatar_asset_id).join(Comment, Comment.author_user_id == PlatformUser.id)
+        .where(Comment.video_id == video.id, PlatformUser.avatar_asset_id.is_not(None))))
+    asset_ids.update(ctx.db.scalars(select(UserSnapshot.avatar_asset_id).join(Comment, Comment.author_snapshot_id == UserSnapshot.id)
+        .where(Comment.video_id == video.id, UserSnapshot.avatar_asset_id.is_not(None))))
+    # Legacy inventories can exceed current caps. Keep only aggregate cost plus
+    # real existing refs: this ledger itself remains small and never deletes.
+    count, size = ctx.db.execute(select(func.count(Asset.id), func.coalesce(func.sum(Asset.size), 0)).where(Asset.id.in_(asset_ids))).one()
+    ledger = {"legacy": {"status": "legacy", "bytes": size, "count": count}} if count else {}
+    _image_ledger(ctx, ledger)
+    return ledger
 
 
 def _capture_policy(policy):
@@ -356,15 +482,19 @@ def _metadata(ctx, video):
     data = ctx.client.view(video.bvid)
     if str(data.get("bvid")) != video.bvid or not isinstance(data.get("pages"), list) or not data["pages"]:
         raise IngestError("稿件详情缺少分P数据", code="invalid_metadata")
+    from app.library_deletion import check_video_allowed
+    check_video_allowed(ctx.db, video, uid=str((data.get("owner") or {}).get("mid") or ""))
     video.aid = _id(data.get("aid"))
     video.title, video.description = str(data.get("title") or ""), str(data.get("desc") or "")
     video.duration = float(data.get("duration") or 0)
     video.published_at = _timestamp(data.get("pubdate"))
     source_metadata = clean_raw(data)
-    for key in ("media_properties", "source_quality", "ingest_state", "capture_policy"):
+    for key in ("media_properties", "source_quality", "ingest_state", "capture_policy", "comment_capture", "comment_assets"):
         if key in (video.metadata_json or {}):
             source_metadata[key] = deepcopy(video.metadata_json[key])
     video.metadata_json, video.source_state = source_metadata, "available"
+    from .media import record_access
+    record_access(video, data)
     if isinstance(data.get("stat"), dict):
         _save_stats(ctx, video, data["stat"])
     ctx.image(data.get("pic"), "video", video.id, "cover")
@@ -446,25 +576,35 @@ def _save_comment(ctx, video, raw, expected_root=None):
     body = raw.get("content")
     if not isinstance(body, dict) or not isinstance(body.get("message"), str):
         raise IngestError("评论正文结构无效", code="invalid_comments")
-    user, snapshot, _ = _user(ctx, raw.get("member"))
+    user, snapshot, _ = _user(ctx, raw.get("member"), comment_assets=True)
     comment = ctx.db.scalar(select(Comment).where(Comment.video_id == video.id, Comment.rpid == rpid))
     if not comment:
         comment = Comment(video_id=video.id, rpid=rpid)
         ctx.db.add(comment)
+    prior_manifest = {(item.get("purpose"), item.get("token"), item.get("source_url")): item.get("asset_id")
+        for item in (comment.raw or {}).get("asset_manifest", []) if isinstance(item, dict) and item.get("asset_id")}
     comment.root_rpid, comment.parent_rpid = root, parent
     comment.author_user_id = user.id if user else None
     comment.author_snapshot_id = snapshot.id if snapshot else None
     comment.content, comment.posted_at = body["message"], _timestamp(raw.get("ctime"))
     comment.like_count = max(0, int(raw.get("like") or 0))
     comment.reply_count = max(0, int(raw.get("rcount") or raw.get("count") or 0))
-    comment.raw = clean_raw(raw)
+    from .comment_capture import compact
+    comment.raw = compact(raw)
     ctx.db.flush()
     if not ctx.db.scalar(select(CommentVersion.id).where(CommentVersion.comment_id == comment.id, CommentVersion.run_id == ctx.run.id)):
         ctx.db.add(CommentVersion(comment_id=comment.id, run_id=ctx.run.id, content=comment.content, like_count=comment.like_count, author_snapshot_id=comment.author_snapshot_id, raw=comment.raw))
-    for picture in body.get("pictures", []) or []:
-        ctx.image(picture.get("img_src"), "comment", comment.id, "image")
-    for emote in (body.get("emote") or {}).values():
-        ctx.image(emote.get("url"), "comment", comment.id, "emote")
+    manifest = []
+    for purpose, token, url in [("attachment", None, p.get("img_src")) for p in (body.get("pictures") or [])[:20]] + [
+            ("emote", token, emote.get("url")) for token, emote in list((body.get("emote") or {}).items())[:100]]:
+        if url:
+            url = safe_source_url("https:" + url if url.startswith("//") else url)
+            entry = {"purpose": purpose, "token": token, "source_url": url}
+            if (purpose, token, url) in prior_manifest:
+                entry["asset_id"] = prior_manifest[(purpose, token, url)]
+            manifest.append(entry)
+            ctx.image(url, "comment", comment.id, purpose, comment_asset=True)
+    comment.raw = {**comment.raw, "asset_manifest": manifest}
     return comment
 
 
@@ -479,71 +619,8 @@ def _pinned(data):
 
 
 def _comments(ctx, video):
-    state = dict(ctx.cp.get("comments", {}))
-    seen_offsets = list(state.get("seen_offsets", []))
-    while not state.get("roots_done"):
-        if not ctx.request_slot():
-            return False
-        offset = state.get("offset", "")
-        data = ctx.client.comment_page(video.aid, offset)
-        cursor, replies = data.get("cursor"), data.get("replies")
-        if not isinstance(cursor, dict) or not isinstance(cursor.get("is_end"), bool):
-            raise IngestError("评论分页缺少合法结束标记", code="invalid_pagination")
-        if cursor.get("mode", 2) != 2:
-            raise IngestError("源站未提供时间序评论，不能确认遍历范围", code="unsupported_comment_order", retryable=False)
-        if replies is None and cursor["is_end"]:
-            replies = []
-        if not isinstance(replies, list) or (not replies and not cursor["is_end"]):
-            raise IngestError("评论分页提前返回空页", code="invalid_pagination")
-        unique = {}
-        for raw in _pinned(data) + replies:
-            unique[_id(raw.get("rpid_str", raw.get("rpid")))] = raw
-        for raw in unique.values():
-            root = _save_comment(ctx, video, raw, "0")
-            for preview in raw.get("replies") or []:
-                _save_comment(ctx, video, preview, root.rpid)
-        if cursor["is_end"]:
-            state["roots_done"] = True
-        else:
-            nxt = (cursor.get("pagination_reply") or {}).get("next_offset")
-            if not isinstance(nxt, str) or not nxt or nxt == offset or nxt in seen_offsets:
-                raise IngestError("评论游标缺失或重复，已保留上一检查点", code="pagination_loop")
-            seen_offsets.append(nxt)
-            state.update(offset=nxt, seen_offsets=seen_offsets)
-        ctx.cp["comments"] = dict(state)
-        ctx.save()
-    while not state.get("replies_done"):
-        root = ctx.db.scalar(select(Comment).join(CommentVersion, CommentVersion.comment_id == Comment.id).where(Comment.video_id == video.id, Comment.root_rpid == "0", Comment.reply_count > 0, Comment.rpid > state.get("last_root", ""), CommentVersion.run_id == ctx.run.id).order_by(Comment.rpid).limit(1))
-        if root is None:
-            state["replies_done"] = True
-            ctx.cp["comments"] = dict(state)
-            ctx.save()
-            break
-        if not ctx.request_slot():
-            return False
-        pn = int(state.get("reply_page", 1))
-        data = ctx.client.replies_page(video.aid, root.rpid, pn)
-        page, replies = data.get("page"), data.get("replies")
-        if not isinstance(page, dict) or not all(isinstance(page.get(k), int) for k in ("num", "size", "count")) or page["num"] != pn or page["size"] <= 0 or page["count"] < 0:
-            raise IngestError("楼中楼分页结构异常", code="invalid_pagination")
-        if replies is None and page["count"] == 0:
-            replies = []
-        if not isinstance(replies, list) or (not replies and page["count"] > (pn - 1) * page["size"]):
-            raise IngestError("楼中楼提前返回空页", code="invalid_pagination")
-        fingerprint = hashlib.sha256(json.dumps([_id(raw.get("rpid_str", raw.get("rpid"))) for raw in replies]).encode()).hexdigest()
-        prior = list(state.get("reply_fingerprints", []))
-        if replies and fingerprint in prior:
-            raise IngestError("楼中楼重复返回同一页", code="pagination_loop")
-        for raw in replies:
-            _save_comment(ctx, video, raw, root.rpid)
-        prior.append(fingerprint)
-        if pn * page["size"] >= page["count"]:
-            state.update(last_root=root.rpid, reply_page=1, reply_fingerprints=[])
-        else:
-            state.update(reply_page=pn + 1, reply_fingerprints=prior)
-        ctx.cp["comments"] = dict(state)
-        ctx.save()
-    return True
+    from .comment_capture import collect
+    return collect(ctx, video, _save_comment, _pinned)
 
 
 def _danmaku(ctx, video, part):
@@ -687,7 +764,19 @@ def _subtitles(ctx, video, part):
 
 def _raise_capture_errors(ctx, errors):
     if errors:
-        ctx.job.result = {"components": [error.code for error in errors]}
+        components = list(dict.fromkeys(error.code for error in errors))
+        ctx.cp["component_errors"] = components
+        # Once core metadata is confirmed, non-auth component failures must not
+        # starve the separately resumable media lane. Keep the parent partial;
+        # its retries still repair the exact comment/danmaku checkpoints.
+        if (ctx.job.kind == "archive_video" and ctx.cp.get("metadata_done") and ctx.cp.get("basics_done")
+                and ctx.cp.get("part_ids") and ctx.policy.get("media", True) and not any(_halt(error) for error in errors)):
+            video = ctx.db.get(Video, ctx.run.video_id)
+            if video:
+                _enqueue_media(ctx, video, metadata_state="partial")
+                _ingest_state(ctx, video, component_errors=components)
+        ctx.job.result = {"components": components, "media_job_id": ctx.cp.get("media_job_id")}
+        ctx.save()
         raise PartialCaptureError("部分归档组件尚未完成：" + ", ".join(dict.fromkeys(error.code for error in errors)),
                                   retryable=any(error.retryable for error in errors),
                                   blocked=any(error.blocked for error in errors))
@@ -729,7 +818,7 @@ def _profiles(ctx, video):
     return True
 
 
-def _enqueue_media(ctx, video):
+def _enqueue_media(ctx, video, *, metadata_state="ready"):
     from app.jobs import enqueue
     # A deterministic child survives redelivery without resetting a paused,
     # cancelled or exhausted task. Existing media checkpoints are transferred
@@ -743,7 +832,9 @@ def _enqueue_media(ctx, video):
             ("part_ids", "media_parts", "media_variants", "playback_parts") if key in ctx.cp}
         child.checkpoint = {**child.checkpoint, "metadata_parent_id": ctx.job.id}
     ctx.cp["media_job_id"] = child.id
-    _ingest_state(ctx, video, metadata="ready", media=child.status, media_job_id=child.id)
+    state = (video.metadata_json or {}).get("ingest_state", {})
+    status = "complete" if child.status == "succeeded" or (state.get("media_job_id") == child.id and state.get("media") == "complete") else child.status
+    _ingest_state(ctx, video, metadata=metadata_state, media=status, media_job_id=child.id)
     return child
 
 
@@ -816,7 +907,8 @@ def _archive(ctx, video):
             errors.append(error)
     # Drain a bounded batch every slice, including when comments need another
     # cursor page; otherwise avatars can accumulate indefinitely behind roots.
-    ctx.stage("images", pending=len(ctx.cp["images"]))
+    if ctx.cp["images"]:
+        ctx.stage("images", pending=len(ctx.cp["images"]))
     try:
         images_done = _images(ctx)
     except IngestError as error:
@@ -827,6 +919,8 @@ def _archive(ctx, video):
     _raise_capture_errors(ctx, errors)
     if not comments_done or not images_done:
         return False
+    ctx.cp.pop("component_errors", None)
+    _ingest_state(ctx, video, component_errors=[])
     if ctx.policy.get("media", True):
         _enqueue_media(ctx, video)
     else:
@@ -898,6 +992,8 @@ def _create_playback(db, job):
 
 def run_job(db, job):
     """Return a safe result; continuation=True means requeue, never success."""
+    from app.library_deletion import check_job_allowed
+    check_job_allowed(db, job)
     if job.kind == "create_playback":
         return _create_playback(db, job)
     account = db.get(SourceAccount, job.account_id) if job.account_id else None
@@ -906,17 +1002,20 @@ def run_job(db, job):
     client, ctx, pacer = None, None, None
     try:
         downloading = job.kind == "download_media"
-        with _lock(db, ("download-account:" if downloading else "collector-account:") + account.id):
-            # Account updates use this same lock. Reload only after acquiring it
-            # so a waiting job cannot use credentials rotated while it waited.
-            with _lock(db, "account:" + account.id):
+        with _lock(db, "download-account:" + account.id) if downloading else nullcontext():
+            # Only bulk downloads hold an account lane. Credential snapshots
+            # separately share the short mutex used by account updates.
+            with credential_lock(db, account.id):
                 db.refresh(account)
                 try:
                     secret = decrypt_secret(account.secret_encrypted)
                 except Exception:
                     raise IngestError("账号凭据无法解密", code="invalid_cookie", retryable=False) from None
+                initial_generation = (account.id, hashlib.sha256(account.secret_encrypted.encode()).hexdigest())
             client = BiliClient(secret, interval=0)
+            client.credential_generation = initial_generation
             ctx = Context(db, job, client)
+            client.asset_interval = max(0.05, min(5, float(ctx.policy.get("asset_interval_seconds", 0.1))))
             pacer = AccountPacer(db, account, ctx.policy, ctx.guard)
             pacer.check_cooldown()
             client.before_request, client.before_video = pacer.before_request, pacer.before_video
@@ -924,16 +1023,17 @@ def run_job(db, job):
             def request_context(url):
                 return account_request_scope(db, account, client, pacer, url)
             def before_video():
-                with _lock(db, "account:" + account.id):
-                    db.refresh(account)
-                    pacer.before_video(defer=downloading)
+                # download-account already serializes reservations. Never hold
+                # the credential mutex over pacing, guards or capture commits.
+                db.refresh(account, attribute_names=["next_video_at", "cooldown_until", "risk_failures"])
+                pacer.before_video(defer=downloading)
             client.request_context, client.before_video = request_context, before_video
             ctx.guard()
             ctx.save()
             # Public endpoints may keep responding after expiry. Verify first so
             # an expired premium session cannot silently become an anonymous job.
             nav = client.nav()
-            account.uid, account.status, account.last_verified_at = _id(nav.get("mid")), "valid", _now()
+            update_account_identity(db, account, client.credential_generation, nav=nav)
             if job.kind == "verify_account":
                 result = {"uid": account.uid, "logged_in": True, "vip": bool((nav.get("vip") or {}).get("status"))}
                 done = True
@@ -970,8 +1070,10 @@ def run_job(db, job):
                         if done:
                             done = _images(ctx)
                     if job.kind in ("archive_video", "download_media"):
-                        media_pending = job.kind == "archive_video" and ctx.policy.get("media", True)
-                        video.capture_status = "metadata_ready" if done and media_pending else "complete" if done else "partial"
+                        state = (video.metadata_json or {}).get("ingest_state", {})
+                        media_pending = job.kind == "archive_video" and ctx.policy.get("media", True) and state.get("media") != "complete"
+                        metadata_partial = job.kind == "download_media" and state.get("metadata") in {"partial", "running"}
+                        video.capture_status = "partial" if not done or metadata_partial else "metadata_ready" if media_pending else "complete"
                         if done and not media_pending:
                             video.metadata_json = {**(video.metadata_json or {}), "capture_policy": _capture_policy(ctx.policy)}
                 result = {"video_id": video.id, "media_job_id": ctx.cp.get("media_job_id")}
@@ -979,6 +1081,12 @@ def run_job(db, job):
                 raise IngestError("采集任务类型未支持", code="unsupported_job", retryable=False)
             ctx.run.status = "visible_traversal_complete" if done else "partial"
             ctx.run.end_reason = "normal_end" if done else "page_budget"
+            comments = ctx.cp.get("comments", {})
+            if done and (comments.get("end_reason") == "scan_budget" or comments.get("replies_limited") or ctx.cp.get("comment_assets_limited")):
+                ctx.run.status, ctx.run.end_reason = "bounded_complete", "comment_policy_budget"
+            if done and ctx.cp.get("unavailable_images"):
+                ctx.run.status, ctx.run.end_reason = "bounded_complete", "source_images_unavailable"
+                result["unavailable_images"] = len(ctx.cp["unavailable_images"])
             if job.kind == "scan_collection" and done:
                 scan = ctx.cp.get("source_scan", {})
                 ctx.run.status = "visible_traversal_complete" if scan.get("status") == "complete" else scan.get("status", "partial")
@@ -1007,7 +1115,7 @@ def run_job(db, job):
                 if video:
                     video.capture_status = "partial"
             if error.code in ("login_required", "invalid_cookie"):
-                account.status = "invalid"
+                update_account_identity(db, account, client.credential_generation, invalid=True)
             ctx.save()
         raise
     except Exception:

@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import { api, query, errorText, session } from '../api';
 import type { Creator, Video, Page } from '../types';
 import VideoCard from '../components/VideoCard.vue';
+import PlaylistStartButton from '../player/PlaylistStartButton.vue';
 import EmptyState from '../components/EmptyState.vue';
 import Pagination from '../components/Pagination.vue';
 import SourceStatus from '../components/SourceStatus.vue';
@@ -106,6 +107,7 @@ watch(
         </div>
       </div>
       <div class="profile-actions">
+        <PlaylistStartButton :scope="{ type: 'creator', id: creator.id }" />
         <RouterLink
           v-if="session.user?.role === 'admin'"
           :to="{
@@ -163,7 +165,12 @@ watch(
       <EmptyState v-if="error" title="内容暂时无法读取" :text="error" error />
       <div v-else-if="busy" class="loading-block">正在加载…</div>
       <div v-else-if="items.length" class="video-grid">
-        <VideoCard v-for="video in items" :key="video.id" :video="video" />
+        <VideoCard
+          v-for="video in items"
+          :key="video.id"
+          :video="video"
+          :playlist="{ type: 'creator', id: String(route.params.id) }"
+        />
       </div>
       <EmptyState
         v-else
