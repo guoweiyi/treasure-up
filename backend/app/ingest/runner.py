@@ -468,8 +468,8 @@ def _enqueue_archive(ctx, video):
     key = f"archive:{video.id}:{ctx.run.id}"
     if not ctx.db.scalar(select(Job.id).where(Job.dedupe_key == key)):
         from app.jobs import enqueue
-        enqueue(ctx.db, "archive_video", video.id, ctx.job.account_id, dict(ctx.policy), key, frozen_policy=True)
-        return "queued"
+        submitted = enqueue(ctx.db, "archive_video", video.id, ctx.job.account_id, dict(ctx.policy), key, frozen_policy=True)
+        return "queued" if submitted.dedupe_key == key else "active"
     return "active"
 
 

@@ -35,6 +35,7 @@ import IngestPolicyFields from '../components/admin/IngestPolicyFields.vue';
 import VideoEditorFields from '../components/admin/VideoEditorFields.vue';
 import DeletionDialog from '../components/admin/DeletionDialog.vue';
 import UiIcon from '../components/UiIcon.vue';
+import UserscriptIntegration from '../components/UserscriptIntegration.vue';
 import { videoEditorDraft, videoEditorPayload } from '../utils/videoEditor';
 import { storageDraft, storagePayload, storageKindName } from '../utils/storageForm';
 import { jobNames, jobPhase } from '../utils/jobDisplay';
@@ -44,6 +45,7 @@ const sections = [
   { id: 'overview', name: '总览', group: '运行' },
   { id: 'accounts', name: 'B 站账号', group: '采集' },
   { id: 'sources', name: '自动备份', group: '采集' },
+  { id: 'browser', name: '浏览器采集', group: '采集' },
   { id: 'jobs', name: '任务中心', group: '采集' },
   { id: 'videos', name: '视频资料', group: '内容' },
   { id: 'creators', name: 'UP 主整理', group: '内容' },
@@ -67,6 +69,7 @@ const descriptions: Record<string, string> = {
   overview: '查看归档运行状态与最近任务。',
   accounts: '授权账号仅用于后台采集，凭据不会返回浏览器。',
   sources: '关注 UP 主的新投稿和收藏夹更新。',
+  browser: '在 B 站勾选视频，交给自己的归档库保存。',
   jobs: '下载、同步与整理进度。',
   videos: '整理标题、封面与标签。',
   creators: '管理已保存的 UP 主与投稿。',
@@ -127,7 +130,7 @@ async function load(p = 1, quiet = false) {
     if (section.value === 'overview') {
       const d = await api<Row>('/admin/overview');
       if (n === sequence) overview.value = d;
-    } else if (['settings', 'replicas', 'sources'].includes(section.value)) {
+    } else if (['settings', 'replicas', 'sources', 'browser'].includes(section.value)) {
       settingsRevision.value++;
     } else {
       const d = await api<Page<Row>>(
@@ -451,7 +454,7 @@ onBeforeUnmount(() => {
             <h1>{{ heading }}</h1>
             <p class="muted">{{ descriptions[section] }}</p>
           </div>
-          <div v-if="section !== 'sources'" class="toolbar-actions">
+          <div v-if="!['sources', 'browser'].includes(section)" class="toolbar-actions">
             <el-button :loading="busy" @click="load(page)">刷新</el-button
             ><el-button
               v-if="
@@ -571,6 +574,7 @@ onBeforeUnmount(() => {
           <AdminSettings v-else-if="section === 'settings'" :key="settingsRevision" />
           <StorageReplicas v-else-if="section === 'replicas'" :key="settingsRevision" />
           <SourceMonitor v-else-if="section === 'sources'" />
+          <UserscriptIntegration v-else-if="section === 'browser'" />
           <template v-else>
             <div v-if="['videos', 'creators', 'jobs'].includes(section)" class="admin-filter">
               <el-input

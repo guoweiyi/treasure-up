@@ -1,15 +1,17 @@
 """Database task ledger. Redis messages are disposable delivery hints."""
 import threading
+import hashlib
+import re
 from datetime import timedelta
 from copy import deepcopy
 from uuid import uuid4
 
-from sqlalchemy import event, func, or_, select, update
+from sqlalchemy import event, func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import Job, JobAttempt, OutboxEvent, Setting, SourceSubscription, utcnow
+from app.models import Job, JobAttempt, OutboxEvent, Setting, SourceSubscription, Video, utcnow
 
 
 class LeaseLost(RuntimeError):
@@ -79,6 +81,26 @@ def enqueue(db: Session, kind: str, target_id: str, account_id=None, policy=None
     existing = db.scalar(select(Job).where(Job.dedupe_key == key))
     if existing:
         return existing
+    if kind == "archive_video":
+        bvid = target_id if re.fullmatch(r"BV[A-Za-z0-9]{10}", target_id) else db.scalar(select(Video.bvid).where(Video.id == target_id))
+        if bvid:
+            if db.get_bind().dialect.name == "postgresql":
+                lock = int.from_bytes(hashlib.sha256(("archive-submit:" + bvid).encode()).digest()[:8], "big", signed=True)
+                # A source scan can enqueue many BVs in source order. Never wait
+                # while holding its earlier keys against an ordered script batch.
+                if not db.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": lock}):
+                    from app.ingest.errors import IngestDeferred
+                    raise IngestDeferred("该视频正在被另一请求提交，请稍后重试", code="enqueue_busy", retry_after_seconds=1)
+            # A source scan may have created the catalog row while we acquired
+            # the lock. Normalize only after re-reading that mapping.
+            video_id = db.scalar(select(Video.id).where(Video.bvid == bvid))
+            targets = [bvid] + ([video_id] if video_id else [])
+            active = db.scalar(select(Job).where(Job.kind.in_(["archive_video", "download_media"]),
+                Job.target_id.in_(targets), Job.status.in_(["queued", "running", "paused", "blocked"]),
+                Job.checkpoint["deleted_by"].as_string().is_(None)).order_by(Job.created_at.desc(), Job.id).limit(1))
+            if active:
+                return active
+            target_id = video_id or bvid
     frozen = deepcopy(policy or {})
     if kind in {"scan_collection", "archive_video", "refresh_comments", "refresh_stats", "verify_account"} and not frozen_policy:
         from app.schemas import IngestPolicy

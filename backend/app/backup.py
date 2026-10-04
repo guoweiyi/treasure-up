@@ -29,7 +29,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Asset, AssetLocation, BackupSet, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession, PasskeyChallenge, PasskeyAttempt
+from app.models import Asset, AssetLocation, BackupSet, IntegrationToken, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession, PasskeyChallenge, PasskeyAttempt
 from app.storage.base import IntegrityError, StorageError, content_key, file_digest, safe_key
 from app.storage.local import LocalStorage
 from app.storage.service import copy_asset_to, utcnow
@@ -421,6 +421,8 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             restored.execute(delete(PasskeyAttempt))
             restored.execute(delete(UserSession))
             restored.execute(delete(PlaybackSession))
+            for token in restored.scalars(select(IntegrationToken).where(IntegrationToken.revoked_at.is_(None))):
+                token.revoked_at = utcnow()
             restored.execute(delete(OutboxEvent))
             for job in restored.scalars(select(Job).where(Job.status.in_(["pending", "queued", "running", "retry", "paused"]))):
                 job.status = "paused"

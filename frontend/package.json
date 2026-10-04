@@ -9,8 +9,8 @@
     "test": "node --test src/player/*.test.mjs src/utils/*.test.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "format": "prettier --write src package.json tsconfig.json vite.config.ts index.html .prettierrc.json README.md",
-    "format:check": "prettier --check src package.json tsconfig.json vite.config.ts index.html .prettierrc.json README.md"
+    "format": "prettier --write src public/userscripts package.json tsconfig.json vite.config.ts index.html .prettierrc.json README.md",
+    "format:check": "prettier --check src public/userscripts package.json tsconfig.json vite.config.ts index.html .prettierrc.json README.md"
   },
   "dependencies": {
     "artplayer": "5.4.0",

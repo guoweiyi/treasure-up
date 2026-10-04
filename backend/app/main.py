@@ -79,7 +79,7 @@ def health(db: Session = Depends(get_db)):
 @app.get(P + "/server")
 def server_capabilities():
     return {"application": "treasure-up", "api_version": 1, "version": app.version,
-            "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring"],
+            "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring", "userscript-ingest"],
             "authentication": ["session-cookie", "webauthn"] if settings.passkeys_enabled else ["session-cookie"]}
 
 
@@ -548,7 +548,12 @@ def new_job(body: schemas.JobInput, user=Depends(require_admin), db: Session = D
         required(db, SourceAccount, body.target_id)
     if not body.account_id and body.kind != "verify_account":
         raise HTTPException(422, "请选择采集账号")
-    item = enqueue(db, body.kind, body.target_id, body.account_id, body.policy.model_dump(exclude_unset=True))
+    from app.ingest.errors import IngestDeferred
+    try:
+        item = enqueue(db, body.kind, body.target_id, body.account_id, body.policy.model_dump(exclude_unset=True))
+    except IngestDeferred as error:
+        db.rollback()
+        raise HTTPException(409, str(error), headers={"Retry-After": "1"}) from None
     audit(db, user, "enqueue", "job", item.id)
     commit(db)
     return catalog.job_view(item)
@@ -816,3 +821,5 @@ from app.source_discovery import router as source_discovery_router
 app.include_router(source_discovery_router)
 from app.library_deletion import router as library_deletion_router
 app.include_router(library_deletion_router)
+from app.userscript_api import router as userscript_router
+app.include_router(userscript_router)

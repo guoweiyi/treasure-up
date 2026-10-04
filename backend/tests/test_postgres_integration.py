@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app import backup, jobs
 from app.config import settings
-from app.models import (Asset, AssetLocation, Job, JobAttempt, Setting, StorageProfile, User, Video, VideoPart,
+from app.models import (Asset, AssetLocation, IntegrationToken, Job, JobAttempt, Setting, StorageProfile, User, Video, VideoPart,
                         MediaVariant, SourceAccount, PlaybackSession, PasskeyCredential, PasskeyChallenge,
                         PasskeyAttempt, UserSession, utcnow)
 from app.storage.service import ingest_file, migrate_asset, read_asset_bytes, resolve_asset
@@ -145,6 +145,10 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
                                session_id=login_session.id, binding_hash="b" * 64, origin="https://archive.example",
                                rp_id="archive.example", expires_at=utcnow() + timedelta(minutes=5)))
         db.add(PasskeyAttempt(client_hash="c" * 64, purpose="login_verify"))
+        integration = IntegrationToken(user_id=viewer.id, account_id=account.id, name="restored-capability", token_hash="d" * 64,
+            scope="ingest.submit", expires_at=utcnow() + timedelta(days=1))
+        db.add(integration); db.flush()
+        integration_id = integration.id
         passkey_id = key.id
         db.commit()
         original = resolve_asset(db, asset_id)["path"]
@@ -216,8 +220,10 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
         assert restored.scalar(select(func.count()).select_from(PasskeyChallenge)) == 0
         assert restored.scalar(select(func.count()).select_from(PasskeyAttempt)) == 0
         if source_revision == "head":
+            assert restored.get(IntegrationToken, integration_id).revoked_at is not None
             assert restored.get(PasskeyCredential, passkey_id).name == "preserved passkey"
         else:
+            assert restored.scalar(select(func.count()).select_from(IntegrationToken)) == 0
             assert restored.scalar(select(func.count()).select_from(PasskeyCredential)) == 0
         assert restored.get(Setting, "statistics").value["enabled"] is False
         assert restored.get(Setting, "playback").value["package_long_videos"] is False

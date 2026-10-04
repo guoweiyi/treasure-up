@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.backup import BackupError, _postgres_environment, create_backup, decrypt_to, encrypt_file, load_backup_manifest, protected_asset_ids, restore_backup, rpo_status, verify_backup
 from app.config import settings
-from app.models import Asset, AssetLocation, BackupSet, Base, Setting, StorageProfile
+from app.models import Asset, AssetLocation, BackupSet, Base, IntegrationToken, Setting, SourceAccount, StorageProfile, User
 from app.storage.service import ingest_file, read_asset_bytes, utcnow
 
 
@@ -58,6 +58,13 @@ def test_encryption_detects_corruption_truncation_and_wrong_context(tmp_path, mo
 
 def test_roundtrip_without_primary_media_or_database(backup_fixture, tmp_path):
     db, asset, content, key = backup_fixture
+    user = User(username="fixture-admin", role="admin", password_hash="not-used")
+    account = SourceAccount(name="fixture-account", secret_encrypted="not-used")
+    db.add_all([user, account]); db.flush()
+    token = IntegrationToken(user_id=user.id, account_id=account.id, name="restore-must-revoke", token_hash="d" * 64,
+        scope="ingest.submit", expires_at=utcnow() + timedelta(days=1))
+    db.add(token); db.commit()
+    token_id = token.id
     backup = create_backup(db)
     assert backup.status == "complete"
     destination = tmp_path / "independent"
@@ -79,6 +86,7 @@ def test_roundtrip_without_primary_media_or_database(backup_fixture, tmp_path):
     assert result["restored"]
     engine = create_engine(target_url)
     with Session(engine) as restored:
+        assert restored.get(IntegrationToken, token_id).revoked_at is not None
         assert read_asset_bytes(restored, asset.id) == content
         assert all(not profile.enabled for profile in restored.scalars(select(StorageProfile).where(StorageProfile.name != "Restored local media")))
     engine.dispose()

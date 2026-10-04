@@ -428,3 +428,20 @@ class StorageObservation(Entity, Base):
     bytes_read: Mapped[int] = mapped_column(Integer)
     succeeded: Mapped[bool] = mapped_column(Boolean)
     measured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class IntegrationToken(Entity, Base):
+    __tablename__ = "integration_tokens"
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("source_accounts.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    scope: Mapped[str] = mapped_column(String(40), default="ingest.submit")
+    policy: Mapped[dict] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    minute_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    minute_requests: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    day_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    day_videos: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
