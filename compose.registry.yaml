@@ -1,0 +1,15 @@
+# Used by: python deploy/start.py --prebuilt
+# Pull first, then up --no-build --pull never; never build over release image tags.
+x-registry-backend: &registry-backend
+  image: ${TREASURE_BACKEND_IMAGE:-ghcr.io/guoweiyi/treasure-up-backend:0.3.2}
+
+services:
+  init: *registry-backend
+  api: *registry-backend
+  scheduler: *registry-backend
+  collector: *registry-backend
+  download-worker: *registry-backend
+  media-worker: *registry-backend
+  backup-worker: *registry-backend
+  web:
+    image: ${TREASURE_WEB_IMAGE:-ghcr.io/guoweiyi/treasure-up-web:0.3.2}

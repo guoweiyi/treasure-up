@@ -1,0 +1,127 @@
+name: Container images
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      revision:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    if: inputs.source_ref == inputs.revision
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build backend for the native runner architecture
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.backend
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          provenance: false
+          tags: treasure-up-backend:${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.revision }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha,scope=release-backend-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-backend-${{ matrix.arch }}
+      - name: Build web for the native runner architecture
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.web
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          provenance: false
+          tags: treasure-up-web:${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.revision }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha,scope=release-web-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-web-${{ matrix.arch }}
+      - name: Test the exact images before registry upload
+        run: |
+          python3 deploy/bootstrap.py
+          docker compose up -d --no-build --wait --wait-timeout 180
+          docker compose exec -T -e TREASURE_RUN_POSTGRES_TESTS=1 backup-worker python -m pytest tests -q
+          curl --fail --retry 5 --retry-delay 2 --retry-all-errors http://127.0.0.1:8788/health
+      - name: Stop isolated test services
+        if: always()
+        run: docker compose down
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push tested images and record their registry digests
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          REVISION: ${{ inputs.revision }}
+          ARCH: ${{ matrix.arch }}
+        run: python3 deploy/container_release.py push --tag "$RELEASE_TAG" --revision "$REVISION" --arch "$ARCH" --output image-digests
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-digests-${{ matrix.arch }}
+          path: image-digests/*.json
+          if-no-files-found: error
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: container-digests-*
+          path: image-digests
+      - name: Merge only tested platforms from this workflow run
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          REVISION: ${{ inputs.revision }}
+        run: python3 deploy/container_release.py merge --tag "$RELEASE_TAG" --revision "$REVISION" --input image-digests --output release-images.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-images
+          path: release-images.json
+          if-no-files-found: error

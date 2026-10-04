@@ -41,7 +41,33 @@ docker compose start
 
 来源策略覆盖系统策略，任务入队时固定策略快照，派生下载任务沿用同一快照。`request_budget` / `max_pages` 控制一轮处理量，未遍历完会留下 checkpoint；这不是“请求额度用完就宣告全量成功”。预算主要按页和分段计数，不等于每一个 HTTP 请求的精确计数。
 
-轻量模式用 `python deploy/start.py --light`，恢复完整模式用 `python deploy/start.py`。脚本先等待新 Worker 回报本节点的指定任务队列就绪，再停止旧模式的下载 / 媒体 Worker；新服务不健康时不会执行停用步骤。检查有最长等待时间，失败后保留配置和数据卷，查看状态再重试。`--no-build` 仅适用于已经构建当前版本镜像的情况。
+轻量模式用 `python deploy/start.py --light`，恢复完整模式用 `python deploy/start.py`。脚本先等待新 Worker 回报本节点的指定任务队列就绪，再停止旧模式的下载 / 媒体 Worker；新服务不健康时不会执行停用步骤。检查有最长等待时间，失败后保留配置和数据卷，查看状态再重试。
+
+## 使用预构建镜像
+
+GitHub Release 的部署包不包含前后端源码，解压后显式使用 `--prebuilt`。源码检出也支持此模式；默认启动方式仍是本机构建。
+
+```bash
+# 完整模式：先拉取所有所需镜像，成功后启动并等待健康检查。
+python deploy/start.py --prebuilt
+# 资源有限时：元数据与备份仍独立，下载 / 媒体处理共用 Worker。
+python deploy/start.py --prebuilt --light
+```
+
+源码中的镜像默认值为 `ghcr.io/guoweiyi/treasure-up-backend:0.3.2` 和 `ghcr.io/guoweiyi/treasure-up-web:0.3.2`。发布部署包会将这两个默认值固定为本次构建验证过的镜像索引 digest；可通过包内 `release-images.json` 核对。实际镜像与部署包是否已经可用，以 GitHub Release 和镜像仓库的发布结果为准。GHCR 包为公开状态时可匿名拉取；若首次发布仍是私有包，维护者需先调整包可见性，或使用自己的 Docker 登录配置，不要把仓库访问令牌写进启动参数或共享日志。
+
+可在现有 `.env` 中显式配置 `TREASURE_BACKEND_IMAGE`、`TREASURE_WEB_IMAGE`，指向自己的镜像仓库、固定版本或 `@sha256:…`。两个镜像应属于同一兼容版本；脚本不会覆盖这些配置。镜像地址不得携带用户名或密码，私有仓库认证由 Docker 管理。
+
+| 启动参数 | 镜像行为 |
+| --- | --- |
+| 无额外参数 | 从本地源码构建后启动 |
+| `--no-build` | 不构建、不拉取；所需镜像必须已在本机 |
+| `--prebuilt` | 先执行 registry 配置的 `pull --policy always`，再以 `--no-build --pull never` 启动；不会回退到源码构建 |
+| `--prebuilt --no-build` | 与 `--prebuilt` 相同，仍会拉取；`--no-build` 不表示离线模式 |
+
+拉取失败不会启动新容器或停止旧 Worker；启动健康检查失败不会执行停用旧模式 Worker 的步骤，但这不等于自动回滚已经启动的服务或数据库迁移。现有 `.env`、Compose 项目名和持久卷均保留，备份 Worker 不参与模式清理。升级前仍需备份和验证。
+
+入口内部按顺序组合 `compose.yaml`、可选 `compose.light.yaml`、`compose.registry.yaml`，轻量模式最后补 `compose.registry.light.yaml`。最后一个文件保证共用 Worker 也使用发布镜像，避免它从原始 `extends` 继承本地镜像名。部署包必须保留这些文件及 `deploy/start.py`、`deploy/bootstrap.py` 的目录结构，不需要 Dockerfile 或 Node / Python 后端依赖。
 
 ## 存储配置
 
@@ -86,7 +112,7 @@ docker compose exec backup-worker python -m app.cli restore-backup /backups BACK
 
 ## 升级、恢复到旧版本与凭据
 
-升级前先创建并验证备份，保存正在使用的 Git commit / 镜像标签和配置。拉取代码后运行 `python deploy/start.py`，轻量部署保留 `--light`；`init` 自动执行 Alembic，脚本等待健康检查后才停用相反模式的处理 Worker。失败时先停止新任务；涉及不兼容数据迁移，应把备份恢复到独立环境配合旧镜像验证，不能假设换回旧镜像就能读新数据库。
+升级前先创建并验证备份，保存正在使用的 Git commit / 镜像标签和配置。源码部署更新后运行 `python deploy/start.py`；使用发布部署包时更新包内配置与脚本、保留原 `.env`，继续运行 `python deploy/start.py --prebuilt`。轻量部署都保留 `--light`；`init` 自动执行 Alembic，脚本等待健康检查后才停用相反模式的处理 Worker。失败时先停止新任务；涉及不兼容数据迁移，应把备份恢复到独立环境配合旧镜像验证，不能假设换回旧镜像就能读新数据库。
 
 本地管理员遗失密码可执行交互式维护命令，它会撤销该用户旧会话：
 

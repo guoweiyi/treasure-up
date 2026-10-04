@@ -3,53 +3,128 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag, for example v0.3.2'
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      channel: ${{ steps.release.outputs.channel }}
+      revision: ${{ steps.release.outputs.revision }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
           persist-credentials: false
       - name: Validate tag and application versions
+        id: release
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          test "$RELEASE_REF" = "refs/tags/$RELEASE_TAG"
           python3 deploy/release.py check "$RELEASE_TAG"
+          if existing=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            test "$existing" = true || { echo 'Version already published; create a new version'; exit 1; }
+          fi
+          python3 - <<'PY'
+          import json, os, subprocess
+          release = json.load(open('release.json'))
+          revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in {'tag': os.environ['RELEASE_TAG'], 'version': release['version'], 'channel': release['channel'], 'revision': revision}.items():
+                  output.write(f'{key}={value}\n')
+          PY
   verify:
     needs: validate
     uses: ./.github/workflows/verify.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.revision }}
   native:
     needs: validate
     uses: ./.github/workflows/native.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.revision }}
+  containers:
+    needs: [validate, verify]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/containers.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.revision }}
+      tag: ${{ needs.validate.outputs.tag }}
+      version: ${{ needs.validate.outputs.version }}
+      revision: ${{ needs.validate.outputs.revision }}
   package:
-    needs: [verify, native]
+    needs: [validate, verify, native, containers]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ needs.validate.outputs.revision }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: treasure-up-*
           path: native-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-images
+          path: container-artifacts
       - name: Package exact-tag source, clients and checksums
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 deploy/release.py package "$RELEASE_TAG" --artifacts native-artifacts --output release-assets
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: python3 deploy/release.py package "$RELEASE_TAG" --artifacts native-artifacts --images container-artifacts/release-images.json --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --output release-assets
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets
           path: release-assets/*
           if-no-files-found: error
+  promote:
+    needs: [validate, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: container-release-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-images
+          path: container-artifacts
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Promote verified digests without replacing existing releases
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          REVISION: ${{ needs.validate.outputs.revision }}
+          CHANNEL: ${{ needs.validate.outputs.channel }}
+        run: python3 deploy/container_release.py promote --tag "$RELEASE_TAG" --revision "$REVISION" --channel "$CHANNEL" --input container-artifacts/release-images.json
   publish:
-    needs: package
+    needs: [validate, package, promote]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,24 +133,27 @@ jobs:
         with:
           name: release-assets
           path: release-assets
-      - name: Publish verified preview release
+      - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          CHANNEL: ${{ needs.validate.outputs.channel }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          release_flags=()
+          if [ "$CHANNEL" = preview ]; then release_flags+=(--prerelease); fi
           cd release-assets
           sha256sum --check SHA256SUMS
           if existing=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             test "$existing" = true || { echo 'Refusing to replace a published release'; exit 1; }
             gh release upload "$RELEASE_TAG" ./* --clobber
           else
-            gh release create "$RELEASE_TAG" ./* --draft --prerelease --verify-tag --title "Treasure Up $RELEASE_TAG" --notes-file RELEASE-NOTES.md
+            gh release create "$RELEASE_TAG" ./* --draft "${release_flags[@]}" --verify-tag --title "Treasure Up $RELEASE_TAG" --notes-file RELEASE-NOTES.md
           fi
           gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/remote-assets"
           printf '%s\n' * | sort > "$RUNNER_TEMP/expected-assets"
           diff -u "$RUNNER_TEMP/expected-assets" "$RUNNER_TEMP/remote-assets"
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease --notes-file RELEASE-NOTES.md
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$([ "$CHANNEL" = preview ] && echo true || echo false)" --notes-file RELEASE-NOTES.md

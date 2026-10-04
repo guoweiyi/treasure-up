@@ -11,13 +11,23 @@
 | Android ARM64 | 安装 CI SDK/NDK → 生成 Android 项目 → `tauri android build --debug --apk --target aarch64 --ci` | 调试 APK，不能作为已完成签名的商店发布包。 |
 | iOS ARM64 模拟器 | 安装模拟器 Rust 目标/XcodeGen → 生成 iOS 项目 → `tauri ios build --debug --target aarch64-sim --no-sign --ci` | 模拟器 `.app` 的 ZIP；不是可以装到 iPhone 的签名 IPA。 |
 
-本机已执行 `npm test`（7 项，包含连接页初始化/操作竞态、安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[第三轮构建 37147760714](https://github.com/guoweiyi/treasure-up/actions/runs/37147760714) 的 5 个 job 已全部成功，验证代码为 `4c6e9e40cc954c3158eb760685204382c2b90001`：Windows NSIS、macOS ARM/Intel DMG、Android ARM64 调试 APK、iOS ARM64 模拟器 ZIP 均已生成并上传。该次构建使用 `--locked`，桌面另通过 2 项 Rust 导航策略测试；macOS ARM 构建结束后的 Cargo.lock 摘要与入库文件一致。本轮新增的 Rust 连接提交/超时修复及 4 项回归需要由新 CI 验证，不能沿用旧构建结果。各系统实机交互、登录、播放及发布签名仍需下述验收。
+本机已执行 `npm test`（7 项，包含连接页初始化/操作竞态、安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[0.3.1 发布构建 37188301393](https://github.com/guoweiyi/treasure-up/actions/runs/37188301393) 的五个原生目标均已成功，包含桌面的 6 项 Rust 导航、连接超时和身份探测测试。本轮缓存与 APK 体积调整需由新 CI 验证，不沿用旧构建结果。各系统实机交互、登录、播放及发布签名仍需下述验收。
 
-npm 与 Cargo 锁均已落盘。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 2026-10-04 通过官方 registry 元数据核实。Cargo.lock 取自第二轮成功的 macOS ARM job `111261288775`，113330 字节、442 个包，SHA-256 为 `8b548b794d163025db6a3f2fa5611a69acebf4367eccb2388b6e4d45e40eb654`；回收后已验证摘要、字节数、TOML、registry 来源和包校验和。生成的 Android/Xcode 工程位于忽略目录 `src-tauri/gen`；发布所需签名材料不得提交。
+npm 与 Cargo 锁均已入库。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-build=2.7.1` 在 2026-10-04 通过官方 registry 元数据核实。构建以所选 tag/commit 的锁文件为准，生成的 Android/Xcode 工程位于忽略目录 `src-tauri/gen`；发布所需签名材料不得提交。
 
 两项 Rust crate 的官方版本元数据均声明 MSRV `1.90`，已写入 Cargo.toml；CI 更新并选用 stable 后构建，避免 runner 预装 Rust 太旧。CI 现在执行 `cargo test --locked`，Tauri 构建通过尾部 `-- --locked` 传递给 Cargo（移动构建也同样传递）。本地 `dev`、`desktop:build`、`android:build`、`ios:build` 脚本同样自动附加锁定参数，额外 Tauri 选项保持在 Cargo 分隔符之前。
 
-macOS ARM job 另以 `TREASURE_CARGO_LOCK_BEGIN/END` 输出同一个公开依赖锁的 base64 与 SHA-256，便于二进制产物下载桥接失败时经授权的日志接口取回；恢复时必须验证长度、摘要和 TOML 结构。此步骤只读取指定 Cargo.lock，不读取或输出环境变量及签名材料。
+## CI 缓存与产物
+
+`native.yml` 可通过 `workflow_call` 复用，`source_ref` 为空时构建调用方 ref；发布工作流先解析版本 tag，再传入不可变 commit SHA。三个 job 的 checkout 与 concurrency 使用同一个值，避免手工触发把默认分支代码装入旧版本包，也避免 tag 在作业之间移动造成版本不一致。构建权限保持 `contents: read`，checkout 不持久化 Git 凭据。
+
+[Swatinem/rust-cache v2.9.2](https://github.com/Swatinem/rust-cache/commit/6323deb102c322ba6fcbdcafc7e3dddab59af2b6) 固定完整提交 SHA，按桌面 target、Android ARM64、iOS 模拟器分开。Action 还将 Rust 版本、锁文件及 Cargo/Rust 编译环境纳入缓存键，Android 加入 NDK 环境。缓存仅保存依赖与 registry，不缓存工作区自身 crate、Cargo bin、整个 home 或生成的移动工程。只有默认分支或版本 tag 的非 PR 构建可保存，PR 只恢复；GitHub 的分支/merge-ref 缓存隔离仍生效。缓存不含签名材料，未来引入签名时也不得将密钥放入缓存目录。
+
+仅上传明确的 NSIS `.exe`、DMG、Android `.apk` 和 iOS 模拟器 ZIP，不上传整个 target/gen、Cargo.lock、密钥或本地配置。已移除临时用的 Cargo.lock base64 日志；公开依赖锁从相同 tag 的源码获取。上传已压缩安装包时禁用重复 ZIP 压缩以节省 runner 时间，这不改变安装包字节及签名。
+
+Android CI 仍使用 `--debug`，通过 `CARGO_PROFILE_DEV_DEBUG=0` 与 `CARGO_PROFILE_DEV_STRIP=debuginfo` 去掉 Rust DWARF 信息，保留 debug 构建、调试断言与平台临时调试签名；不改成本地开发默认配置。代价是分发 APK 的 Rust 堆栈不含完整源码行号。需要调试符号时，在本地不设置这两个环境变量重新构建。该方案遵循 [Cargo profile 配置](https://doc.rust-lang.org/cargo/reference/profiles.html#debug)，不是签名或商店发布方案。
+
+`scripts/audit_apk.py` 读取最终 APK，校验 ARM64 ELF、拒绝残留 `.debug_*`/`.zdebug_*` 段与常见私钥/配置文件，报告实际包体、每个 `.so` 的压缩前后大小和 SHA-256；不会重写 APK。CI 与 0.3.1 的 **159,797,407 字节**基线比较并输出缩减百分比，实际收益以新 CI 输出为准。检查脚本使用 Python 标准库，有 4 项独立回归，可运行 `python3 -m unittest discover -s test -p 'test_*.py'`。
 
 ## 连接与权限
 

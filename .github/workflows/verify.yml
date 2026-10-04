@@ -1,6 +1,10 @@
 name: Verify
 on:
   workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        default: ""
   push:
     branches: ['**']
   pull_request:
@@ -13,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ inputs.source_ref || github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -27,12 +32,17 @@ jobs:
           .audit/bin/python -m pip install pip-audit==2.10.1 pytest==9.1.1 PyYAML==6.0.3
           .audit/bin/python -m pip_audit -r backend/requirements.lock --no-deps --disable-pip --progress-spinner off
       - name: Deployment and release packaging tests
+        env:
+          TREASURE_RUN_COMPOSE_TESTS: '1'
         run: .audit/bin/python -m pytest deploy/tests -q
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+          persist-credentials: false
       - name: Create isolated deployment configuration
         run: python3 deploy/bootstrap.py
       - name: Build and start the application

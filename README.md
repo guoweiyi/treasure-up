@@ -4,11 +4,23 @@
 
 技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；Cookie 只在服务端加密保存。
 
-**当前为 [0.3.1 技术预览](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.1)。** 播放与弹幕设置收进播放器，新增 UP / 收藏夹自动备份、新内容检测、通行密钥、轻量部署模式及独立客户端工程。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
+**当前代码版本为 0.3.2 技术预览（preview）。** 新增 GitHub 自动发版、双架构 Docker 镜像和客户端打包流程；实际可下载内容以 [GitHub Releases](https://github.com/guoweiyi/treasure-up/releases) 的发布结果为准。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
 
-[本版说明与下载选择](docs/releases/v0.3.1.md) 包含各平台安装包、签名状态和升级方式。
+[本版说明与下载选择](docs/releases/v0.3.2.md) 包含各平台安装包、签名状态和升级方式；[自动发版指南](docs/ci-cd.md) 说明版本准备、流水线、镜像权限和失败恢复。
 
-## 本机启动
+## 预构建镜像部署
+
+需要 Docker Compose v2 和 Python 3.10+。从目标 Release 下载 `treasure-up-v0.3.2-docker.zip`，解压进入包内目录后运行：
+
+```bash
+python deploy/start.py --prebuilt
+# 资源有限时：
+python deploy/start.py --prebuilt --light
+```
+
+部署包不需要本地编译，默认固定本次验证过的镜像 digest；保留原 `.env` 和数据卷升级。GHCR 首次创建的 backend / web 包默认私有，所有者分别设为 Public 后才可匿名拉取，否则先使用自己的账号执行 `docker login ghcr.io`。当前预览通道更新 `preview`，不会更新 `latest`。详见 [预构建部署与故障处理](docs/ci-cd.md)。
+
+## 从源码本机启动
 
 需要 Docker Compose v2 和 Python 3.10+。Windows 需启动 Docker Desktop 的 Linux 引擎。
 
@@ -51,6 +63,8 @@ python deploy/start.py
 ## 部署与维护
 
 [运维说明](docs/operations.md) 包含存储参数、备份密钥、恢复、升级与验证命令。不要使用 `docker compose down -v` 卸载日常服务，它会删除持久卷。
+
+[自动发版指南](docs/ci-cd.md) 说明推送版本标签或手动选择已有标签后，如何运行回归、打包客户端并推送 GHCR 镜像。维护者的 `deploy/release.py prepare` 需要 Python 3.11+；用户部署入口 `deploy/start.py` 仍只需 Python 3.10+。Windows / macOS 安装包尚未完成正式签名 / 公证，Android 为调试 APK，iOS 为模拟器包，不是 iPhone IPA。
 
 [2026-10-04 代码审计](docs/code-review-2026-10-04.md) 记录本轮安全与并发修复、性能验证、依赖公告及尚未覆盖的验收范围。
 
