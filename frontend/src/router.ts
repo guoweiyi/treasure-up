@@ -9,6 +9,7 @@ export const router = createRouter({
     { path: '/videos/:id', component: () => import('./views/VideoView.vue') },
     { path: '/creators', component: () => import('./views/CreatorsView.vue') },
     { path: '/creators/:id', component: () => import('./views/CreatorView.vue') },
+    { path: '/saved', component: () => import('./views/SavedView.vue'), meta: { login: true } },
     { path: '/collections', component: () => import('./views/CollectionsView.vue') },
     {
       path: '/account/security',

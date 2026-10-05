@@ -2,11 +2,21 @@
 import { computed } from 'vue';
 import { bytes, date, statusText } from '../../api';
 import type { Row } from '../../types';
-import { jobCounts, jobNames, jobPhase } from '../../utils/jobDisplay';
+import {
+  jobCounts,
+  jobNames,
+  jobPhase,
+  jobStatusLabel,
+  mediaCaptureLabel,
+  compatibilityNotice,
+} from '../../utils/jobDisplay';
 const props = defineProps<{ job: Row }>();
+defineEmits<{ retryMedia: [id: string, action: 'retry' | 'resume'] }>();
 const counts = computed(() => jobCounts(props.job));
 const transfer = computed(() => props.job.result?.progress || {});
 const progress = computed(() => props.job.checkpoint?.progress || {});
+const diagnostic = computed(() => props.job.checkpoint?.diagnostic);
+const diagnosticFrame = computed(() => diagnostic.value?.frames?.at(-1));
 const updatedAt = computed(
   () =>
     [progress.value.updated_at, transfer.value.updated_at]
@@ -22,11 +32,39 @@ const checkNames: Record<string, string> = {
 </script>
 <template>
   <section class="job-details">
-    <h3>{{ jobNames[job.kind] || '后台任务' }} · {{ statusText(job.status) }}</h3>
+    <h3>
+      {{ jobNames[job.kind] || '后台任务' }} · {{ jobStatusLabel(job) || statusText(job.status) }}
+    </h3>
     <p v-if="job.target_title">
       <strong>{{ job.target_title }}</strong>
     </p>
     <p>{{ jobPhase(job) }}</p>
+    <p v-if="compatibilityNotice(job)" class="capture-result">{{ compatibilityNotice(job) }}</p>
+    <div v-if="job.capture" class="capture-result">
+      <p>
+        <strong>{{ mediaCaptureLabel(job) }}</strong>
+      </p>
+      <p
+        v-if="job.status === 'succeeded' && !['complete', 'disabled'].includes(job.capture.media)"
+        class="muted small"
+      >
+        资料已保存，视频原档尚未完整保存。
+      </p>
+      <p v-if="job.capture.media_error" class="form-error">{{ job.capture.media_error }}</p>
+      <button
+        v-if="job.capture.retry_media || job.capture.resume_media"
+        type="button"
+        @click="
+          $emit(
+            'retryMedia',
+            job.capture.media_job_id,
+            job.capture.resume_media ? 'resume' : 'retry',
+          )
+        "
+      >
+        {{ job.capture.resume_media ? '继续下载视频' : '重试视频下载' }}
+      </button>
+    </div>
     <dl v-if="counts.length" class="job-metrics">
       <template v-for="[label, value] in counts" :key="String(label)"
         ><dt>{{ label }}</dt>
@@ -104,6 +142,15 @@ const checkNames: Record<string, string> = {
     <details class="small muted">
       <summary>任务定位信息</summary>
       <p>任务 ID：{{ job.id }}</p>
+      <p v-if="job.capture?.media_job_id">下载任务 ID：{{ job.capture.media_job_id }}</p>
+      <p v-if="diagnostic?.fingerprint">
+        错误指纹：{{ diagnostic.fingerprint }} · {{ diagnostic.type }}
+      </p>
+      <p v-if="diagnosticFrame">
+        位置：{{ diagnosticFrame.module }} · {{ diagnosticFrame.function }}:{{
+          diagnosticFrame.line
+        }}
+      </p>
     </details>
   </section>
 </template>
@@ -130,5 +177,10 @@ const checkNames: Record<string, string> = {
   padding: 12px;
   border-radius: 10px;
   background: var(--surface-muted, #f0f3f7);
+}
+.capture-result {
+  margin: 12px 0;
+  padding: 0 12px;
+  border-left: 3px solid var(--line, #dce3e2);
 }
 </style>

@@ -76,7 +76,13 @@ def _route_score(route):
 
 
 def select_route(db, asset_ids, *, route_id=None, user_id=None, excluded=None):
-    routes = [r for r in playback_routes(db, asset_ids, user_id=user_id) if r["id"] not in set(excluded or [])]
+    return choose_route(playback_routes(db, asset_ids, user_id=user_id), route_id=route_id, excluded=excluded)
+
+
+def choose_route(routes, *, route_id=None, excluded=None):
+    """Select from this request's already authorized, complete replica listing."""
+    excluded = set(excluded or [])
+    routes = [r for r in routes if r["id"] not in excluded]
     if route_id:
         if any(r["id"] == route_id for r in routes):
             return route_id
@@ -157,8 +163,21 @@ def resolve_session_asset(db, session, asset_id, allowed_asset_ids):
     allowed = allowed_asset_ids if isinstance(allowed_asset_ids, frozenset) else frozenset(allowed_asset_ids)
     if asset_id not in allowed or _utc(session.expires_at) <= _now():
         raise StorageError("Playback session does not authorize this asset")
-    # Caller authenticates ownership; row lock serializes concurrent fragment failovers.
-    db.scalar(select(PlaybackSession).where(PlaybackSession.id == session.id).with_for_update().execution_options(populate_existing=True))
+    # Healthy fragment reads do not mutate the session. In particular, a remote
+    # HEAD must not serialize all of a player's parallel segment requests.
+    attempted_profile = session.profile_id
+    if attempted_profile:
+        try:
+            return resolve_on_profile(db, asset_id, attempted_profile)
+        except StorageError:
+            pass
+    # Caller authenticates ownership. Only failover takes the row lock, then
+    # re-reads state so another fragment's switch/observation is not overwritten.
+    current = db.scalar(select(PlaybackSession).where(PlaybackSession.id == session.id)
+                        .with_for_update().execution_options(populate_existing=True))
+    if current is None or _utc(current.expires_at) <= _now():
+        raise StorageError("Playback session does not authorize this asset")
+    session = current
     state = dict(session.state or {})
     failed = list(state.get("failed_profile_ids", []))
     switches = int(state.get("switch_count", 0))
@@ -166,6 +185,11 @@ def resolve_session_asset(db, session, asset_id, allowed_asset_ids):
         session.profile_id = select_route(db, allowed, user_id=session.user_id, excluded=failed)
     while True:
         try:
+            # The failed route has already been checked before locking. A peer
+            # may have changed it while we waited; that replacement is checked.
+            if session.profile_id == attempted_profile:
+                attempted_profile = None
+                raise StorageError("Selected storage node cannot serve this asset")
             result = resolve_on_profile(db, asset_id, session.profile_id)
             db.flush()
             return result

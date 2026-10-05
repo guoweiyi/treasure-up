@@ -38,7 +38,7 @@ import UiIcon from '../components/UiIcon.vue';
 import UserscriptIntegration from '../components/UserscriptIntegration.vue';
 import { videoEditorDraft, videoEditorPayload } from '../utils/videoEditor';
 import { storageDraft, storagePayload, storageKindName } from '../utils/storageForm';
-import { jobNames, jobPhase } from '../utils/jobDisplay';
+import { jobNames, jobPhase, jobStatusLabel, mediaCaptureLabel } from '../utils/jobDisplay';
 import { createScopedInterval } from '../utils/scopedInterval';
 const route = useRoute();
 const sections = [
@@ -620,7 +620,17 @@ onBeforeUnmount(() => {
                 type="expand"
                 ><template #default="{ row }"
                   ><div class="record-detail">
-                    <JobDetails v-if="section === 'jobs'" :job="row" />
+                    <JobDetails
+                      v-if="section === 'jobs'"
+                      :job="row"
+                      @retry-media="
+                        (id, kind) =>
+                          action(
+                            `/admin/jobs/${id}/${kind}`,
+                            kind === 'resume' ? '恢复视频下载' : '重试视频下载',
+                          )
+                      "
+                    />
                     <dl v-else-if="section === 'storage'" class="record-fields">
                       <template v-for="(label, key) in storageLabels" :key="key"
                         ><template v-if="row.config?.[key] != null"
@@ -722,8 +732,11 @@ onBeforeUnmount(() => {
                 ><el-table-column label="状态" min-width="100"
                   ><template #default="{ row }"
                     ><span :class="`status-dot ${row.status}`">{{
-                      statusText(row.status)
-                    }}</span></template
+                      jobStatusLabel(row) || statusText(row.status)
+                    }}</span
+                    ><small v-if="row.capture" class="table-subtitle">{{
+                      mediaCaptureLabel(row)
+                    }}</small></template
                   ></el-table-column
                 ><el-table-column label="尝试" width="70" prop="attempts" /><el-table-column
                   label="创建时间"

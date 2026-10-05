@@ -244,7 +244,10 @@ onBeforeUnmount(() => {
         <span class="step-number">1</span>
         <div>
           <h3>安装选片助手</h3>
-          <p>需要 Tampermonkey 5.0 或更新版本。安装后，再打开下面的脚本链接。</p>
+          <p>
+            先安装 Tampermonkey 5.0
+            或更新版本，再打开下面的链接，在扩展安装页确认安装。服务升级后，也从这里更新脚本。
+          </p>
           <a
             class="integration-install"
             href="/userscripts/treasure-up.user.js"
@@ -257,8 +260,11 @@ onBeforeUnmount(() => {
       <article class="integration-step">
         <span class="step-number">2</span>
         <div>
-          <h3>连接自己的视频库</h3>
-          <p>将服务地址和新建的采集令牌填入脚本设置。</p>
+          <h3>创建令牌并连接</h3>
+          <p>
+            在下方创建专用令牌。回到 B站页面，点右下角「Treasure Up · 选片」→
+            连接设置，填写服务地址，再点「验证并保存连接」，在浏览器原生对话框中粘贴令牌。
+          </p>
           <div class="integration-address">
             <input
               ref="addressInput"
@@ -270,9 +276,49 @@ onBeforeUnmount(() => {
             />
             <button type="button" @click="copy(origin)">复制地址</button>
           </div>
+          <p class="address-hint">
+            另一台电脑或手机应填写它实际能访问的服务器地址；localhost 只指当前设备。不要填写 B站
+            Cookie 或后台密码。
+          </p>
         </div>
       </article>
     </div>
+    <details class="integration-troubleshooting">
+      <summary>装好了，却没有入口或无法连接？</summary>
+      <ol>
+        <li>
+          <strong>B站完全没有入口：</strong>在 Tampermonkey 管理面板确认「Treasure Up ·
+          B站选片助手」已启用，允许扩展访问 B站，然后刷新网页。Chrome 138+
+          还需在扩展详情开启「允许用户脚本」；旧版 Chrome 或没有该开关的 Edge，按
+          <a
+            href="https://www.tampermonkey.net/faq.php#Q209"
+            target="_blank"
+            rel="noopener noreferrer"
+            >Tampermonkey 官方指引</a
+          >检查开发者模式。本站无法直接检测你的扩展权限。
+        </li>
+        <li>
+          <strong>只看见脚本源码：</strong>先确认 Tampermonkey
+          已安装并启用，再重开安装链接；也可在扩展「添加新脚本」中粘贴本站完整脚本并保存。这里只支持
+          Tampermonkey，不支持 App 内嵌浏览器。
+        </li>
+        <li>
+          <strong>有入口，但卡片没有勾选：</strong
+          >打开选片面板后点「开启页面选片」；普通视频页也能直接「加入当前视频」。直播、番剧或短链接请先打开带
+          BV 号的视频页。
+        </li>
+        <li>
+          <strong>连接失败：</strong
+          >先在同一浏览器直接打开上面的服务地址。检查令牌是否过期或撤销、来源账号是否有效，以及
+          Tampermonkey 是否允许连接该地址；公网需 HTTPS，不能通过登录跳转或无效证书绕行。
+        </li>
+        <li>
+          <strong>提交后没有立刻出现视频：</strong
+          >提交成功只表示已加入后台任务队列；可到「任务中心」查看进度。每天最多新入队 500
+          个视频，每批最多 50 个。不要重复创建令牌或连续点击重试。
+        </li>
+      </ol>
+    </details>
     <section class="integration-tokens" aria-labelledby="integration-tokens-title">
       <div class="token-heading">
         <div>
@@ -597,6 +643,34 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   font-size: 12px;
   padding: 8px 10px;
+}
+.integration-step .address-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+}
+.integration-troubleshooting {
+  margin: -10px 0 28px;
+  padding: 15px 18px;
+  border: 1px solid #e5ece8;
+  border-radius: 10px;
+  color: #66776f;
+  font-size: 12px;
+  line-height: 1.85;
+}
+.integration-troubleshooting summary {
+  cursor: pointer;
+  color: #365c50;
+  font-weight: 600;
+}
+.integration-troubleshooting ol {
+  padding-left: 20px;
+  margin: 12px 0 0;
+}
+.integration-troubleshooting li + li {
+  margin-top: 8px;
+}
+.integration-troubleshooting a {
+  color: var(--integration-accent);
 }
 .token-heading {
   display: flex;

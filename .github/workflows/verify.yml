@@ -51,6 +51,13 @@ jobs:
         run: docker compose exec -T -e TREASURE_RUN_POSTGRES_TESTS=1 backup-worker python -m pytest tests -q
       - name: Verify web readiness
         run: curl --fail --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8788/health
+      - name: Verify proxy compression, isolation and request limits
+        env:
+          TREASURE_RUN_NGINX_TESTS: '1'
+        run: |
+          python3 -m venv .proxy-tests
+          .proxy-tests/bin/python -m pip install pytest==9.1.1
+          .proxy-tests/bin/python -m pytest deploy/tests/test_nginx_resource_limits.py -q
       - name: Stop services
         if: always()
         run: docker compose down

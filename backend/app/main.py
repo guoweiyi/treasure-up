@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app import catalog, schemas
 from app.config import settings
 from app.db import get_db
+from app.request_limits import RequestBodyLimit
 from app.jobs import enqueue
 from app.source_labels import display_source_title
 from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, Collection, CollectionItem, Comment, Creator,
@@ -26,6 +27,7 @@ from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_se
 
 app = FastAPI(title="Treasure Up", version="0.3.2", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
+app.add_middleware(RequestBodyLimit)
 P = "/api/v1"
 _DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
 
@@ -37,8 +39,6 @@ async def conflict_handler(request, exc):
 
 @app.middleware("http")
 async def response_policy(request, call_next):
-    if request.headers.get("content-length", "").isdigit() and int(request.headers["content-length"]) > 1_000_000:
-        return Response(status_code=413)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -79,7 +79,7 @@ def health(db: Session = Depends(get_db)):
 @app.get(P + "/server")
 def server_capabilities():
     return {"application": "treasure-up", "api_version": 1, "version": app.version,
-            "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring", "userscript-ingest"],
+            "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring", "userscript-ingest", "personal-playlists"],
             "authentication": ["session-cookie", "webauthn"] if settings.passkeys_enabled else ["session-cookie"]}
 
 
@@ -143,6 +143,7 @@ def library_settings(db: Session = Depends(get_db)):
 
 @app.get(P + "/videos")
 def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_id: str = "", tag: str = "",
+           view: str = Query("full", pattern="^(full|card)$"),
            starred: bool = False, page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100), sort: str = "newest",
            identity=Depends(optional_identity), db: Session = Depends(get_db)):
     stmt = select(Video).outerjoin(VideoAnnotation, VideoAnnotation.video_id == Video.id)
@@ -165,7 +166,8 @@ def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_
                 "title": func.coalesce(VideoAnnotation.title_override, Video.title).asc(), "duration": Video.duration.desc(),
                 "published": Video.published_at.desc().nullslast()}
     stmt = stmt.order_by(ordering.get(sort, ordering["newest"]), Video.id)
-    result = catalog.page(db, stmt, page, page_size, batch_mapper=catalog.video_views)
+    result = catalog.page(db, stmt, page, page_size,
+                          batch_mapper=catalog.video_card_views if view == "card" else catalog.video_views)
     catalog.personalize_videos(db, result["items"], identity)
     return result
 
@@ -179,6 +181,7 @@ def video(video_id: str, identity=Depends(optional_identity), db: Session = Depe
 
 @app.get(P + "/playlists")
 def playlist(collection_id: str = "", creator_id: str = "", page: int = Query(1, ge=1),
+             view: str = Query("full", pattern="^(full|card)$"),
              page_size: int = Query(100, ge=1, le=100), identity=Depends(optional_identity), db: Session = Depends(get_db)):
     if bool(collection_id) == bool(creator_id):
         raise HTTPException(422, "请选择一个收藏夹或 UP 主")
@@ -198,7 +201,8 @@ def playlist(collection_id: str = "", creator_id: str = "", page: int = Query(1,
         stmt = stmt.where(Video.id.in_(select(VideoCreator.video_id).where(VideoCreator.creator_id == creator_id)))
         stmt = stmt.order_by(Video.published_at.desc().nullslast(), Video.id)
         title = catalog.creator_view(db, creator)["name"]
-    result = catalog.page(db, stmt, page, page_size, batch_mapper=catalog.video_views)
+    result = catalog.page(db, stmt, page, page_size,
+                          batch_mapper=catalog.video_card_views if view == "card" else catalog.video_views)
     catalog.personalize_videos(db, result["items"], identity)
     result["scope_title"] = title
     return result
@@ -206,16 +210,8 @@ def playlist(collection_id: str = "", creator_id: str = "", page: int = Query(1,
 
 @app.put(P + "/videos/{video_id}/star")
 def star_video(video_id: str, body: schemas.StarInput, identity=Depends(authenticated), db: Session = Depends(get_db)):
-    required(db, Video, video_id)
-    user = identity[0]
-    db.scalar(select(User).where(User.id == user.id).with_for_update(key_share=True))
-    current = db.scalar(select(VideoStar).where(VideoStar.user_id == user.id, VideoStar.video_id == video_id))
-    if body.starred and not current:
-        db.add(VideoStar(user_id=user.id, video_id=video_id))
-    elif not body.starred and current:
-        db.delete(current)
-    db.commit()
-    return {"starred": body.starred}
+    from app.personal_playlists import set_star
+    return set_star(db, identity[0].id, video_id, body.starred)
 
 
 @app.get(P + "/creators")
@@ -300,20 +296,17 @@ def asset(asset_id: str, request: Request, identity=Depends(optional_identity), 
 
 
 @app.get(P + "/parts/{part_id}/danmaku")
-def danmaku(part_id: str, db: Session = Depends(get_db)):
-    from app.storage.service import read_asset_bytes
+def danmaku(part_id: str, request: Request, db: Session = Depends(get_db)):
+    from app import danmaku_delivery
+    from app.playback_limits import client_hash
+    budget = danmaku_delivery.delivery.reserve_request(client_hash(request))
     required(db, VideoPart, part_id)
     snapshot = db.scalar(select(DanmakuSnapshot).where(DanmakuSnapshot.part_id == part_id, DanmakuSnapshot.data_asset_id.is_not(None))
                          .order_by(DanmakuSnapshot.created_at.desc()).limit(1))
     if not snapshot:
-        return []
-    try:
-        payload = json.loads(read_asset_bytes(db, snapshot.data_asset_id))
-        items = payload if isinstance(payload, list) else payload.get("items", [])
-        modes = {1: 0, 2: 0, 3: 0, 5: 1, 4: 2}
-        return [{**item, "mode": modes[item["mode"]]} for item in items if item.get("mode") in modes]
-    except Exception:
-        raise HTTPException(503, "弹幕归档暂不可读取") from None
+        return danmaku_delivery.delivery.response(budget, b"[]")
+    body = danmaku_delivery.render_asset(db, snapshot.data_asset_id)
+    return danmaku_delivery.delivery.response(budget, body)
 
 
 @app.get(P + "/progress/{part_id}")
@@ -415,13 +408,14 @@ def verify_account(account_id: str, user=Depends(require_admin), db: Session = D
     return catalog.job_view(job)
 
 
-def source_view(db, s, collection=None):
+def source_view(db, s, collection=None, paid_counts=None):
     from app.source_labels import display_source_title
+    from app.paid_capture import summary
     c = collection if collection is not None else required(db, Collection, s.collection_id)
     return {"id": s.id, "collection_id": s.collection_id, "source_id": c.source_id, "title": display_source_title(c),
             "account_id": s.account_id, "enabled": s.enabled, "interval_minutes": s.interval_minutes,
-            "policy": s.policy, "next_run_at": s.next_run_at, "last_scan_at": c.last_scan_at,
-            "kind": c.kind, "monitor": c.monitor_state or {}}
+            "policy": {"include_paid_videos": False, **(s.policy or {})}, "next_run_at": s.next_run_at, "last_scan_at": c.last_scan_at,
+            "kind": c.kind, "monitor": {**(c.monitor_state or {}), "paid": summary(db, c.id, s.policy, paid_counts)}}
 
 
 @app.post(P + "/admin/sources/resolve")
@@ -445,7 +439,9 @@ def sources(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=100
     total = db.scalar(select(func.count()).select_from(statement.subquery()))
     rows = db.execute(statement.order_by(SourceSubscription.created_at.desc(), SourceSubscription.id)
                       .offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": [source_view(db, s, c) for s, c in rows], "total": total, "page": page, "page_size": page_size}
+    from app.paid_capture import summaries
+    paid_counts = summaries(db, [c.id for _, c in rows])
+    return {"items": [source_view(db, s, c, paid_counts) for s, c in rows], "total": total, "page": page, "page_size": page_size}
 
 
 @app.post(P + "/admin/sources", status_code=201)
@@ -518,8 +514,10 @@ def creator_monitor(creator_id: str, db: Session = Depends(get_db)):
     if not row:
         return {"subscribed": False}
     collection, source = row
+    from app.paid_capture import summary
     return {"subscribed": True, "enabled": source.enabled, "next_run_at": source.next_run_at,
-            "last_scan_at": collection.last_scan_at, "monitor": collection.monitor_state or {}}
+            "last_scan_at": collection.last_scan_at, "monitor": {**(collection.monitor_state or {}),
+                "paid": summary(db, collection.id, source.policy)}}
 
 
 @app.get(P + "/admin/jobs")
@@ -765,7 +763,7 @@ def backup_now(user=Depends(require_admin), db: Session = Depends(get_db)):
 def overview(_=Depends(require_admin), db: Session = Depends(get_db)):
     from app.backup import rpo_status
     return {"stats": catalog.stats(db), "backup_protection": rpo_status(db),
-            "jobs": [catalog.job_view(j) for j in db.scalars(select(Job).order_by(Job.created_at.desc()).limit(8))],
+            "jobs": catalog.job_views(db, list(db.scalars(select(Job).order_by(Job.created_at.desc(), Job.id).limit(8)))),
             "storage": [storage_view(s) for s in db.scalars(select(StorageProfile))],
             "backups": [catalog.backup_view(b) for b in db.scalars(select(BackupSet).order_by(BackupSet.created_at.desc()).limit(5))]}
 
@@ -823,3 +821,5 @@ from app.library_deletion import router as library_deletion_router
 app.include_router(library_deletion_router)
 from app.userscript_api import router as userscript_router
 app.include_router(userscript_router)
+from app.personal_playlists import router as personal_playlists_router
+app.include_router(personal_playlists_router)

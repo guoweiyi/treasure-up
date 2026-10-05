@@ -20,7 +20,7 @@ from app.models import (Asset, AssetLocation, AssetRef, AuditLog, Base, CaptureR
     CollectionItem, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job,
     MediaVariant, PlatformUser, PlaybackSession, Setting, SourceSubscription, StorageObservation,
     StorageProfile, SubtitleTrack, UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart,
-    VideoStar, WatchProgress, VideoStatSnapshot, utcnow)
+    VideoStar, PersonalPlaylistItem, WatchProgress, VideoStatSnapshot, utcnow)
 from app.security import require_admin
 from app.ingest.errors import IngestDeferred, IngestError, PartialCaptureError
 
@@ -252,7 +252,8 @@ def _delete_entities(db, scope):
         (PlaybackSession, PlaybackSession.variant_id.in_(entities[MediaVariant])),
         (WatchProgress, WatchProgress.part_id.in_(entities[VideoPart])),
         (CollectionItem, CollectionItem.video_id.in_(videos)),
-        (VideoStar, VideoStar.video_id.in_(videos)), (VideoAnnotation, VideoAnnotation.video_id.in_(videos)),
+        (VideoStar, VideoStar.video_id.in_(videos)), (PersonalPlaylistItem, PersonalPlaylistItem.video_id.in_(videos)),
+        (VideoAnnotation, VideoAnnotation.video_id.in_(videos)),
         (VideoStatSnapshot, VideoStatSnapshot.video_id.in_(videos)),
         (VideoCreator, or_(VideoCreator.video_id.in_(videos), VideoCreator.creator_id.in_(entities[Creator]))),
     ):

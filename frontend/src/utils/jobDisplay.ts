@@ -1,4 +1,33 @@
 type Row = Record<string, any>;
+export function compatibilityNotice(job: Row) {
+  return job.kind === 'create_playback' &&
+    job.status === 'succeeded' &&
+    job.result?.compatibility === 'unsupported' &&
+    job.result?.reason === 'hdr_conversion_unsupported'
+    ? 'HDR/广色域到 SDR 的兼容副本暂不支持，原档已保留，未生成兼容副本。'
+    : '';
+}
+export function jobStatusLabel(job: Row) {
+  if (compatibilityNotice(job)) return '未生成兼容副本';
+  return job.kind === 'archive_video' && job.status === 'succeeded' ? '资料已完成' : '';
+}
+export function mediaCaptureLabel(job: Row) {
+  const labels: Record<string, string> = {
+    complete: '视频原档已保存',
+    queued: '视频下载等待执行',
+    running: '视频原档下载中',
+    failed: '视频下载失败',
+    partial: '视频下载未完成',
+    blocked: '视频下载受阻',
+    paused: '视频下载已暂停',
+    cancelled: '视频下载已取消',
+    disabled: '本次仅采集资料',
+    not_started: '视频下载尚未开始',
+    awaiting_consent: '充电视频等待采集确认',
+    missing: '视频原档不完整',
+  };
+  return labels[job.capture?.media] || '';
+}
 export const jobNames: Record<string, string> = {
   scan_collection: '检查备份来源',
   archive_video: '归档视频资料',
@@ -38,10 +67,27 @@ const phases: Record<string, string> = {
   media_ready: '原档已保存',
   compatible_copy: '生成兼容副本',
   compatible_ready: '兼容副本已就绪',
+  compatible_unsupported: '此格式暂不支持生成兼容副本',
   pages: '检查来源分页',
   verify: '核对来源列表',
 };
-export function jobPhase(job: Row) {
+const sourceCooldownErrors = new Set([
+  '源站限流或风控，请稍后恢复任务',
+  '源站风控，请稍后恢复',
+  '源站认证检查未通过',
+  '源站要求验证，请暂停并检查账号',
+  '弹幕源站风控，请稍后恢复',
+  '账号仍在源站冷却期',
+]);
+export function jobPhase(job: Row, now = Date.now()) {
+  // These are server-sanitized domain errors. Do not infer a source cooldown
+  // from arbitrary failures or the last running checkpoint alone.
+  if (job.status === 'queued' && sourceCooldownErrors.has(job.error)) {
+    const availableAt = typeof job.available_at === 'string' ? Date.parse(job.available_at) : NaN;
+    return Number.isFinite(availableAt) && availableAt > now
+      ? '等待源站冷却后重试'
+      : '等待工作进程重试';
+  }
   const phase =
     job.checkpoint?.progress?.phase ||
     job.result?.progress?.phase ||
@@ -101,5 +147,7 @@ export function jobCounts(job: Row) {
   return pairs;
 }
 export function finishedJob(job: Row) {
+  if (job.kind === 'archive_video' && ['queued', 'running'].includes(job.capture?.media))
+    return false;
   return ['succeeded', 'failed', 'cancelled', 'paused', 'blocked', 'partial'].includes(job.status);
 }

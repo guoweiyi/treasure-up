@@ -8,6 +8,7 @@ from app.db import SessionLocal, engine
 from app.jobs import enqueue, recover_and_dispatch, schedule_due
 from app.models import Job, Setting, utcnow
 from app.worker import execute
+from app.housekeeping import prune_transient_records
 
 
 def queue_for_kind(kind):
@@ -42,8 +43,16 @@ def main():
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as leader:
         if not leader.scalar(text("SELECT pg_try_advisory_lock(87213001)")):
             raise RuntimeError("已有调度器运行")
+        next_housekeeping = 0.0
         while True:
             leader.execute(text("SELECT 1"))
+            if time.monotonic() >= next_housekeeping:
+                try:
+                    with SessionLocal() as db:
+                        prune_transient_records(db)
+                    next_housekeeping = time.monotonic() + 60
+                except Exception as exc:
+                    logging.error("Transient record cleanup failed: %s", type(exc).__name__)
             try:
                 with SessionLocal() as db:
                     schedule_due(db)

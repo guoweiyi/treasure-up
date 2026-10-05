@@ -5,7 +5,9 @@ import type { PlaylistScope } from './queue';
 
 export type PlaylistPage = Page<VideoDetail> & { scope_title?: string };
 export function playlistPath(scope: PlaylistScope, page = 1) {
-  return `/playlists?${new URLSearchParams({ [`${scope.type}_id`]: scope.id, page: String(page), page_size: '100' })}`;
+  if (scope.type === 'personal')
+    return `/me/playlists/${encodeURIComponent(scope.id)}/videos?${new URLSearchParams({ page: String(page), page_size: '100', playable_only: 'true' })}`;
+  return `/playlists?${new URLSearchParams({ [`${scope.type}_id`]: scope.id, page: String(page), page_size: '100', view: 'card' })}`;
 }
 export function usePlaylist(
   scope: ComputedRef<PlaylistScope | null>,

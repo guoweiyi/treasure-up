@@ -12,6 +12,20 @@ const current = ref<Row | null>(null),
   error = ref('');
 const reimportBusy = ref(false),
   reimportAllowed = ref(false);
+const mediaActionBusy = ref(false);
+async function retryMedia(id: string, action: 'retry' | 'resume') {
+  if (mediaActionBusy.value) return;
+  const parentId = props.job?.id;
+  mediaActionBusy.value = true;
+  try {
+    await write(`/admin/jobs/${encodeURIComponent(id)}/${action}`);
+    if (props.open && props.job?.id === parentId) refresh();
+  } catch (e) {
+    if (props.open && props.job?.id === parentId) error.value = errorText(e);
+  } finally {
+    mediaActionBusy.value = false;
+  }
+}
 async function allowReimport() {
   if (!current.value || reimportBusy.value) return;
   try {
@@ -73,7 +87,7 @@ onBeforeUnmount(poller.stop);
     width="min(620px, 94vw)"
     @update:model-value="emit('update:open', $event)"
   >
-    <JobDetails v-if="current" :job="current" />
+    <JobDetails v-if="current" :job="current" @retry-media="retryMedia" />
     <div
       v-if="
         session.user?.role === 'admin' &&

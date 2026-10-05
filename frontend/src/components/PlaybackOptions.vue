@@ -6,6 +6,8 @@ import PlayerChoice from '../player/PlayerChoice.vue';
 import { rateChoices } from '../player/layout';
 import type { RuntimeStats } from '../player/runtimeStats';
 import { bitrate, type MeasuredMedia } from '../player/mediaInfo';
+import { audioVariantSuffix, sameOriginalAudioAlternative } from '../player/audioAlternatives';
+import AudioCompatibilityNotice from './AudioCompatibilityNotice.vue';
 const props = defineProps<{
   playback: Playback | null;
   runtimeStats: RuntimeStats;
@@ -47,12 +49,20 @@ const selectedVariant = computed(() =>
 );
 const media = computed(
   () =>
-    ({ ...props.mediaProperties?.[props.variantId], ...props.playback?.media }) as MeasuredMedia,
+    ({
+      audio_codec: selectedVariant.value?.audio_codec,
+      ...selectedVariant.value?.metadata,
+      ...props.mediaProperties?.[props.variantId],
+      ...props.playback?.media,
+    }) as MeasuredMedia,
+);
+const audioAlternative = computed(() =>
+  sameOriginalAudioAlternative(props.variantId, props.variants, props.mediaProperties, media.value),
 );
 const variantChoices = computed(() =>
   props.variants.map((variant) => ({
     value: variant.id,
-    label: qualityLabel(variant) + ' · ' + (variant.kind === 'playback' ? '兼容副本' : '原档'),
+    label: qualityLabel(variant) + ' · ' + audioVariantSuffix(variant, props.mediaProperties),
   })),
 );
 const subtitleChoices = computed(() => [
@@ -79,6 +89,13 @@ const routeChoices = computed(() => [
       :choices="variantChoices"
       :disabled="busy || !variants.length"
       @update:model-value="$emit('variant', String($event))"
+    />
+    <AudioCompatibilityNotice
+      :media="media"
+      :support="runtimeStats.audioSupport.ec3"
+      :alternative-id="audioAlternative?.id"
+      :busy="busy"
+      @variant="$emit('variant', $event)"
     />
     <PlayerChoice
       label="播放速度"
@@ -208,6 +225,36 @@ const routeChoices = computed(() => [
               .join(' · ') || '—'
           }}
         </dd>
+        <template v-if="['eac3', 'ec-3'].includes(media.audio_codec || '')">
+          <dt>EC-3 解码</dt>
+          <dd>
+            {{
+              runtimeStats.audioSupport.ec3 === 'supported'
+                ? '当前播放引擎报告支持（非实际声音输出证明）'
+                : runtimeStats.audioSupport.ec3 === 'unsupported'
+                  ? '当前播放引擎报告不支持'
+                  : '未提供能力信息'
+            }}
+          </dd>
+          <dt v-if="media.dolby_atmos">Atmos 信令</dt>
+          <dd v-if="media.dolby_atmos">
+            {{
+              media.ec3?.joc
+                ? `JOC · complexity ${media.ec3.complexity_index_type_a}`
+                : '原码流已检测，封装信令未记录'
+            }}<small v-if="media.ec3_configuration_verified"> · HLS 初始化已核对</small>
+          </dd>
+          <dt v-if="media.dolby_atmos">空间音频输出</dt>
+          <dd v-if="media.dolby_atmos">
+            {{
+              runtimeStats.audioSupport.spatial === 'supported'
+                ? '设备报告支持；实际输出未验证'
+                : runtimeStats.audioSupport.spatial === 'unsupported'
+                  ? '当前输出报告不支持空间呈现；不等于不能播放普通声音'
+                  : '未验证，取决于设备与音频输出路径'
+            }}
+          </dd>
+        </template>
       </dl>
       <p class="player-setting-help">
         网络采样来自本站播放请求的浏览器计时，15 秒后过期；缓存、原生分片或跨域计时不可见时显示

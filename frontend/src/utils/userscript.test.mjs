@@ -11,7 +11,7 @@ const core = source.match(/\/\/ CORE-BEGIN[^\n]*\n([\s\S]*?)\/\/ CORE-END/)?.[1]
 assert.ok(core, 'test the shipped single-file script, without a page-visible test export');
 const ctx = vm.createContext({ URL, setTimeout, clearTimeout });
 vm.runInContext(
-  `${core}\nglobalThis.testCore = {extractBvids,videoFromUrl,normalizeBackend,nextConfig,supportedManager,safeError,mergeSelection,pendingItems,createDraftStore,createClient};`,
+  `${core}\nglobalThis.testCore = {extractBvids,videoFromUrl,normalizeBackend,nextConfig,supportedManager,safeError,responseError,environmentIssue,invalidateCards,mergeSelection,pendingItems,createDraftStore,createClient,verifyAndSaveConnection};`,
   ctx,
 );
 const api = ctx.testCore;
@@ -78,6 +78,11 @@ test('backend targets normalize API suffix and permit explicit private HTTP whil
   assert.deepEqual(native(api.nextConfig(config, config.backend + '/api/v1', '')), config);
   assert.throws(() => api.nextConfig(config, 'https://different.example.com', ''), /重新填写/);
   assert.throws(() => api.nextConfig(config, config.backend, 'SESSDATA=not-a-token'), /专用令牌/);
+  for (const length of [32, 42, 44, 128])
+    assert.throws(
+      () => api.nextConfig(config, config.backend, 'tu_ingest_' + 's'.repeat(length)),
+      /专用令牌/,
+    );
   assert.equal(
     api.nextConfig(config, 'https://different.example.com', token).backend,
     'https://different.example.com',
@@ -179,6 +184,88 @@ test('request timeout aborts the actual GM promise and late completion cannot tu
   await assert.rejects(api.createClient(gm, config, 10).submit([ids[0]]), /超时.*可能已提交/);
   assert.equal(aborts, 1);
   finish({ status: 202, finalUrl: gm.calls[0].url, response: {} });
+});
+
+test('HTTP failures provide actionable guidance even when a reverse proxy returns HTML, without exposing tokens', async () => {
+  for (const [status, hint] of [
+    [401, /新建令牌/],
+    [409, /更新或验证/],
+    [404, /站点根地址/],
+    [429, /稍后手动重试/],
+    [503, /服务暂时不可用/],
+  ]) {
+    const gm = fakeGM((options) =>
+      Promise.resolve({
+        status,
+        finalUrl: options.url,
+        responseText: `<html>proxy error ${token}</html>`,
+      }),
+    );
+    await assert.rejects(
+      api.createClient(gm, config).status(),
+      (error) => hint.test(error.message) && !error.message.includes(token),
+    );
+  }
+  const gm = fakeGM(() => Promise.resolve({ status: 0, finalUrl: '' }));
+  await assert.rejects(api.createClient(gm, config).status(), /没有收到服务响应/);
+  assert.ok(!api.responseError(401, `invalid ${token}`, token).includes(token));
+});
+
+test('a failed connection replacement preserves the previously saved origin and token', async () => {
+  let saved = { ...config },
+    writes = 0,
+    status = 401;
+  const next = { backend: 'https://new-archive.example.com', token: 'tu_ingest_' + 'n'.repeat(43) };
+  const gm = fakeGM((options) =>
+    Promise.resolve({
+      status,
+      finalUrl: options.url,
+      response: status === 200 ? { ok: true, scope: 'ingest.submit' } : { detail: 'expired' },
+    }),
+  );
+  gm.setValue = async (key, value) => {
+    assert.equal(key, 'test-connection');
+    writes++;
+    saved = value;
+  };
+  await assert.rejects(api.verifyAndSaveConnection(gm, next, 'test-connection'), /401/);
+  assert.deepEqual(saved, config);
+  assert.equal(writes, 0);
+  status = 200;
+  assert.equal((await api.verifyAndSaveConnection(gm, next, 'test-connection')).ok, true);
+  assert.deepEqual(saved, next);
+  assert.equal(writes, 1);
+});
+
+test('startup diagnoses missing tab-storage grants before offering a selection that cannot persist', () => {
+  const gm = { info: { scriptHandler: 'Tampermonkey', version: '5.5.1', sandboxMode: 'dom' } };
+  assert.match(api.environmentIssue(gm), /权限不完整/);
+  for (const name of ['getValue', 'setValue', 'getTab', 'saveTab', 'xmlHttpRequest'])
+    gm[name] = () => {};
+  assert.equal(api.environmentIssue(gm), '');
+  gm.info.sandboxMode = 'raw';
+  assert.match(api.environmentIssue(gm), /DOM 隔离/);
+});
+
+test('rescanning a recycled or emptied card drops its former BV rather than selecting stale content', () => {
+  const changed = { isConnected: true },
+    nested = { isConnected: true },
+    other = { isConnected: true },
+    detached = { isConnected: false };
+  changed.contains = (node) => node === nested;
+  const cards = new Map([
+    [changed, { bvid: ids[0] }],
+    [nested, { bvid: ids[0] }],
+    [other, { bvid: ids[1] }],
+    [detached, { bvid: ids[2] }],
+  ]);
+  api.invalidateCards(cards, changed);
+  assert.deepEqual([...cards.keys()], [other]);
+  // There may be no replacement link after invalidation: do not re-add the old BV.
+  assert.equal(api.videoFromUrl('https://live.bilibili.com/123'), null);
+  cards.set(changed, { bvid: ids[2] });
+  api.invalidateCards(cards, changed);
+  assert.deepEqual([...cards.values()], [{ bvid: ids[1] }]);
 });
 test('draft persists within its tab across pages, serializes writes and never shares selections with another tab', async () => {
   let stored = {},

@@ -52,6 +52,7 @@ def test_eac3_container_profile_alone_cannot_prove_atmos(tmp_path, monkeypatch, 
         commands.append(arguments)
         output.write_bytes(b"test-eac3")
     monkeypatch.setattr(media, "_run_ffmpeg", raw_sample)
+    monkeypatch.setattr(media, "ec3_configuration", lambda path: {"joc": True, "complexity_index_type_a": 16})
     probe = {"streams": [{"codec_type": "audio", "codec_name": "eac3", "profile": raw_profile}]}
     monkeypatch.setattr(media.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps(probe).encode()))
     result = media.inspect_dolby(Path("source.mp4"), {"codec_name": "hevc"},
@@ -60,6 +61,33 @@ def test_eac3_container_profile_alone_cannot_prove_atmos(tmp_path, monkeypatch, 
     assert commands[0][commands[0].index("-c:a") + 1] == "copy"
     assert result["audio_verification_sample_seconds"] == 10
     assert not list(tmp_path.glob("treasure-joc-*"))
+
+
+def test_selected_eac3_cannot_be_silently_replaced_by_aac():
+    from app.ingest.errors import IngestError
+    candidate = [{"acodec": "ec-3"}]
+    with pytest.raises(IngestError, match="EC-3") as error:
+        media.verify_selected_audio(candidate, {"codec_name": "aac"})
+    assert error.value.code == "audio_codec_mismatch"
+    assert media.verify_selected_audio(candidate, {"codec_name": "eac3"}) is True
+    assert media.verify_selected_audio([{"acodec": "mp4a.40.2"}], {"codec_name": "aac"}) is False
+
+
+def test_missing_joc_never_repairs_published_or_unapproved_paths(tmp_path, monkeypatch):
+    from app.ingest.errors import IngestError
+    monkeypatch.setattr(settings, "scratch_dir", tmp_path / "scratch")
+    path = tmp_path / "published.mp4"
+    path.write_bytes(b"must-stay-unchanged")
+    monkeypatch.setattr(media, "_run_ffmpeg", lambda args, output, *rest: output.write_bytes(b"sample"))
+    monkeypatch.setattr(media, "ec3_configuration", lambda path: {"joc": False})
+    probe = {"streams": [{"codec_type": "audio", "codec_name": "eac3", "profile": "Dolby Digital Plus + Dolby Atmos"}]}
+    monkeypatch.setattr(media.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps(probe).encode()))
+    monkeypatch.setattr(media, "preserve_ec3_configuration", lambda *args, **kwargs: pytest.fail("published file must not be repaired"))
+    for repair, code in [(False, "dolby_metadata_missing"), (True, "invalid_path")]:
+        with pytest.raises(IngestError) as error:
+            media.inspect_dolby(path, {}, {"codec_name": "eac3"}, repair_scratch=repair)
+        assert error.value.code == code
+    assert path.read_bytes() == b"must-stay-unchanged"
 
 
 def test_mp4_dolby_mux_parameters_preserve_dovi_boxes_and_audio_tag():
@@ -109,4 +137,70 @@ def test_offline_original_dv_atmos_streams_archive_without_payload_changes(tmp_p
         assert variant.video_codec == "hevc" and variant.audio_codec == "eac3"
         assert evidence["dovi"]["rpu_present_flag"] == 1
         assert evidence["atmos_evidence"] == "eac3_joc_bitstream_profile"
+        assert evidence["ec3"]["joc"] is True
+        assert evidence["ec3"]["complexity_index_type_a"] == 16
     engine.dispose()
+
+
+@pytest.mark.skipif(not os.environ.get("TREASURE_TEST_DOLBY_FAILURE") or not shutil.which("ffmpeg"), reason="explicit offline AC-3 core / EC-3 dependent fixture required")
+@pytest.mark.parametrize("resume_complete_merge", [False, True])
+def test_offline_missing_source_joc_restores_fresh_and_resumed_unpublished_merge(tmp_path, monkeypatch, resume_complete_merge):
+    import hashlib
+    import subprocess
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from app.models import Base, Video, VideoPart
+    from app.playback.ec3 import ec3_configuration
+    from yt_dlp.postprocessor.ffmpeg import FFmpegMergerPP
+
+    source = Path(os.environ["TREASURE_TEST_DOLBY_FAILURE"])
+    original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert ec3_configuration(source)["joc"] is False
+    video_path, audio_path = tmp_path / "test-video.mp4", tmp_path / "test-audio.m4a"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=size=64x64:rate=25", "-t", "1", "-c:v", "mpeg4", str(video_path)], check=True, timeout=60)
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(source), "-t", "1", "-c", "copy", "-f", "mp4", str(audio_path)], check=True, timeout=60)
+    monkeypatch.setattr(settings, "scratch_dir", tmp_path / "scratch")
+    monkeypatch.setattr(settings, "media_root", tmp_path / "library")
+
+    class OfflineDownloader(yt_dlp.YoutubeDL):
+        def extract_info(self, url, download=False):
+            return {"id": "BV124YF68Ekd", "ext": "mp4", "format_id": "test+ec3", "requested_formats": [
+                {"format_id": "test", "vcodec": "mpeg4", "acodec": "none"},
+                {"format_id": "ec3", "vcodec": "none", "acodec": "ec-3"}]}
+
+        def process_info(self, info):
+            info["filepath"] = self.params["outtmpl"]["default"].replace("%(ext)s", "mp4")
+            if resume_complete_merge:
+                # Simulate yt-dlp finding last attempt's completed but unpublished
+                # file: ControlledMerger will not be called on this path.
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(video_path), "-i", str(audio_path),
+                    "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", info["filepath"]], check=True, timeout=60)
+            else:
+                info["__files_to_merge"] = [str(video_path), str(audio_path)]
+                self.run_pp(FFmpegMergerPP(self), info)
+
+        def urlopen(self, request):
+            pytest.fail("offline fixture must never access network")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", OfflineDownloader)
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        video = Video(bvid="BV124YF68Ekd", aid="123")
+        db.add(video); db.flush()
+        part = VideoPart(video_id=video.id, cid="11", duration=1, position=1)
+        db.add(part); db.flush()
+        client = SimpleNamespace(cookies=[], view=lambda bvid: {"pages": [{"cid": "11", "page": 1}]})
+        variant, reused = media.archive_media(db, client, video, part, {"max_download_bytes": 50_000_000})
+        db.commit()
+        evidence = video.metadata_json["media_properties"][variant.id]
+        assert not reused and variant.audio_codec == "eac3"
+        assert evidence["dolby_atmos"] and evidence["audio_channels"] == 8
+        assert evidence["ec3"]["joc"] and evidence["ec3"]["complexity_index_type_a"] == 16
+        assert evidence["ec3_configuration_evidence"] == "eac3_addbsi_sample"
+        assert evidence["ec3_scratch_configuration_restored"]
+        assert set(evidence["ec3_repair_payload_hashes"]) == {"video", "audio"}
+        assert evidence["ec3_repair_payload_hashes"]["audio"] == media._packet_hash(audio_path, "audio", lambda: None)
+        assert evidence["ec3_repair_payload_hashes"]["video"] == media._packet_hash(video_path, "video", lambda: None)
+    engine.dispose()
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash

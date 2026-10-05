@@ -32,7 +32,7 @@ async function load() {
   page.value = Math.max(1, Number(route.query.page) || 1);
   try {
     const data = await api<Page<Video>>(
-      `/videos?${query({ q: q.value, collection_id: collection.value, tag: tag.value, starred: starred.value ? true : '', sort: sort.value, page: page.value, page_size: 24 })}`,
+      `/videos?${query({ view: 'card', q: q.value, collection_id: collection.value, tag: tag.value, starred: starred.value ? true : '', sort: sort.value, page: page.value, page_size: 24 })}`,
     );
     if (key === request) {
       items.value = data.items;
@@ -78,15 +78,7 @@ watch(() => route.fullPath, load, { immediate: true });
           "
         >
           全部视频</button
-        ><button
-          :class="{ active: starred }"
-          @click="
-            starred = true;
-            search();
-          "
-        >
-          我的星标
-        </button>
+        ><button :class="{ active: starred }" @click="router.push('/saved')">我的片单</button>
       </div>
       <span class="muted small">{{ busy ? '正在读取…' : total + ' 个视频' }}</span>
     </div>

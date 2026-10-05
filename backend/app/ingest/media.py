@@ -20,6 +20,8 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models import Asset, MediaVariant, Video
+from app.playback.ec3 import ec3_configuration, elementary_joc_complexity, preserve_ec3_configuration
+from app.playback.tools import PlaybackError, probe_media
 from app.storage.service import ingest_file, materialize_asset, resolve_asset
 from .client import UA, retry_after
 from .errors import IngestError
@@ -154,7 +156,7 @@ def _probe(path):
         video = next(s for s in data["streams"] if s.get("codec_type") == "video")
         audio = next((s for s in data["streams"] if s.get("codec_type") == "audio"), {})
         duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
-        if duration <= 0:
+        if not math.isfinite(duration) or duration <= 0:
             raise ValueError()
         return video, audio, duration
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, StopIteration):
@@ -169,7 +171,7 @@ def cleanup_media_scratch(part_id, fingerprint):
         shutil.rmtree(target)
 
 
-def archive_media(db, client, video, part, policy, *, guard=lambda: None):
+def archive_media(db, client, video, part, policy, *, guard=lambda: None, authorize_media=None):
     """Called under the runner's cross-worker video lock; recheck before download."""
     try:
         import yt_dlp
@@ -230,6 +232,11 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
                         command.extend(["-map", f"{index}:a:0"])
                 command.extend(["-c", "copy", *_merge_options(info), "-f", "mp4", str(temporary)])
                 _run_ffmpeg(command, temporary, maximum, int(policy.get("download_timeout_seconds", 21600)), guard)
+                for source, selected in zip(info["__files_to_merge"], info["requested_formats"], strict=True):
+                    if str(selected.get("acodec", "")).startswith(("ec-3", "eac3")):
+                        reference = ec3_configuration(Path(source))
+                        repaired = preserve_ec3_configuration(temporary, reference, check_active=guard)
+                        merge_evidence["ec3_configuration_restored"] = repaired
                 if any(item.get("dynamic_range") == "DV" or str(item.get("acodec", "")).startswith(("ec-3", "eac3")) for item in info["requested_formats"]):
                     hashes = {}
                     for source, selected in zip(info["__files_to_merge"], info["requested_formats"], strict=True):
@@ -302,6 +309,8 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
                     client.before_video()
                 current = client.view(video.bvid)
                 record_access(video, current)
+                if authorize_media is not None:
+                    authorize_media()
                 matching = [p for p in current.get("pages", []) if str(p.get("cid")) == part.cid]
                 if len(matching) != 1:
                     raise IngestError("分P来源已变化，请创建新归档轮次", code="source_changed", retryable=False)
@@ -363,8 +372,12 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None):
             raise IngestError("媒体超过大小预算", code="media_budget", retryable=False)
         guard()
         vstream, astream, duration = _probe(path)
-        dolby = inspect_dolby(path, vstream, astream, guard=guard)
         selected = info.get("requested_formats") or [info]
+        audio_candidate = verify_selected_audio(selected, astream)
+        # yt-dlp can reuse a complete but unpublished scratch merge after an
+        # earlier verification failure, without invoking ControlledMerger.
+        dolby = inspect_dolby(path, vstream, astream, guard=guard, repair_scratch=True)
+        dolby["source_atmos_candidate"] = audio_candidate
         dolby["source_dv_candidate"] = any(item.get("dynamic_range") == "DV" for item in selected)
         if dolby["source_dv_candidate"] and not dolby["dolby_vision"]:
             raise IngestError("候选杜比视界文件缺少有效 DOVI/RPU 配置，未发布归档", code="dolby_metadata_missing", retryable=False)
@@ -399,6 +412,13 @@ def _merge_options(info):
     return options
 
 
+def verify_selected_audio(selected, audio):
+    candidate = any(str(item.get("acodec", "")).startswith(("ec-3", "eac3")) for item in selected)
+    if candidate and audio.get("codec_name") != "eac3":
+        raise IngestError("已选 EC-3 音轨与下载结果不符，未发布归档", code="audio_codec_mismatch", retryable=False)
+    return candidate
+
+
 def _colour_properties(stream):
     transfer = str(stream.get("color_transfer") or "unknown").lower()
     side_types = [str(item.get("side_data_type") or "").lower() for item in stream.get("side_data_list", [])]
@@ -431,12 +451,13 @@ def _packet_hash(path, kind, guard):
         return digest.split("=", 1)[1]
 
 
-def inspect_dolby(path, video, audio, *, guard=lambda: None):
+def inspect_dolby(path, video, audio, *, guard=lambda: None, repair_scratch=False):
     """Evidence from files, not HEVC/E-AC-3 codec names or source advertisements."""
     config = _dovi_configuration(video)
     evidence = {"dolby_vision": bool(config and config.get("rpu_present_flag") == 1 and (config.get("dv_profile") or 0) > 0),
                 "dovi": config, "dolby_atmos": False, "audio_codec": audio.get("codec_name"),
                 "audio_profile": audio.get("profile"), "audio_channels": audio.get("channels"),
+                "audio_sample_rate": _positive(audio.get("sample_rate")),
                 "atmos_evidence": "not_eac3", "spatial_audio_output_verified": False}
     if audio.get("codec_name") != "eac3":
         return evidence
@@ -457,6 +478,30 @@ def inspect_dolby(path, video, audio, *, guard=lambda: None):
         joc = raw.get("codec_name") == "eac3" and raw.get("profile") == "Dolby Digital Plus + Dolby Atmos"
         evidence.update(dolby_atmos=joc, atmos_evidence="eac3_joc_bitstream_profile" if joc else "joc_not_reported",
                         raw_audio_profile=raw.get("profile"), audio_verification_sample_seconds=10)
+        evidence["ec3"] = ec3_configuration(path)
+        if joc and evidence["ec3"] and not evidence["ec3"]["joc"]:
+            if not repair_scratch:
+                raise IngestError("EC-3 初始化信息缺少已检测到的 JOC 配置", code="dolby_metadata_missing", retryable=False)
+            # Only archive_media's unpublished download scratch may be repaired.
+            # Source dec3 can itself lack JOC (AC-3 + dependent EC-3 sources).
+            # Read the real complexity from the already bounded raw sample,
+            # retaining the muxer's measured substream layout. Never guess 16.
+            if path.is_symlink() or not path.resolve().is_relative_to((settings.scratch_dir / "downloads").resolve()):
+                raise IngestError("拒绝修改已发布媒体或非下载临时文件", code="invalid_path", retryable=False)
+            try:
+                complexity = elementary_joc_complexity(sample.read_bytes())
+                if complexity is None:
+                    raise PlaybackError("JOC complexity was not present in the verified sample")
+                reference = {**evidence["ec3"], "joc": True, "complexity_index_type_a": complexity}
+                kinds = ("video", "audio") if video.get("codec_name") else ("audio",)
+                before = {kind: _packet_hash(path, kind, guard) for kind in kinds}
+                restored = preserve_ec3_configuration(path, reference, check_active=guard)
+                if any(_packet_hash(path, kind, guard) != digest for kind, digest in before.items()):
+                    raise PlaybackError("EC-3 repair changed encoded media")
+            except PlaybackError:
+                raise IngestError("无法安全恢复原码流中的 JOC 配置，未发布归档", code="dolby_metadata_missing", retryable=False) from None
+            evidence.update(ec3=ec3_configuration(path), ec3_scratch_configuration_restored=restored,
+                            ec3_repair_payload_hashes=before, ec3_configuration_evidence="eac3_addbsi_sample")
     return evidence
 
 
@@ -522,19 +567,62 @@ def _verify_decode(path, timeout, guard):
         raise
 
 
-def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
-    """Preserve the archive; alias compatible bytes or create a verified SDR copy."""
+def _audio_compatible_copy(source, output, video, audio, duration, maximum, timeout, guard):
+    """Encode only EC-3 audio; fail closed if the copied picture/signaling changes."""
+    full = probe_media(source, check_active=guard, extended=True)
+    videos = [s for s in full["streams"] if s.get("codec_type") == "video"]
+    audios = [s for s in full["streams"] if s.get("codec_type") == "audio"]
+    if len(videos) != 1 or len(audios) != 1:
+        raise IngestError("音频兼容副本要求单视频、单音轨，原档已保留", code="unsupported_media", retryable=False)
+    dovi = _dovi_configuration(video)
+    if any("dovi" in str(s.get("side_data_type", "")).lower() or "dolby vision" in str(s.get("side_data_type", "")).lower()
+           for s in video.get("side_data_list", [])) and not dovi:
+        raise IngestError("未知杜比视界配置，未生成兼容副本", code="dolby_metadata_missing", retryable=False)
+    arguments = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-n", "-xerror", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0", "-sn", "-dn", "-map_metadata", "0", "-c:v", "copy",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ac", "2", "-threads", "2",
+        "-strict", "unofficial", "-movflags", "+faststart+write_colr"]
+    if video.get("codec_name") == "hevc":
+        arguments += ["-tag:v", "hvc1"]
+    _run_ffmpeg([*arguments, str(output)], output, maximum, timeout, guard)
+    if not output.is_file() or not 0 < output.stat().st_size <= maximum:
+        raise IngestError("音频兼容副本文件不完整或超过预算", code="conversion_failed")
     guard()
+    converted_video, converted_audio, converted_duration = _probe(output)
+    fields = ("codec_name", "profile", "pix_fmt", "width", "height", "color_transfer", "color_primaries", "color_space", "color_range")
+    if (any(video.get(field) is not None and converted_video.get(field) != video[field] for field in fields)
+            or _dovi_configuration(converted_video) != dovi
+            or converted_audio.get("codec_name") != "aac" or converted_audio.get("profile") != "LC"
+            or converted_audio.get("channels") != 2 or converted_audio.get("channel_layout") != "stereo"
+            or abs(converted_duration - duration) > 2):
+        raise IngestError("音频兼容副本的视频信令、音轨或时长验证失败", code="invalid_playback")
+    digest = _packet_hash(source, "video", guard)
+    if _packet_hash(output, "video", guard) != digest:
+        raise IngestError("音频兼容副本改变了视频码流，未发布", code="payload_verification_failed")
+    evidence = {**_colour_properties(converted_video), "compatibility_mode": "audio_only",
+        "video_stream_copy": True, "audio_transcoded": True, "source_audio_codec": audio["codec_name"],
+        "audio_codec": "aac", "audio_profile": "LC", "audio_channels": 2, "audio_channel_layout": "stereo",
+        "dolby_atmos": False, "ec3": {}, "dovi": dovi, "spatial_audio_output_verified": False,
+        "video_payload_hash": digest, "video_payload_verified": True}
+    return converted_video, converted_audio, converted_duration, evidence
+
+
+def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
+    """Preserve the archive; prefer picture-preserving AAC for EC-3 audio."""
+    guard()
+    audio_key = "video-copy-aac-v1:" + archive.asset_id
     key = "h264-aac-sdr-v1:" + archive.asset_id
-    existing = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id,
-        MediaVariant.kind == "playback", MediaVariant.format_key == key))
-    if existing:
-        try:
-            resolve_asset(db, existing.asset_id)
-        except Exception:
-            pass
-        else:
-            return existing, True
+    existing = None
+    for candidate_key in ([audio_key] if archive.audio_codec == "eac3" else [audio_key, key]):
+        candidate = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id,
+            MediaVariant.kind == "playback", MediaVariant.format_key == candidate_key))
+        if candidate:
+            try:
+                resolve_asset(db, candidate.asset_id)
+            except Exception:
+                pass
+            else:
+                return candidate, True
     guard()
     original_asset = db.get(Asset, archive.asset_id)
     if not original_asset:
@@ -555,7 +643,13 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
         source_stream = vstream
         colors = _colour_properties(vstream)
         _record_source_properties(db, part, archive, vstream)
-        if colors["hdr"] or colors["wide_gamut"]:
+        audio_only = astream.get("codec_name") == "eac3" and vstream.get("codec_name") in {"h264", "hevc", "av1"}
+        evidence = {}
+        if audio_only:
+            key = audio_key
+        existing = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id,
+            MediaVariant.kind == "playback", MediaVariant.format_key == key))
+        if not audio_only and (colors["hdr"] or colors["wide_gamut"]):
             _record_source_properties(db, part, archive, vstream, compatibility="hdr_conversion_unsupported")
             raise IngestError("HDR/广色域原档已保留；尚不支持经验证的 SDR 色彩转换", code="hdr_conversion_unsupported", retryable=False)
         compatible = (original_asset.mime_type == "video/mp4"
@@ -564,7 +658,13 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
             and (not astream or (astream.get("codec_name") == "aac"
                 and astream.get("profile") in {None, "LC"}
                 and int(astream.get("channels") or 2) <= 2)))
-        if compatible:
+        if audio_only:
+            output = folder / "playback.mp4"
+            vstream, astream, duration, evidence = _audio_compatible_copy(
+                source, output, vstream, astream, duration, maximum, timeout, guard)
+            evidence.update(source_variant_id=archive.id, source_asset_id=archive.asset_id)
+            asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"))
+        elif compatible:
             asset = original_asset
         else:
             output = folder / "playback.mp4"
@@ -591,9 +691,10 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
         variant.width, variant.height = vstream.get("width", 0), vstream.get("height", 0)
         variant.video_codec, variant.audio_codec = vstream.get("codec_name", ""), astream.get("codec_name", "")
         variant.duration = duration
+        variant.metadata_json = evidence
         db.add(variant)
         db.flush()
         _record_source_properties(db, part, archive, source_stream, compatibility="ready", playback_variant_id=variant.id)
         _record_source_properties(db, part, variant, vstream,
-            **_measured_properties(vstream, astream, duration, asset.size), compatibility="ready")
+            **_measured_properties(vstream, astream, duration, asset.size), **evidence, compatibility="ready")
         return variant, compatible

@@ -1,4 +1,5 @@
 import type Hls from 'hls.js';
+import { probeAudioSupport, type AudioFormat } from './audioCapabilities.ts';
 import {
   deliveryHost,
   emptyRuntimeStats,
@@ -9,6 +10,7 @@ import {
 export function createMediaAdapter(
   onError: (kind: 'network' | 'media', message: string) => void,
   onStats: (stats: RuntimeStats) => void = () => {},
+  loadHls: () => Promise<{ default: typeof Hls }> = () => import('hls.js'),
 ) {
   let hls: Hls | null = null;
   let generation = 0;
@@ -23,7 +25,13 @@ export function createMediaAdapter(
     hls?.destroy();
     hls = null;
   }
-  async function attach(video: HTMLVideoElement, url: string, protocol?: 'file' | 'hls') {
+  async function attach(
+    video: HTMLVideoElement,
+    url: string,
+    protocol?: 'file' | 'hls',
+    media?: AudioFormat,
+    startPosition = 0,
+  ) {
     destroy();
     const key = generation;
     const urls = new Set<string>();
@@ -71,6 +79,16 @@ export function createMediaAdapter(
       }
     }
     timer = setInterval(publish, 1000);
+    const native = protocol === 'hls' && !!video.canPlayType('application/vnd.apple.mpegurl');
+    void probeAudioSupport(
+      media,
+      typeof navigator === 'undefined' ? undefined : navigator.mediaCapabilities,
+      protocol === 'hls' && !native ? 'media-source' : 'file',
+    ).then((value) => {
+      if (key !== generation) return;
+      stats.audioSupport = value;
+      publish();
+    });
     // Inline Safari playback retains our controls and danmaku in the page.
     video.controls = false;
     video.playsInline = true;
@@ -82,18 +100,16 @@ export function createMediaAdapter(
       video.src = url;
       return;
     }
-    const native = !!video.canPlayType('application/vnd.apple.mpegurl');
-    const safari =
-      /Safari/.test(navigator.userAgent) &&
-      !/Chrome|Chromium|CriOS|Edg|OPR/.test(navigator.userAgent);
-    if (safari && native) {
+    // Native HLS can retain the system EC-3/JOC path in every capable WebView,
+    // including iOS browsers whose user agent does not identify them as Safari.
+    if (native) {
       stats.engine = '浏览器原生 HLS';
       publish();
       video.src = url;
       return;
     }
     try {
-      const { default: HlsPlayer } = await import('hls.js');
+      const { default: HlsPlayer } = await loadHls();
       if (key !== generation) return;
       if (HlsPlayer.isSupported()) {
         stats.engine = `hls.js ${HlsPlayer.version} · MSE`;
@@ -103,6 +119,7 @@ export function createMediaAdapter(
           maxBufferLength: 30,
           maxMaxBufferLength: 60,
           backBufferLength: 30,
+          ...(Number.isFinite(startPosition) && startPosition > 0 ? { startPosition } : {}),
         });
         hls.on(HlsPlayer.Events.ERROR, (_, data) => {
           if (key !== generation || !data.fatal) return;

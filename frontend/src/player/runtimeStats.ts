@@ -1,3 +1,4 @@
+import { unknownAudioSupport, type AudioCapability } from './audioCapabilities.ts';
 export interface RuntimeStats {
   engine: string;
   mime: string | null;
@@ -11,6 +12,7 @@ export interface RuntimeStats {
   hostIsFinal: boolean;
   networkBps: number | null;
   networkSampleAt: number | null;
+  audioSupport: { ec3: AudioCapability; spatial: AudioCapability };
 }
 export const emptyRuntimeStats = (): RuntimeStats => ({
   engine: '—',
@@ -25,6 +27,7 @@ export const emptyRuntimeStats = (): RuntimeStats => ({
   hostIsFinal: false,
   networkBps: null,
   networkSampleAt: null,
+  audioSupport: unknownAudioSupport(),
 });
 export function deliveryHost(url: string, base = 'http://localhost') {
   try {

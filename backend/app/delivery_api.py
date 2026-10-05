@@ -17,7 +17,8 @@ from app import catalog, schemas
 from app.config import settings
 from app.db import get_db
 from app.jobs import enqueue
-from app.models import (Asset, AssetLocation, AuditLog, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot,
+from app.playback_limits import check_playback_creation, playback_creation_slot
+from app.models import (Asset, AssetLocation, AuditLog, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job,
                         MediaVariant, PlaybackSession, Setting, StorageObservation, StorageProfile,
                         SubtitleTrack, PlatformUser, UserSnapshot, Video, VideoCreator, VideoPart, VideoStatSnapshot, utcnow)
 from app.security import authenticated, require_admin, optional_identity, same_origin
@@ -90,10 +91,14 @@ def media_response(resolved, request):
 
 
 @router.post("/playback-sessions")
-def create_playback(body: schemas.PlaybackInput, identity=Depends(playback_identity), db: Session = Depends(get_db)):
-    from app.storage.routing import playback_routes, select_route
-    user = identity[0]
-    required(db, VideoPart, body.part_id)
+def create_playback(body: schemas.PlaybackInput, request: Request, identity=Depends(playback_identity), db: Session = Depends(get_db)):
+    digest = check_playback_creation(db, request, identity[0])
+    return _create_playback(body, identity[0], db, digest)
+
+
+def _create_playback(body, user, db, client_digest):
+    from app.storage.routing import playback_routes, choose_route
+    part = required(db, VideoPart, body.part_id)
     variants = list(db.scalars(select(MediaVariant).where(MediaVariant.part_id == body.part_id).order_by(MediaVariant.created_at.desc())))
     base = next((v for v in variants if v.id == body.variant_id), None) if body.variant_id else next(
         (v for kind in ("archive", "playback") for v in variants if v.kind == kind), None)
@@ -117,8 +122,8 @@ def create_playback(body: schemas.PlaybackInput, identity=Depends(playback_ident
                               state={}, expires_at=utcnow() + timedelta(hours=4))
     _, asset_ids, index = session_assets(db, session)
     try:
-        session.profile_id = select_route(db, asset_ids, route_id=body.route_id, user_id=user.id)
         routes = playback_routes(db, asset_ids, user_id=user.id)
+        session.profile_id = choose_route(routes, route_id=body.route_id)
     except Exception:
         raise HTTPException(503, "没有完整可用的存储节点，请检查媒体副本") from None
     row = db.get(Setting, "playback")
@@ -126,18 +131,22 @@ def create_playback(body: schemas.PlaybackInput, identity=Depends(playback_ident
     probe_asset_id = index["segments"][0]["asset_id"] if index else selected.asset_id
     routes = [dict(route) for route in routes]
     probe_ids = []
-    db.add(session)
-    db.flush()
-    for route in routes:
-        if len(probe_ids) < 3 and route.get("status") != "unavailable":
-            route["probe_url"] = f"/api/v1/playback-sessions/{session.id}/probe/{route['id']}"
-            route["probe_bytes"] = config.probe_bytes
-            probe_ids.append(route["id"])
-    session.state = {"guest_hash": user.guest_hash if user.id is None else "", "failed_profile_ids": [], "switch_count": 0, "probe_route_ids": probe_ids,
-                     "probe_asset_id": probe_asset_id, "reported_routes": []}
-    db.commit()
+    # Media preparation may read a remote HLS index. Hold the cross-worker quota
+    # lock only for the final recheck and the short database insertion/commit.
+    with playback_creation_slot(db, user, client_digest):
+        db.add(session)
+        db.flush()
+        for route in routes:
+            if len(probe_ids) < 3 and route.get("status") != "unavailable":
+                route["probe_url"] = f"/api/v1/playback-sessions/{session.id}/probe/{route['id']}"
+                route["probe_bytes"] = config.probe_bytes
+                probe_ids.append(route["id"])
+        session.state = {"guest_hash": user.guest_hash if user.id is None else "", "client_hash": client_digest,
+                         "failed_profile_ids": [], "switch_count": 0, "probe_route_ids": probe_ids,
+                         "probe_asset_id": probe_asset_id, "reported_routes": []}
+        db.commit()
     metadata = dict(selected.metadata_json or {})
-    video = required(db, Video, required(db, VideoPart, body.part_id).video_id)
+    video = required(db, Video, part.video_id)
     media_source = selected
     if index:
         media_source = next((v for v in variants if v.kind != "hls" and v.id == metadata.get("source_variant_id")), None)
@@ -331,6 +340,27 @@ def prepare(variant_id: str, user=Depends(require_admin), db: Session = Depends(
     segment_seconds = schemas.PlaybackSettings.model_validate(config.value if config else {}).segment_seconds
     job = enqueue(db, "prepare_media", variant.id, policy={"package": True, "analyze_loudness": True, "segment_seconds": segment_seconds})
     audit(db, user, "prepare", "media_variant", variant.id)
+    db.commit()
+    return catalog.job_view(job)
+
+
+@router.post("/admin/variants/{variant_id}/compatible", status_code=202)
+def compatible(variant_id: str, user=Depends(require_admin), db: Session = Depends(get_db)):
+    """Explicitly prepare a saved original; viewing never starts a conversion."""
+    variant = required(db, MediaVariant, variant_id)
+    if variant.kind != "archive":
+        raise HTTPException(422, "请选择视频原档生成兼容副本")
+    # Do not duplicate automatic work or implicitly resume an operator pause.
+    job = db.scalar(select(Job).where(Job.kind == "create_playback", Job.target_id == variant.id,
+        Job.status.in_(("queued", "running", "paused", "blocked"))).order_by(Job.created_at.desc(), Job.id).limit(1))
+    if job is None:
+        config = db.get(Setting, "ingest")
+        policy = schemas.IngestPolicy.model_validate(config.value if config else {}).model_dump()
+        # A new processing profile can recover old explicitly unsupported HDR
+        # results without resetting the successful historical task or archive.
+        job = enqueue(db, "create_playback", variant.id, policy=policy, frozen_policy=True,
+                      dedupe_key=f"compatible-v2:{variant.id}:{variant.asset_id}")
+    audit(db, user, "prepare_compatible", "media_variant", variant.id, {"job_id": job.id})
     db.commit()
     return catalog.job_view(job)
 

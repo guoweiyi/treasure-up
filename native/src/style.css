@@ -1,1 +1,26 @@
-:root{color-scheme:light;font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;color:#222438;background:#f4f5fb}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:32px 20px}main{width:min(100%,540px)}.brand{width:52px;height:52px;display:grid;place-items:center;background:#635bdb;color:#fff;border-radius:16px;font-size:28px;font-weight:750}.eyebrow{font-size:11px;letter-spacing:.16em;color:#74778f;margin-top:24px}h1{font-size:30px;line-height:1.25;letter-spacing:-.03em}.lead{color:#686d82;margin-bottom:32px}label{font-weight:650;display:block;margin-bottom:8px}input{width:100%;border:1px solid #d2d4e2;background:#fff;padding:13px 14px;border-radius:10px;font:inherit}input:focus{outline:3px solid #d9d5ff;border-color:#7770d9}.hint,footer{font-size:13px;color:#777b8b}.hint{margin-top:9px}button{border:0;border-radius:10px;padding:13px 20px;font:inherit;font-weight:600;cursor:pointer;background:#635bdb;color:#fff;width:100%;margin-top:14px}button:disabled{opacity:.5;cursor:wait}.secondary{background:transparent;color:#77738e;font-size:13px;border:1px solid #e0e0eb}#status{font-size:14px;min-height:1.5em;color:#a44747;overflow-wrap:anywhere}footer{margin-top:28px;border-top:1px solid #dedfea;padding-top:20px} @media(prefers-color-scheme:dark){:root{color-scheme:dark;background:#171824;color:#e8e8f4}input{background:#242535;border-color:#454559}.lead,.hint,footer{color:#adb0c1}.secondary{border-color:#39394c;color:#b2accb}footer{border-color:#38384b}#status{color:#f2a6a6}}
+:root { color-scheme: light; font: 16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; color: #23312e; background: #f2f5f3; --accent: #16847a; --muted: #667771; --surface: #fff; --border: #d7e1dc; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: max(32px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(32px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left)); }
+main { width: min(100%,920px); display: grid; gap: 32px; }
+.introduction { align-self: center; }
+.brand { width: 52px; height: 52px; display: grid; place-items: center; background: var(--accent); color: #fff; border-radius: 16px; font-size: 28px; font-weight: 750; }
+.eyebrow { font-size: 11px; letter-spacing: .14em; color: var(--muted); margin: 22px 0 10px; }
+h1 { font-size: clamp(26px,4vw,34px); line-height: 1.25; letter-spacing: -.03em; margin: 0 0 16px; }
+.lead { color: var(--muted); max-width: 30em; margin: 0; }
+.connection-card { min-width: 0; padding: 26px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 12px 40px #183f2c06; }
+label { font-weight: 650; display: block; margin-bottom: 10px; }
+input { width: 100%; min-height: 52px; border: 1px solid var(--border); background: var(--surface); color: inherit; padding: 12px 14px; border-radius: 10px; font: inherit; }
+:focus-visible { outline: 3px solid #16847a60; outline-offset: 3px; }
+input:focus { border-color: var(--accent); }
+.hint,footer { font-size: 13px; color: var(--muted); }
+.hint { margin: 10px 0 0; }
+button { border: 0; border-radius: 10px; min-height: 48px; padding: 12px 18px; font: inherit; font-weight: 600; cursor: pointer; background: var(--accent); color: #fff; width: 100%; margin-top: 18px; touch-action: manipulation; }
+button:active:not(:disabled) { filter: brightness(.9); }
+button:disabled { opacity: .5; cursor: wait; }
+.secondary { background: transparent; color: var(--muted); font-size: 13px; border: 1px solid var(--border); margin-top: 0; }
+#status { font-size: 14px; min-height: 1.5em; color: #a44747; overflow-wrap: anywhere; margin: 12px 0; }
+footer { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 18px; }
+@media (min-width:840px) { main { grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); gap: 64px; } }
+@media (max-width:480px) { .connection-card { padding: 22px 18px; border-radius: 16px; } main { gap: 24px; } }
+@media (max-height:600px) { body { align-items: start; } .brand { width: 44px; height: 44px; border-radius: 12px; } .eyebrow { margin-top: 12px; } }
+@media (prefers-color-scheme:dark) { :root { color-scheme: dark; background: #131c19; color: #e8f0ec; --muted: #a7b8af; --surface: #1b2722; --border: #34473d; --accent: #268f82; } #status { color: #f2aaa0; } }

@@ -21,6 +21,7 @@ const loading = ref(false),
   open = ref(false);
 const editId = ref(''),
   selected = ref<Row | null>(null),
+  paidPrompt = ref<Row | null>(null),
   history = ref<Row[]>([]);
 const form = reactive<Row>({});
 const selectedSource = ref('');
@@ -52,6 +53,7 @@ const defaults = {
   incremental_pages: 3,
   full_scan_interval_hours: 24,
   download_media: true,
+  include_paid_videos: false,
   fetch_comments: true,
   fetch_danmaku: true,
   fetch_subtitles: true,
@@ -117,7 +119,12 @@ async function edit(item?: Row) {
       account_id: item?.account_id || accounts.value[0]?.id || '',
       interval_minutes: item?.interval_minutes || 60,
       enabled: item?.enabled ?? true,
-      policy: { ...defaults, ...settings.ingest, ...item?.policy },
+      policy: {
+        ...defaults,
+        ...settings.ingest,
+        ...item?.policy,
+        include_paid_videos: item?.policy?.include_paid_videos === true,
+      },
     });
     if (form.policy.quality === '8k') form.policy.quality = '4320p';
     if (form.policy.quality === '4k') form.policy.quality = '2160p';
@@ -197,6 +204,27 @@ async function scan(item: Row, full = false) {
     saving.value = false;
   }
 }
+async function allowPaid() {
+  const item = paidPrompt.value;
+  if (!item || saving.value) return;
+  saving.value = true;
+  error.value = '';
+  try {
+    await write(
+      `/admin/sources/${item.id}`,
+      { policy: { ...item.policy, include_paid_videos: true } },
+      'PATCH',
+    );
+    await write(`/admin/sources/${item.id}/scan`, { full: true });
+    paidPrompt.value = null;
+    notice.value = '已允许保存充电视频，并加入完整检查队列';
+    await load();
+  } catch (e) {
+    error.value = errorText(e);
+  } finally {
+    saving.value = false;
+  }
+}
 async function toggle(item: Row, value: boolean | string | number) {
   try {
     await write(`/admin/sources/${item.id}`, { enabled: !!value }, 'PATCH');
@@ -227,7 +255,7 @@ onMounted(async () => {
     }
   }
   startPolling(() => {
-    if (!document.hidden && !open.value && !selected.value) void load(true);
+    if (!document.hidden && !open.value && !selected.value && !paidPrompt.value) void load(true);
   }, 30000);
 });
 onBeforeUnmount(() => {
@@ -281,6 +309,24 @@ onBeforeUnmount(() => {
         ><span
           >已复用 <b>{{ item.monitor.counts.reused || 0 }}</b></span
         >
+      </div>
+      <div v-if="item.monitor.paid?.detected_count" class="source-paid-notice">
+        <span
+          >发现 {{ item.monitor.paid.detected_count }} 个充电视频<span
+            v-if="item.monitor.paid.pending_count"
+          >
+            · {{ item.monitor.paid.pending_count }} 个等待确认</span
+          ></span
+        >
+        <el-button
+          v-if="item.monitor.paid.consent_required"
+          :disabled="saving"
+          @click="paidPrompt = item"
+          >选择是否保存</el-button
+        >
+        <span v-else class="muted">{{
+          item.policy?.include_paid_videos ? '已允许同步' : '已跳过'
+        }}</span>
       </div>
       <div class="source-row-actions">
         <el-button :disabled="saving" @click="scan(item)">检查更新</el-button
@@ -389,6 +435,16 @@ onBeforeUnmount(() => {
             ><label><input v-model="form.policy.fetch_danmaku" type="checkbox" /> 弹幕</label
             ><label><input v-model="form.policy.fetch_subtitles" type="checkbox" /> 字幕</label>
           </div>
+        </fieldset>
+        <fieldset>
+          <legend>充电专属内容</legend>
+          <label class="source-checkbox"
+            ><input v-model="form.policy.include_paid_videos" type="checkbox" />
+            也保存这个来源的充电视频</label
+          >
+          <p class="muted">
+            只保存当前账号有权观看的内容。未勾选时会先记录发现的视频，再由你确认。
+          </p>
         </fieldset>
         <CommentBudgetFields :value="form.policy" />
         <details>
@@ -505,6 +561,27 @@ onBeforeUnmount(() => {
       </form>
     </el-dialog>
     <el-dialog
+      :model-value="!!paidPrompt"
+      title="保存充电视频？"
+      width="480px"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      @close="paidPrompt = null"
+    >
+      <p>
+        “{{ paidPrompt?.title }}”中发现
+        {{ paidPrompt?.monitor.paid?.detected_count || 0 }} 个充电视频。
+      </p>
+      <p>允许后会保存这个来源中账号有权访问的充电视频，并在后续检查时同步新增内容。</p>
+      <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+      <template #footer
+        ><el-button :disabled="saving" @click="paidPrompt = null">暂不保存</el-button
+        ><el-button type="primary" :loading="saving" @click="allowPaid"
+          >保存全部可访问的充电视频</el-button
+        ></template
+      >
+    </el-dialog>
+    <el-dialog
       :model-value="!!selected"
       :title="`${selected?.title || ''} · 检查记录`"
       width="720px"
@@ -535,6 +612,15 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 14px;
+  flex-wrap: wrap;
+}
+.source-paid-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0 0;
+  font-size: 13px;
+  color: #826233;
   flex-wrap: wrap;
 }
 .source-toolbar {

@@ -1,6 +1,6 @@
 export type QueueMode = 'pause' | 'repeat' | 'continuous';
 export interface PlaylistScope {
-  type: 'collection' | 'creator';
+  type: 'collection' | 'creator' | 'personal';
   id: string;
 }
 export interface QueuePreferences {
@@ -18,7 +18,9 @@ export type QueueTarget =
   | { kind: 'stop' };
 
 export function playlistScope(query: Record<string, unknown>): PlaylistScope | null {
-  return (query.list_type === 'collection' || query.list_type === 'creator') &&
+  return (query.list_type === 'collection' ||
+    query.list_type === 'creator' ||
+    query.list_type === 'personal') &&
     typeof query.list_id === 'string' &&
     query.list_id
     ? { type: query.list_type, id: query.list_id }

@@ -144,6 +144,8 @@ def test_real_dolby_hls_init_and_payloads_preserved(tmp_path, monkeypatch):
     subprocess.run([str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-i", str(samples / "video.mp4"),
         "-i", str(samples / "audio.m4a"), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-strict", "unofficial",
         "-movflags", "+write_colr", "-tag:v", "hvc1", "-tag:a", "ec-3", str(source)], check=True, capture_output=True)
+    from app.playback.ec3 import ec3_configuration, preserve_ec3_configuration
+    preserve_ec3_configuration(source, ec3_configuration(samples / "audio.m4a"))
     before = file_digest(source)
     probe = probe_media(source)
     video_stream = next(s for s in probe["streams"] if s["codec_type"] == "video")
@@ -167,6 +169,11 @@ def test_real_dolby_hls_init_and_payloads_preserved(tmp_path, monkeypatch):
             "video": "42238cb1d3b87270d6dffa99f68343026db2e7574fc0695ed11f4f983f464de2",
             "audio": "10004ecb6a36f99b08852a86cff2c96f35b5375fa82696e7a92b3ca1600cabab"}
         assert metadata["spatial_audio_output_verified"] is False
+        assert metadata["dolby_atmos"] is True
+        assert metadata["atmos_evidence"] == "eac3_joc_bitstream_profile"
+        assert metadata["ec3_configuration_verified"] is True
+        assert metadata["ec3"]["joc"] is True
+        assert metadata["ec3"]["complexity_index_type_a"] == 16
         index = load_hls_index(db, package.asset_id)
         initialization = materialize_asset(db, index["init_asset_id"], settings.scratch_dir / "verify-init.mp4")
         init_video = next(s for s in probe_media(initialization)["streams"] if s["codec_type"] == "video")

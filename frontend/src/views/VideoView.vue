@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { api, write, errorText, statusText, session, date } from '../api';
+import { api, errorText, statusText, session, date } from '../api';
 import { compactSpecification, measuredVariant, type VideoDetail } from '../player/mediaInfo';
 import {
   playlistScope,
@@ -19,7 +19,9 @@ import CommentsPanel from '../components/CommentsPanel.vue';
 import EmptyState from '../components/EmptyState.vue';
 import RelatedVideos from '../components/RelatedVideos.vue';
 import VideoUpCard from '../components/VideoUpCard.vue';
+import SaveToList from '../components/SaveToList.vue';
 import UiIcon from '../components/UiIcon.vue';
+import ContentBadges from '../components/ContentBadges.vue';
 import PartSelector from '../player/PartSelector.vue';
 import { count } from '../utils/format';
 const route = useRoute(),
@@ -29,8 +31,7 @@ const route = useRoute(),
   activeVariantId = ref(''),
   heading = ref<HTMLElement>(),
   error = ref(''),
-  actionError = ref(''),
-  busy = ref(false);
+  actionError = ref('');
 const player = ref<InstanceType<typeof ArchivePlayer>>(),
   playing = ref(false),
   autoStart = ref(false),
@@ -136,29 +137,6 @@ async function load() {
     if (n === seq) error.value = errorText(e);
   }
 }
-async function star() {
-  if (!video.value || busy.value) return;
-  if (!session.user) {
-    await router.push({ path: '/login', query: { next: route.fullPath } });
-    return;
-  }
-  const current = video.value;
-  busy.value = true;
-  actionError.value = '';
-  try {
-    const result = await write<{ starred: boolean }>(
-      `/videos/${current.id}/star`,
-      { starred: !current.starred },
-      'PUT',
-    );
-    if (video.value?.id === current.id) video.value.starred = result.starred;
-  } catch (e) {
-    if (video.value?.id === current.id) actionError.value = errorText(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
 function selectPart(id: string, automatic = false) {
   if (partId.value === id) return;
   autoStart.value = automatic || preferences.value.autoStart;
@@ -246,15 +224,7 @@ onBeforeUnmount(() => {
       <div class="watch-main">
         <header ref="heading" class="watch-heading">
           <h1>{{ video.title }}</h1>
-          <div v-if="video.content_features" class="media-feature-badges">
-            <span v-if="video.content_features.charging_exclusive" title="充电专属内容"
-              >充电专属</span
-            ><span v-if="video.content_features.dolby_vision" title="归档包含杜比视界"
-              >Dolby Vision</span
-            ><span v-if="video.content_features.dolby_atmos" title="归档包含杜比全景声"
-              >Dolby Atmos</span
-            >
-          </div>
+          <ContentBadges :features="video.content_features" />
           <div class="video-meta">
             <span v-if="video.stats?.view != null"
               ><UiIcon name="play" />{{ count(video.stats.view) }} 播放</span
@@ -294,35 +264,6 @@ onBeforeUnmount(() => {
         >
           <span>{{ archiveSpecification }}</span>
         </div>
-        <PlaybackQueue
-          :items="queueItems"
-          :current-id="video.id"
-          :current-title="video.title"
-          :part-title="part?.title"
-          :part-position="part?.position"
-          :part-count="video.parts?.length"
-          :playing="playing"
-          :title="queueTitle"
-          :total="queueTotal"
-          :busy="queueBusy"
-          :error="queueError"
-          :preferences="preferences"
-          :previous="hasPrevious"
-          :next="hasNext"
-          :transitioning="transitioning"
-          @preferences="updatePreferences"
-          @previous="advance(-1)"
-          @next="advance(1)"
-          @select="selectVideo"
-          @more="queueItems.some((item) => item.id === video?.id) ? queue.more() : queue.locate()"
-        />
-        <PartSelector
-          v-if="video.parts && video.parts.length > 1"
-          class="mobile-parts"
-          :parts="video.parts"
-          :selected="partId"
-          @select="selectPart"
-        />
         <div class="video-actionbar">
           <div
             class="source-statistics"
@@ -346,21 +287,12 @@ onBeforeUnmount(() => {
             >
             <span v-if="video.stats?.observed_at" class="statistics-note">B 站统计快照</span>
           </div>
-          <button
-            :disabled="busy"
-            class="star-button"
-            :aria-pressed="video.starred"
-            :title="
-              !session.user
-                ? '登录后保存到我的星标'
-                : video.starred
-                  ? '从我的星标移除'
-                  : '保存到我的星标'
-            "
-            @click="star"
-          >
-            <UiIcon name="star" />{{ busy ? '保存中…' : video.starred ? '已星标' : '星标' }}
-          </button>
+          <SaveToList
+            :video-id="video.id"
+            :title="video.title"
+            :starred="video.starred"
+            @change="video.starred = $event"
+          />
           <RouterLink
             v-if="canEdit"
             :to="{ path: '/admin/videos', query: { edit: video.id } }"
@@ -398,19 +330,83 @@ onBeforeUnmount(() => {
         >
           这条视频的归档{{ statusText(video.capture_status) }}，部分弹幕、评论或分 P 可能尚未保存。
         </p>
-        <CommentsPanel :video-id="video.id" />
       </div>
       <aside class="watch-sidebar">
         <VideoUpCard :creators="video.creators" />
+        <PlaybackQueue
+          :items="queueItems"
+          :current-id="video.id"
+          :current-title="video.title"
+          :part-title="part?.title"
+          :part-position="part?.position"
+          :part-count="video.parts?.length"
+          :playing="playing"
+          :title="queueTitle"
+          :total="queueTotal"
+          :busy="queueBusy"
+          :error="queueError"
+          :preferences="preferences"
+          :previous="hasPrevious"
+          :next="hasNext"
+          :transitioning="transitioning"
+          @preferences="updatePreferences"
+          @previous="advance(-1)"
+          @next="advance(1)"
+          @select="selectVideo"
+          @more="queueItems.some((item) => item.id === video?.id) ? queue.more() : queue.locate()"
+        />
+
         <PartSelector
           v-if="video.parts && video.parts.length > 1"
-          class="desktop-parts"
           :parts="video.parts"
           :selected="partId"
           @select="selectPart"
         />
         <RelatedVideos :video="video" />
       </aside>
+      <CommentsPanel class="watch-comments" :video-id="video.id" />
     </div>
   </main>
 </template>
+
+<style scoped>
+.watch-layout {
+  align-items: start;
+  column-gap: 28px;
+  row-gap: 0;
+}
+.watch-main {
+  grid-column: 1;
+  grid-row: 1;
+}
+.watch-sidebar {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.watch-comments {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+}
+.watch-sidebar :deep(.playback-queue) {
+  margin: 18px 0;
+}
+@media (max-width: 950px) {
+  .watch-layout {
+    display: flex;
+    flex-direction: column;
+  }
+  .watch-main,
+  .watch-sidebar,
+  .watch-comments {
+    width: 100%;
+  }
+  .watch-sidebar {
+    display: block;
+    margin: 20px 0;
+  }
+  .watch-sidebar :deep(.related-videos) {
+    display: none;
+  }
+}
+</style>

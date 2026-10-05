@@ -144,6 +144,25 @@ class VideoStar(Entity, Base):
     video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
 
 
+class PersonalPlaylist(Entity, Base):
+    __tablename__ = "personal_playlists"
+    __table_args__ = (UniqueConstraint("user_id", "system_key"),)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(String(1000), default="")
+    system_key: Mapped[str | None] = mapped_column(String(30))
+
+
+class PersonalPlaylistItem(Entity, Base):
+    __tablename__ = "personal_playlist_items"
+    __table_args__ = (UniqueConstraint("playlist_id", "video_id"),
+                     Index("ix_personal_playlist_items_order", "playlist_id", "created_at", "id"))
+    playlist_id: Mapped[str] = mapped_column(ForeignKey("personal_playlists.id", ondelete="CASCADE"), index=True)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
+    note: Mapped[str] = mapped_column(String(2000), default="")
+    watched: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+
 class VideoPart(Entity, Base):
     __tablename__ = "video_parts"
     __table_args__ = (UniqueConstraint("video_id", "cid"),)

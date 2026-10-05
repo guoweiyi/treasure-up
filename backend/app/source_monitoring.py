@@ -16,7 +16,7 @@ from app.source_labels import apply_source_title
 
 
 COUNTS = ("observed", "new_items", "new_videos", "newly_published", "newly_favorited",
-          "queued", "reused", "skipped", "not_observed")
+          "queued", "reused", "skipped", "not_observed", "paid_detected", "paid_skipped")
 
 
 def _date(value):
@@ -229,6 +229,11 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
         ctx.db.flush()
         scan["counts"]["new_videos"] += 1
     item.video_id = video.id
+    from app.paid_capture import consent, is_paid, paid_hint
+    paid = paid_hint(raw) or is_paid(video) or observation.get("paid") is True
+    if paid:
+        observation["paid"] = True
+        scan["counts"]["paid_detected"] += 1
     if scan.get("creator_id") and not ctx.db.scalar(select(VideoCreator.id).where(VideoCreator.video_id == video.id,
                 VideoCreator.creator_id == scan["creator_id"], VideoCreator.role == "owner")):
         ctx.db.add(VideoCreator(video_id=video.id, creator_id=scan["creator_id"], role="owner"))
@@ -236,7 +241,7 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
     decision = observation.get("archive_decision", "existing")
     # A listing can temporarily hide its BVID. Once available, retry the
     # archive decision even if its source event timestamp has not advanced.
-    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending", "unavailable", "deleted_locally")
+    eligible = new_item or new_event or observation.get("archive_decision") in (None, "queued", "active", "retry_pending", "unavailable", "deleted_locally", "paid_consent_required")
     if scan["initial_strategy"] == "new_only":
         if not after_baseline:
             eligible = False
@@ -249,6 +254,15 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
     elif scan["initial_strategy"] == "latest":
         if observation.get("initial_window_eligible") is False and not observation.get("latest_new_event_eligible"):
             eligible, decision = False, "initial_limit"
+    if paid:
+        if consent(ctx.db, collection.id, ctx.job.account_id):
+            # Explicit "all accessible paid videos" is a separate grant from
+            # the initial window for ordinary videos. Existing stopped jobs
+            # remain protected by enqueue_archive's normal reuse/stop checks.
+            eligible = True
+        else:
+            eligible, decision = False, "paid_consent_required"
+            scan["counts"]["paid_skipped"] += 1
     if not ctx.policy.get("archive", True):
         eligible, decision = False, "scan_only"
     if eligible:
@@ -289,6 +303,8 @@ def scan_source(ctx, *, user_snapshot, enqueue_archive, now):
     if ctx.cp.get("collection_done"):
         return True
     scan = ctx.cp.get("source_scan") or _initial_scan(ctx, collection, now())
+    for key in COUNTS:
+        scan["counts"].setdefault(key, 0)
     _publish(ctx, collection, scan)
     ctx.save()
     if collection.kind == "creator" and not scan.get("profile_done"):

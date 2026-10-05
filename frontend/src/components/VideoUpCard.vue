@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onBeforeUnmount } from 'vue';
+import CreatorBio from './CreatorBio.vue';
 import { api } from '../api';
 import type { Creator } from '../types';
 import type { VideoCreator } from '../player/mediaInfo';
@@ -31,6 +32,9 @@ watch(
   },
   { immediate: true },
 );
+onBeforeUnmount(() => {
+  request++;
+});
 </script>
 <template>
   <section class="watch-up-section">
@@ -50,11 +54,13 @@ watch(
           >{{ creator.name }}<span class="up-label">UP</span></RouterLink
         >
         <div class="creator-contribution">{{ creator.roles.join(' · ') }}</div>
-        <p v-if="details[creator.id]?.description" class="clamp-two">
-          {{ details[creator.id]?.description }}
-        </p>
+        <CreatorBio
+          v-if="details[creator.id]?.description"
+          :text="details[creator.id]?.description"
+          :limit="60"
+        />
         <RouterLink :to="`/creators/${creator.id}`" class="up-space-link"
-          >查看已收藏作品<span v-if="details[creator.id]?.saved_count != null">
+          >查看已保存视频<span v-if="details[creator.id]?.saved_count != null">
             · {{ details[creator.id]?.saved_count }}</span
           ></RouterLink
         >

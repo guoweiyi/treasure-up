@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Treasure Up · B站选片助手
 // @namespace    treasure-up
-// @version      1.0.0
+// @version      1.1.0
 // @description  在B站选中视频，批量加入自己的 Treasure Up 备份库。需要 Tampermonkey 5.0+。
 // @author       Treasure Up
 // @match        https://www.bilibili.com/*
@@ -30,7 +30,7 @@
   // CORE-BEGIN: pure helpers and an injected GM client, tested directly from this file.
   const MAX_BATCH = 50;
   const BVID = /^BV[A-Za-z0-9]{10}$/;
-  const TOKEN = /^tu_ingest_[A-Za-z0-9_-]{32,128}$/;
+  const TOKEN = /^tu_ingest_[A-Za-z0-9_-]{43}$/;
   function extractBvids(text) {
     const matches =
       String(text || '').match(/(?<![A-Za-z0-9])BV[A-Za-z0-9]{10}(?![A-Za-z0-9])/g) || [];
@@ -108,6 +108,38 @@
           : '请求失败，请在后台检查集成设置。';
     if (token) text = text.split(token).join('[令牌已隐藏]');
     return text.replace(/tu_ingest_[A-Za-z0-9_-]+/g, '[令牌已隐藏]').slice(0, 600);
+  }
+  function responseError(status, detail, token = '') {
+    const help = {
+      401: '令牌无效、已过期或已撤销。请在后台「浏览器采集」新建令牌，再到连接设置中替换。',
+      403: '访问被拒绝。请检查令牌所属管理员是否有效，以及反向代理的访问限制。',
+      404: '没有找到选片助手接口。请使用视频库站点根地址，并确认服务已升级到支持浏览器采集的版本。',
+      409: '采集账号不可用。请在后台「B站账号」中更新或验证令牌绑定的账号。',
+      422: '提交参数未通过校验。请检查 BV 号，并从后台重新安装最新版选片助手。',
+      429: '提交过于频繁。已选视频仍保留，请稍后手动重试，不必连续点击。',
+    };
+    const message =
+      help[status] ||
+      (status >= 500
+        ? '服务暂时不可用。请确认视频库可以打开，稍后再试；提交超时后可先到后台查看任务。'
+        : '请求失败，请检查服务配置。');
+    return `HTTP ${status} · ${message}${detail ? `\n服务提示：${safeError(detail, token)}` : ''}`;
+  }
+  function environmentIssue(gm) {
+    if (!supportedManager(gm?.info))
+      return '需要 Tampermonkey 5.0+ 的 DOM 隔离环境。请从后台重新安装脚本；不要改为页面沙箱。';
+    if (
+      ['getValue', 'setValue', 'getTab', 'saveTab', 'xmlHttpRequest'].some(
+        (name) => typeof gm[name] !== 'function',
+      )
+    )
+      return '脚本权限不完整。请从后台重新安装选片助手，确认安装后刷新 B站页面。';
+    return '';
+  }
+  // A virtualized card can keep its DOM node while its old link disappears.
+  function invalidateCards(cards, root) {
+    for (const [card] of cards)
+      if (!card.isConnected || card === root || root.contains?.(card)) cards.delete(card);
   }
   function mergeSelection(current, candidates) {
     const result = new Map(current);
@@ -220,6 +252,10 @@
             }, timeoutMs);
           }),
         ]);
+        if (!response.status)
+          throw new Error(
+            '没有收到服务响应。请先直接打开服务地址，确认网络、证书与 Tampermonkey 的跨域访问授权；另一台设备不能使用服务器的 localhost。',
+          );
         // Defence in depth only. redirect:error prevents transmission to a redirect target before this check.
         if (
           !response.finalUrl ||
@@ -232,11 +268,13 @@
           try {
             body = JSON.parse(String(response.responseText || '').slice(0, 100000));
           } catch {
+            if (response.status < 200 || response.status >= 300)
+              throw new Error(responseError(response.status));
             throw new Error('服务没有返回有效 JSON，请确认这是 Treasure Up 的站点地址。');
           }
         }
         if (response.status < 200 || response.status >= 300)
-          throw new Error(`HTTP ${response.status} · ${safeError(body.detail, config.token)}`);
+          throw new Error(responseError(response.status, body.detail, config.token));
         return body;
       } finally {
         clearTimeout(timer);
@@ -260,6 +298,11 @@
         return request('videos', unique);
       },
     };
+  }
+  async function verifyAndSaveConnection(gm, next, storageKey) {
+    const verified = await createClient(gm, next).status();
+    await gm.setValue(storageKey, next);
+    return verified;
   }
   // CORE-END
 
@@ -294,7 +337,8 @@
     :host{font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:#203b36;font-size:13px;line-height:1.5}
     *,*:before,*:after{box-sizing:border-box}button,input,textarea{font:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}svg{width:19px;height:19px;flex-shrink:0}button{border:0;color:inherit}button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #16847a;outline-offset:3px}[hidden]{display:none!important}
     .fab{pointer-events:auto;position:fixed;right:24px;bottom:28px;display:flex;gap:8px;align-items:center;padding:12px 16px;border-radius:999px;background:#126f66;color:#fff;box-shadow:0 5px 20px #123e3a30;font-weight:600;letter-spacing:.3px}.fab:hover{background:#0e5e57}.fab-count{min-width:20px;padding:0 5px;border-radius:20px;background:#fff2;font-size:11px}
-    .panel{pointer-events:auto;position:fixed;right:24px;bottom:86px;width:388px;max-width:calc(100% - 24px);max-height:calc(100dvh - 110px);background:#fff;border:1px solid #dfebe7;border-radius:16px;box-shadow:0 16px 64px #183b3833;display:flex;flex-direction:column;overflow:hidden}
+    .fab-label{display:grid;text-align:left}.fab-label small{font-size:10px;font-weight:400;opacity:.85}.quick{pointer-events:auto;position:fixed;right:24px;bottom:92px;display:flex;gap:6px;align-items:center;padding:9px 12px;border:1px solid #cfe4df;border-radius:9px;background:#fff;color:#126f66;box-shadow:0 3px 14px #123e3a18;z-index:2}.quick svg{width:16px;height:16px}.help{font-size:11px;color:#61796e;line-height:1.8}.help p{margin:8px 0}.library{color:#16847a;text-decoration:none;font-size:11px}.library:hover{text-decoration:underline}
+    .panel{pointer-events:auto;position:fixed;right:24px;bottom:102px;width:388px;max-width:calc(100% - 24px);max-height:calc(100dvh - 126px);background:#fff;border:1px solid #dfebe7;border-radius:16px;box-shadow:0 16px 64px #183b3833;display:flex;flex-direction:column;overflow:hidden}
     header{display:flex;gap:11px;align-items:center;padding:18px 18px 13px;border-bottom:1px solid #edf2ef}.brand{width:36px;height:36px;border-radius:10px;background:#eaf5f1;color:#16847a;display:grid;place-items:center}.heading{flex:1;min-width:0}h2{margin:0;font-size:16px;font-weight:650;letter-spacing:.2px}.subtitle{color:#799088;font-size:11px;margin-top:2px}.icon-button{display:grid;place-items:center;width:32px;height:32px;border-radius:7px;background:transparent;color:#70877f}.icon-button:hover{background:#edf5f1;color:#16847a}
     .body{padding:14px 18px;overflow:auto;overscroll-behavior:contain}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}.soft{display:flex;align-items:center;justify-content:center;gap:6px;min-height:35px;padding:7px 10px;border-radius:8px;background:#f0f6f3;color:#31594c;font-size:12px}.soft svg{width:16px;height:16px}.soft:hover{background:#e3f0ea}.soft[aria-pressed=true]{color:#117368;background:#dff2e9}.mode{flex:1}.mode-dot{width:6px;height:6px;border-radius:50%;background:#94aaa2}.mode[aria-pressed=true] .mode-dot{background:#16847a}
     .current{width:100%;justify-content:flex-start;margin-bottom:10px}.current span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.selection-heading{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:14px;margin-bottom:8px}.selection-heading strong{font-weight:600;flex:1}.muted{color:#84958e;font-size:11px}.text-button{background:transparent;color:#7c8e87;font-size:11px;padding:4px}.text-button:hover{color:#16847a}
@@ -303,14 +347,15 @@
     details{margin-top:12px;border-top:1px solid #edf2ef;padding-top:10px}summary{display:flex;align-items:center;gap:7px;color:#627e70;font-size:12px;cursor:pointer;list-style:none}summary::-webkit-details-marker{display:none}summary svg{width:15px;height:15px}summary .arrow{margin-left:auto;transition:transform .15s}details[open] summary .arrow{transform:rotate(180deg)}textarea{resize:vertical;min-height:76px;max-height:160px;width:100%;margin:10px 0 8px}input,textarea{border:1px solid #dce7e1;border-radius:8px;padding:9px 10px;background:#fff;color:#264b3d;line-height:1.5;font-size:12px;min-width:0}.manual-add{margin-left:auto}.connection{margin-bottom:14px;padding:12px;border-radius:10px;border:1px solid #e1ebe6;background:#f7faf8}.connection h3{margin:0 0 10px;font-size:13px;font-weight:600}.connection label{display:block;margin-top:9px;font-size:11px;color:#61796e}.connection input{display:block;width:100%;margin-top:5px}.connection-note{font-size:10px;color:#8a7762;margin:7px 0}.connection .soft{width:100%;margin-top:10px;background:#e4f2e9}.connection small{display:block;margin-top:7px;font-size:10px;color:#84958e}.connected{display:flex;gap:7px;align-items:center;padding:6px 0;font-size:11px;color:#70867b}.connected span{flex:1;overflow-wrap:anywhere}.connected button{flex-shrink:0}.connected svg{width:15px;height:15px}.policy{font-size:10px;color:#87998f;margin-bottom:10px;overflow-wrap:anywhere}
     footer{padding:12px 18px 16px;border-top:1px solid #e7efea;background:#fbfdfb}.notice{font-size:11px;line-height:1.6;color:#6c8375;margin:0 0 10px;overflow-wrap:anywhere}.notice[data-tone=error]{color:#a95143}.notice[data-tone=success]{color:#16785e}.submit{display:flex;justify-content:center;align-items:center;gap:8px;width:100%;min-height:41px;padding:10px 15px;border-radius:9px;color:#fff;background:#16847a;font-weight:600;font-size:13px}.submit:hover:not(:disabled){background:#106e64}.submit svg{width:17px;height:17px}.footnote{margin-top:7px;font-size:10px;text-align:center;color:#95a79e}
     .marker{pointer-events:auto;position:fixed;display:grid;place-items:center;width:31px;height:31px;background:#ffffffed;color:#567267;border:1px solid #d2e7dc;border-radius:8px;box-shadow:0 2px 10px #16352a24;z-index:1}.marker:hover{background:#effbf4}.marker[aria-pressed=true]{color:#fff;background:#16847a;border-color:#16847a}.marker svg{width:19px;height:19px}.panel,.fab{z-index:3}.toast{pointer-events:none;position:fixed;right:24px;bottom:87px;max-width:330px;padding:10px 14px;color:#fff;background:#234b40ed;border-radius:9px;font-size:12px;z-index:4;box-shadow:0 4px 18px #142e3222}
-    @media(max-width:520px){.fab{right:14px;bottom:max(18px,env(safe-area-inset-bottom));padding:11px 14px}.panel{right:12px;bottom:78px;width:calc(100% - 24px);max-height:calc(100dvh - 96px);border-radius:14px}header{padding:14px 15px 11px}.body{padding:12px 15px}footer{padding:11px 15px 13px}.marker{width:35px;height:35px}.toast{right:14px;bottom:80px;max-width:calc(100% - 28px)}}
+    @media(max-width:520px){.fab{right:14px;bottom:max(18px,env(safe-area-inset-bottom));padding:11px 14px}.quick{right:14px;bottom:88px}.panel{right:12px;bottom:86px;width:calc(100% - 24px);max-height:calc(100dvh - 104px);border-radius:14px}header{padding:14px 15px 11px}.body{padding:12px 15px}footer{padding:11px 15px 13px}.marker{width:35px;height:35px}.toast{right:14px;bottom:88px;max-width:calc(100% - 28px)}}
     @media(prefers-reduced-motion:reduce){*{transition:none!important}}
   </style><div class="markers"></div>
-  <button class="fab" type="button" aria-label="打开 Treasure Up 选片助手" aria-expanded="false">${icon('library')}<span>选片</span><span class="fab-count">0</span></button>
+  <button class="quick" type="button" hidden>${icon('plus')}加入当前视频</button>
+  <button class="fab" type="button" aria-label="打开 Treasure Up 选片助手" aria-expanded="false">${icon('library')}<span class="fab-label">Treasure Up · 选片<small class="fab-state">正在初始化…</small></span><span class="fab-count">0</span></button>
   <section class="panel" hidden role="dialog" aria-label="Treasure Up 选片助手">
     <header><div class="brand">${icon('library')}</div><div class="heading"><h2>Treasure Up</h2><div class="subtitle">挑选喜欢的视频，留在自己的收藏里</div></div><button class="icon-button settings" title="连接设置" aria-label="连接设置">${icon('settings')}</button><button class="icon-button close" title="收起" aria-label="收起选片助手">${icon('close')}</button></header>
     <div class="body">
-      <form class="connection" hidden><h3>连接我的视频库</h3><label>服务地址<input class="backend" type="url" placeholder="https://archive.example.com" autocomplete="off" spellcheck="false" required></label><p class="connection-note" hidden>局域网明文连接 · 仅在可信本机或局域网使用</p><small class="token-state">尚未设置专用令牌</small><button class="soft save" type="submit">${icon('link')}保存并设置令牌</button><small>令牌将在浏览器原生对话框中填写，不输入 B站页面。</small></form>
+      <form class="connection" hidden><h3>连接我的视频库</h3><small>先到视频库后台 → 浏览器采集，复制站点地址并创建专用令牌。</small><label>服务地址<input class="backend" type="url" placeholder="https://archive.example.com" autocomplete="off" spellcheck="false" required></label><p class="connection-note" hidden>局域网明文连接 · 仅在可信本机或局域网使用；另一台设备请填写服务器的局域网 IP，不能填写 localhost。</p><small class="token-state">尚未设置专用令牌</small><button class="soft save" type="submit">${icon('link')}验证并保存连接</button><small>点击后在浏览器原生对话框中填写令牌，不输入 B站页面。验证失败会保留原有连接。</small></form>
       <div class="connected">${icon('link')}<span class="connection-label">尚未连接视频库</span><button class="text-button test" type="button">测试连接</button></div><div class="policy" hidden></div>
       <button class="soft current" type="button" hidden>${icon('plus')}<span>加入当前视频</span></button>
       <div class="actions"><button class="soft mode" type="button" aria-pressed="false"><span class="mode-dot"></span><span class="mode-label">开启页面选片</span></button><button class="soft visible" type="button">${icon('select')}选择可见视频</button></div>
@@ -318,6 +363,7 @@
       <div class="empty">${icon('video')}<p>把想保存的视频放进来</p><small>开启选片勾选卡片，或粘贴 BV 号</small></div><ol class="selection"></ol>
       <details class="results" hidden open><summary>${icon('check')}上次提交结果<span class="arrow">${icon('chevron')}</span></summary><ol class="results-list"></ol></details>
       <details class="manual"><summary>${icon('paste')}粘贴 BV 号或视频链接<span class="arrow">${icon('chevron')}</span></summary><textarea class="manual-text" aria-label="BV 号或视频链接" placeholder="支持多个 BV 号或 B站视频链接，每行一个" maxlength="20000"></textarea><button class="soft manual-add" type="button">${icon('plus')}加入已选</button></details>
+      <details class="help"><summary>${icon('info')}使用帮助与排查<span class="arrow">${icon('chevron')}</span></summary><p>视频页：点「加入当前视频」。列表页：开启页面选片后，点卡片左上角的 +；也可一次选择屏幕内可见视频。已选列表只在当前标签页内保留。</p><p>没有识别到视频？直播、番剧和短链接无法直接选中，请打开普通 BV 视频页，或展开上面的粘贴入口。</p><p>连接失败时，先直接打开服务地址确认可访问，再检查扩展是否允许连接此地址。公网必须使用 HTTPS；请勿绕过证书警告。</p><a class="library" hidden target="_blank" rel="noopener noreferrer">打开视频库后台 ↗</a></details>
     </div><footer><p class="notice" role="status" aria-live="polite" hidden></p><button class="submit" type="button" disabled>${icon('send')}<span>提交到视频库</span></button><div class="footnote">只提交 BV 号 · 下载由你的服务完成</div></footer>
   </section><div class="toast" role="status" hidden></div>`;
   document.documentElement.append(host);
@@ -375,6 +421,13 @@
     }
   }
   function render() {
+    $('.fab-state').textContent = !ready
+      ? '初始化未完成 · 点击查看'
+      : connectionInfo
+        ? '已连接视频库'
+        : config.token
+          ? '连接已保存'
+          : '首次使用 · 点击连接';
     $('.fab-count').textContent = String(selected.size);
     $('.selected-count').textContent = String(selected.size);
     $('.empty').hidden = selected.size > 0;
@@ -420,6 +473,7 @@
       '.manual-add',
       '.visible',
       '.current',
+      '.quick',
       '.save',
       '.test',
       '.backend',
@@ -435,6 +489,8 @@
     $('.token-state').textContent = config.token
       ? '专用令牌已保存在油猴私有存储'
       : '尚未设置专用令牌';
+    $('.library').hidden = !config.backend;
+    if (config.backend) $('.library').href = `${config.backend}/admin/browser`;
     $('.results').hidden = !lastResults.length;
     $('.results-list').replaceChildren();
     for (const item of lastResults) {
@@ -483,6 +539,7 @@
     $('.current').hidden = !item;
     $('.current span').textContent = item ? `加入当前视频 · ${item.title}` : '加入当前视频';
     $('.current').title = item?.title || '';
+    $('.quick').hidden = !item || !panel.hidden;
   }
   function openSettings() {
     $('.connection').hidden = !$('.connection').hidden;
@@ -496,8 +553,8 @@
     panel.hidden = !open;
     fab.setAttribute('aria-expanded', String(open));
     $('.toast').hidden = true;
+    updateCurrent();
     if (open) {
-      updateCurrent();
       if (!config.backend && $('.connection').hidden) openSettings();
     } else fab.focus({ preventScroll: true });
     updateObserver();
@@ -506,7 +563,11 @@
     $('.connection-note').hidden = !/^http:\/\//i.test($('.backend').value.trim());
   }
   async function addCandidates(items) {
-    if (busy) return;
+    if (busy || !ready) return;
+    if (!items.length) {
+      say('当前屏幕内未找到可选 BV 视频。请滚动到视频卡片处，或粘贴完整 BV 链接。');
+      return;
+    }
     try {
       const merged = await draft.change({ type: 'add', items });
       say(
@@ -542,6 +603,7 @@
   }
   function scan(root) {
     if (root === host || (root instanceof Element && host.contains(root))) return;
+    invalidateCards(cards, root);
     if (root instanceof Element && root.matches(LINKS)) cardInfo(root);
     for (const node of root.querySelectorAll?.(LINKS) || []) cardInfo(node);
   }
@@ -621,8 +683,13 @@
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       if (record.target === host || host.contains(record.target)) continue;
-      if (record.type === 'attributes') scheduleScan(record.target);
-      else for (const node of record.addedNodes) if (node.nodeType === 1) scheduleScan(node);
+      if (record.type === 'attributes') scheduleScan(record.target.closest(CARD) || record.target);
+      else {
+        const card = record.target.closest?.(CARD);
+        if (card) scheduleScan(card);
+        else for (const node of record.addedNodes) if (node.nodeType === 1) scheduleScan(node);
+        if (record.removedNodes.length) schedulePositions();
+      }
     }
   });
   function updateObserver() {
@@ -677,6 +744,11 @@
     }
   }
   fab.addEventListener('click', () => setPanel(panel.hidden));
+  $('.quick').addEventListener('click', () => {
+    const item = currentVideo();
+    setPanel(true);
+    if (item) void addCandidates([item]);
+  });
   $('.close').addEventListener('click', () => setPanel(false));
   $('.settings').addEventListener('click', openSettings);
   $('.backend').addEventListener('input', localHint);
@@ -734,11 +806,11 @@
       activity = 'probe';
       connectionInfo = null;
       render();
-      await GM.setValue(STORAGE, next);
+      const verified = await verifyAndSaveConnection(GM, next, STORAGE);
       config = next;
       $('.backend').value = config.backend;
       render();
-      connectionInfo = await createClient(GM, next).status();
+      connectionInfo = verified;
       say('连接成功，可以提交已选视频。', 'success');
     } catch (error) {
       say(safeError(error.message, inputToken || config.token), 'error');
@@ -828,20 +900,32 @@
   if (typeof GM.registerMenuCommand === 'function')
     GM.registerMenuCommand('打开 Treasure Up 选片助手', () => setPanel(true));
   void (async () => {
+    const issue = environmentIssue(GM);
+    if (issue) {
+      updateCurrent();
+      render();
+      say(issue, 'error');
+      return;
+    }
     try {
       if (supportedManager(GM.info)) {
         const saved = await GM.getValue(STORAGE, null);
-        if (saved && TOKEN.test(saved.token || ''))
-          config = { backend: normalizeBackend(saved.backend), token: saved.token };
+        if (saved && TOKEN.test(saved.token || '')) {
+          try {
+            config = { backend: normalizeBackend(saved.backend), token: saved.token };
+          } catch {
+            say('原有服务地址不符合要求，请在连接设置中重新填写。', 'error');
+          }
+        }
       }
       await draft.refresh();
     } catch {
-      say('连接设置未能读取，请重新配置。', 'error');
+      say('油猴存储读取失败。请刷新页面；若仍失败，从后台重新安装选片助手后再试。', 'error');
+      render();
+      return;
     }
     ready = true;
     updateCurrent();
     render();
-    if (!supportedManager(GM.info))
-      say('需要 Tampermonkey 5.0+ 的 DOM 隔离环境；当前仅可选片，未读取令牌。', 'error');
   })();
 })();

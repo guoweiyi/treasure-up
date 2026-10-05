@@ -74,7 +74,11 @@ def video_view(db: Session, video: Video, detail=False):
     return video_views(db, [video], detail=detail)[0]
 
 
-def video_views(db: Session, rows, *, detail=False):
+def video_card_views(db: Session, rows):
+    return video_views(db, rows, card=True)
+
+
+def video_views(db: Session, rows, *, detail=False, card=False):
     if not rows:
         return []
     ids = [video.id for video in rows]
@@ -102,11 +106,14 @@ def video_views(db: Session, rows, *, detail=False):
                     .where(VideoStatSnapshot.video_id.in_(ids)).subquery())
     latest = {snapshot.video_id: snapshot for snapshot in db.scalars(select(VideoStatSnapshot)
               .join(ranked_stats, ranked_stats.c.id == VideoStatSnapshot.id).where(ranked_stats.c.rank == 1))}
+    from app.capture_state import latest_capture_jobs, project_capture
+    jobs = latest_capture_jobs(db, rows)
     return [_video_view(db, video, notes.get(video.id), people[video.id], parts[video.id], variants[video.id],
-                        latest.get(video.id), detail=detail) for video in rows]
+                        latest.get(video.id), detail=detail, card=card,
+                        capture=project_capture(video, parts[video.id], variants[video.id], jobs.get(video.id, {}))) for video in rows]
 
 
-def _video_view(db, video, note, people, parts, variants, latest_stats, *, detail=False):
+def _video_view(db, video, note, people, parts, variants, latest_stats, *, detail=False, card=False, capture=None):
     result = {"id": video.id, "bvid": video.bvid, "title": effective(note.title_override if note else None, video.title),
               "source_title": video.title, "description": effective(note.description_override if note else None, video.description),
               "duration": video.duration, "cover_url": asset_url(video.cover_asset_id), "creators": people,
@@ -119,6 +126,8 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
     result["published_at"] = video.published_at
     result["source_quality"] = (video.metadata_json or {}).get("source_quality")
     result["ingest_state"] = (video.metadata_json or {}).get("ingest_state", {})
+    if capture is not None:
+        result["capture_status"], result["ingest_state"] = capture
     properties = dict((video.metadata_json or {}).get("media_properties", {}))
     for variant in variants:
         properties[variant.id] = {**properties.get(variant.id, {}), **(variant.metadata_json or {})}
@@ -130,6 +139,12 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
         "dolby_vision": any(item.get("dolby_vision") is True for item in properties.values() if isinstance(item, dict)),
         "dolby_atmos": any(item.get("dolby_atmos") is True for item in properties.values() if isinstance(item, dict)),
     }
+    if card and not detail:
+        # Lists need status and feature badges, not every codec, hash and source
+        # format for every part. Keep the existing full API available to clients.
+        for field in ("source_title", "source_quality", "media_properties"):
+            result.pop(field, None)
+        result["description"] = ""
     if detail:
         result.update(notes=note.notes if note else "", source_state=video.source_state,
                       title_override=note.title_override if note else None,
@@ -233,7 +248,8 @@ def job_views(db, rows):
     if not rows:
         return []
     ids = [row.target_id for row in rows]
-    videos = {video.id: video.title for video in db.scalars(select(Video).where(Video.id.in_(ids)))}
+    videos = {target: video.title for video in db.scalars(select(Video).where((Video.id.in_(ids)) | (Video.bvid.in_(ids))))
+              for target in (video.id, video.bvid)}
     variants = dict(db.execute(select(MediaVariant.id, Video.title).join(VideoPart, VideoPart.id == MediaVariant.part_id)
                                .join(Video, Video.id == VideoPart.video_id).where(MediaVariant.id.in_(ids))).all())
     from app.source_labels import display_source_title
@@ -241,7 +257,10 @@ def job_views(db, rows):
     profiles = dict(db.execute(select(StorageProfile.id, StorageProfile.name).where(StorageProfile.id.in_(ids))).all())
     accounts = dict(db.execute(select(SourceAccount.id, SourceAccount.name).where(SourceAccount.id.in_(ids))).all())
     names = {**videos, **variants, **collections, **profiles, **accounts}
-    return [{**job_view(row), "target_title": names.get(row.target_id, "归档任务")} for row in rows]
+    from app.capture_state import job_capture_summaries
+    captures = job_capture_summaries(db, rows)
+    return [{**job_view(row), "target_title": names.get(row.target_id, "归档任务"),
+             **({"capture": captures[row.id]} if row.id in captures else {})} for row in rows]
 
 
 def backup_view(backup):

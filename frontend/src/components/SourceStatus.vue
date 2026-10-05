@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { date } from '../api';
 import { monitorStatus, type SourceMonitorState } from './source-monitor';
-defineProps<{
-  monitor?: SourceMonitorState;
-  lastScanAt?: string | null;
-  creator?: boolean;
-  enabled?: boolean;
-}>();
+withDefaults(
+  defineProps<{
+    monitor?: SourceMonitorState;
+    lastScanAt?: string | null;
+    creator?: boolean;
+    enabled?: boolean;
+  }>(),
+  { enabled: undefined },
+);
 </script>
 <template>
   <div class="source-public-status">

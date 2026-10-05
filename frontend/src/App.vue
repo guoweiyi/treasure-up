@@ -8,6 +8,7 @@ const route = useRoute(),
   router = useRouter();
 const error = ref('');
 const busy = ref(false);
+const mobileAccount = ref<HTMLDetailsElement>();
 const nativeShell = inNativeShell();
 const search = ref('');
 watch(
@@ -20,6 +21,12 @@ watch(
 function searchVideos() {
   void router.push({ path: '/', query: search.value.trim() ? { q: search.value.trim() } : {} });
 }
+watch(
+  () => route.fullPath,
+  () => {
+    if (mobileAccount.value) mobileAccount.value.open = false;
+  },
+);
 const isAdmin = computed(() => ['admin', 'editor'].includes(session.user?.role || ''));
 watch(
   () => display.site_name,
@@ -63,10 +70,11 @@ async function logout() {
         >首页</RouterLink
       ><RouterLink to="/creators" :class="{ active: route.path.startsWith('/creators') }"
         >UP 主</RouterLink
-      ><RouterLink to="/collections">收藏夹</RouterLink>
+      ><RouterLink to="/collections">收藏夹</RouterLink
+      ><RouterLink to="/saved">我的片单</RouterLink>
     </nav>
     <form class="header-search" role="search" @submit.prevent="searchVideos">
-      <input v-model="search" placeholder="搜索你收藏的视频" aria-label="搜索视频库" /><button
+      <input v-model="search" placeholder="搜索视频库" aria-label="搜索视频库" /><button
         aria-label="搜索"
         type="submit"
       >
@@ -74,6 +82,18 @@ async function logout() {
       </button>
     </form>
     <div class="account-nav">
+      <details v-if="session.user" ref="mobileAccount" class="mobile-account-menu">
+        <summary :aria-label="`${session.user.username} 的账户菜单`">
+          {{ session.user.username.slice(0, 1).toUpperCase() }}
+        </summary>
+        <div>
+          <span>{{ session.user.username }}</span
+          ><RouterLink to="/account/security">账户安全</RouterLink
+          ><RouterLink v-if="isAdmin" to="/admin">管理中心</RouterLink
+          ><a v-if="nativeShell" href="https://treasure-up.invalid/connect">切换服务器</a
+          ><button :disabled="busy" @click="logout">退出登录</button>
+        </div>
+      </details>
       <RouterLink v-if="isAdmin" to="/admin" :class="{ active: route.path.startsWith('/admin') }"
         >管理中心</RouterLink
       ><RouterLink
@@ -100,6 +120,20 @@ async function logout() {
   </header>
   <div v-if="error" class="global-error" role="alert">{{ error }}</div>
   <RouterView :key="sessionRevision" />
+  <nav
+    v-if="route.path !== '/login' && !route.path.startsWith('/admin')"
+    class="mobile-navigation"
+    aria-label="底部导航"
+  >
+    <RouterLink to="/" :class="{ active: route.path === '/' || route.path.startsWith('/videos/') }"
+      ><UiIcon name="play" /><span>视频</span></RouterLink
+    >
+    <RouterLink to="/creators" :class="{ active: route.path.startsWith('/creators') }"
+      ><UiIcon name="user" /><span>UP 主</span></RouterLink
+    >
+    <RouterLink to="/collections"><UiIcon name="folder" /><span>收藏夹</span></RouterLink>
+    <RouterLink to="/saved"><UiIcon name="star" /><span>我的片单</span></RouterLink>
+  </nav>
   <a
     v-if="nativeShell && route.path === '/login'"
     class="native-connection-link"
@@ -107,7 +141,7 @@ async function logout() {
     >切换服务器</a
   >
   <footer v-if="route.path !== '/login' && !route.path.startsWith('/admin')" class="site-footer">
-    {{ display.site_name }} <span>·</span> 私人视频收藏
+    {{ display.site_name }} <span>·</span> 私人视频库
   </footer>
 </template>
 <style scoped>
@@ -128,7 +162,7 @@ async function logout() {
 }
 @media (max-width: 700px) {
   .account-nav .account-avatar {
-    display: flex;
+    display: none;
     width: 26px;
     height: 26px;
     flex-shrink: 0;

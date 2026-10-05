@@ -94,7 +94,11 @@ async function run(path: string, body?: unknown, method = 'POST') {
   try {
     queued.value = await write(path, body, method);
     operationOpen.value = true;
-    ElMessage.success('任务已排队');
+    ElMessage.success(
+      queued.value?.status && queued.value.status !== 'queued'
+        ? '已找到现有任务，请查看当前状态'
+        : '任务已排队',
+    );
   } catch (e) {
     error.value = errorText(e);
   } finally {
@@ -188,7 +192,7 @@ onMounted(async () => {
   </section>
   <el-alert v-if="error" :title="error" type="error" :closable="false" class="mb" /><el-alert
     v-if="queued"
-    title="后台任务已提交，可以查看实时进度与执行结果。"
+    title="可以查看后台任务的当前状态与执行结果。"
     type="info"
     :closable="false"
     class="mb"
@@ -199,7 +203,7 @@ onMounted(async () => {
     ><section class="admin-panel">
       <div class="section-heading">
         <h2>播放准备</h2>
-        <span class="muted small">无重编码分片与音量分析</span>
+        <span class="muted small">分片、音量分析与独立兼容副本</span>
       </div>
       <div v-for="part in selected.parts" :key="part.id" class="prepare-part">
         <p>P{{ part.position }} · {{ part.title }}</p>
@@ -212,18 +216,33 @@ onMounted(async () => {
             >{{ qualityLabel(variant) }} · {{ variant.video_codec || '原编码' }} /
             {{ variant.audio_codec || '原音轨' }} ·
             {{ variant.kind === 'archive' ? '原档' : '兼容副本' }}</span
-          ><el-button
-            size="small"
-            :disabled="!!actionBusy"
-            :loading="actionBusy === `/admin/variants/${variant.id}/prepare`"
-            @click="run(`/admin/variants/${variant.id}/prepare`)"
-            >准备分片与分析</el-button
           >
+          <div class="prepare-buttons">
+            <el-button
+              size="small"
+              :disabled="!!actionBusy"
+              :loading="actionBusy === `/admin/variants/${variant.id}/prepare`"
+              @click="run(`/admin/variants/${variant.id}/prepare`)"
+              >准备分片与分析</el-button
+            ><el-button
+              v-if="variant.kind === 'archive'"
+              size="small"
+              :disabled="!!actionBusy"
+              :loading="actionBusy === `/admin/variants/${variant.id}/compatible`"
+              @click="run(`/admin/variants/${variant.id}/compatible`)"
+              >生成兼容副本</el-button
+            >
+          </div>
         </div>
       </div>
       <p class="field-help">
-        只做封装和分析，不重编码原码流，也不承诺浏览器支持所有杜比或 HDR
+        分片与分析只做封装和分析，不重编码原码流，也不承诺浏览器支持所有杜比或 HDR
         格式。分片按需读取，完整观看仍消耗原码率流量。
+      </p>
+      <p class="field-help">
+        兼容副本会保留原档。EC-3 音轨优先保留原视频画面，仅将声音转换为 AAC 立体声，不含
+        Atmos；其他格式按兼容规则处理，可能转换画面。HDR 转 SDR
+        暂不支持。重复操作会显示已有任务，失败或暂停的任务需在任务中心继续处理。
       </p>
     </section>
     <div class="section-heading">
@@ -286,3 +305,13 @@ onMounted(async () => {
     </p></template
   >
 </template>
+<style scoped>
+.prepare-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prepare-buttons .el-button + .el-button {
+  margin-left: 0;
+}
+</style>

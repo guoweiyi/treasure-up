@@ -1,7 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computed, effectScope, ref, nextTick } from 'vue';
-import { usePlaylist } from './usePlaylist.ts';
+import { usePlaylist, playlistPath } from './usePlaylist.ts';
+import { playlistQuery, playlistScope } from './queue.ts';
+test('personal playback context stays private and safely encodes its resource path', () => {
+  const scope = playlistScope({ list_type: 'personal', list_id: 'list/id?x=1' });
+  assert.deepEqual(playlistQuery(scope), { list_type: 'personal', list_id: 'list/id?x=1' });
+  assert.equal(
+    playlistPath(scope, 2),
+    '/me/playlists/list%2Fid%3Fx%3D1/videos?page=2&page_size=100&playable_only=true',
+  );
+  assert.equal(
+    playlistPath({ type: 'collection', id: 'a' }),
+    '/playlists?collection_id=a&page=1&page_size=100&view=card',
+  );
+});
 function fixture(id = 'v1') {
   const requests = [],
     scope = ref({ type: 'collection', id: 'a' }),

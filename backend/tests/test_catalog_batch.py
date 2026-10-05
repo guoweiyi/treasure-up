@@ -90,7 +90,7 @@ def queries(engine):
 
 
 @pytest.mark.parametrize("model,mapper,expected", [
-    (Video, catalog.video_views, 7),
+    (Video, catalog.video_views, 8),
     (Creator, catalog.creator_views, 4),
     (Collection, catalog.collection_views, 4),
     (Comment, catalog.comment_views, 6),

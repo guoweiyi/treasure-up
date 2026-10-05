@@ -13,6 +13,11 @@ export interface SourceFormat {
   total_bitrate_bps?: number | null;
 }
 export interface MeasuredMedia extends MediaProperties {
+  audio_channels?: number | null;
+  audio_sample_rate?: number | null;
+  ec3?: { joc?: boolean; complexity_index_type_a?: number | null };
+  ec3_configuration_verified?: boolean;
+  atmos_evidence?: string;
   source_variant_id?: string;
   mime_type?: string | null;
   width?: number | null;

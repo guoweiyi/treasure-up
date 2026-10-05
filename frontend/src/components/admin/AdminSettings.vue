@@ -187,8 +187,9 @@ onMounted(load);
         ><el-checkbox v-model="form.ingest.include_auto_subtitles">包括自动字幕</el-checkbox>
       </div>
       <p class="field-help">
-        以账号实际可见的源版本为准。杜比偏好用于保存对应原档，不代表当前浏览器具备解码能力。兼容副本保留原档并增加处理时间和空间占用；暂不支持的
-        HDR 转换会记录具体状态。
+        以账号实际可见的源版本为准。杜比偏好用于保存对应原档，不代表当前浏览器具备解码能力。兼容副本保留原档并增加处理时间和空间占用。EC-3
+        音轨优先保留原视频流（包括 HDR），仅将声音转换为 AAC 立体声，不含 Atmos；HDR 转 SDR
+        暂不支持，会记录具体状态。
       </p>
       <CommentBudgetFields :value="form.ingest" />
     </section>

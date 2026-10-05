@@ -15,7 +15,7 @@ from app.models import (Asset, AssetLocation, AssetRef, AuditLog, BackupSet, Bas
     CollectionItem, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job, MediaVariant,
     PlatformUser, PlaybackSession, Setting, SourceAccount, SourceSubscription, StorageObservation,
     StorageProfile, SubtitleTrack, User, UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart,
-    VideoStar, WatchProgress, VideoStatSnapshot, utcnow)
+    VideoStar, PersonalPlaylist, PersonalPlaylistItem, WatchProgress, VideoStatSnapshot, utcnow)
 from app.security import hash_password
 from app.storage.base import content_key
 from app.storage.service import ingest_file
@@ -102,6 +102,9 @@ def test_video_deletion_removes_entire_graph_but_preserves_shared_content(librar
     run = CaptureRun(video_id=row.id)
     db.add_all([original, hls, run]); db.flush()
     admin = db.scalar(select(User).where(User.username == "admin"))
+    personal = PersonalPlaylist(user_id=admin.id, name="保留片单")
+    db.add(personal); db.flush()
+    db.add(PersonalPlaylistItem(playlist_id=personal.id, video_id=row.id, note="删除关联项"))
     account = SourceAccount(name="fixture", secret_encrypted="never-read")
     collection = Collection(source_id="1000", title="fixture")
     db.add_all([account, collection]); db.flush()
@@ -136,9 +139,10 @@ def test_video_deletion_removes_entire_graph_but_preserves_shared_content(librar
     assert job.result["deleted_videos"] == 1 and job.result["retained_shared_assets"] >= 1
     assert db.get(Video, row.id) is None and db.get(Video, other.id)
     for model in (VideoPart, CommentVersion, CommentAsset, MediaVariant, DanmakuSnapshot, SubtitleTrack,
-                  VideoAnnotation, VideoStar, WatchProgress, VideoStatSnapshot, PlaybackSession, CaptureRun, CollectionItem):
+                  VideoAnnotation, VideoStar, PersonalPlaylistItem, WatchProgress, VideoStatSnapshot, PlaybackSession, CaptureRun, CollectionItem):
         expected = 1 if model is VideoPart else 0
         assert db.scalar(select(func.count()).select_from(model)) == expected, model
+    assert db.get(PersonalPlaylist, personal.id).name == "保留片单"
     assert db.get(PlatformUser, orphan.id) is None and db.get(UserSnapshot, orphan_snapshot.id) is None
     assert db.get(PlatformUser, author.id) and db.get(UserSnapshot, snapshot.id)
     assert db.get(Comment, shared_comment.id)

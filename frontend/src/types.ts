@@ -31,6 +31,7 @@ export interface Variant {
   height?: number;
   video_codec?: string;
   audio_codec?: string;
+  metadata?: MediaProperties;
 }
 export interface MediaProperties {
   color_transfer?: string;
@@ -41,6 +42,12 @@ export interface MediaProperties {
   dolby_vision?: boolean;
   dolby_atmos?: boolean;
   compatibility?: string;
+  compatibility_mode?: string;
+  source_variant_id?: string;
+  video_stream_copy?: boolean;
+  audio_transcoded?: boolean;
+  audio_codec?: string | null;
+  audio_channels?: number | null;
 }
 export interface VideoStats {
   view: number | null;

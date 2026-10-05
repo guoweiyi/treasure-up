@@ -19,14 +19,14 @@ async function load() {
   try {
     let data = creator
       ? await api<Page<Video>>(
-          `/videos?${query({ creator_id: creator.id, page_size: 7, sort: 'newest' })}`,
+          `/videos?${query({ view: 'card', creator_id: creator.id, page_size: 7, sort: 'newest' })}`,
         )
       : null;
     if (key !== request) return;
     let related = data?.items.filter((item) => item.id !== props.video.id) || [];
     sameCreator.value = related.length > 0;
     if (!related.length) {
-      data = await api<Page<Video>>('/videos?page_size=7&sort=newest');
+      data = await api<Page<Video>>('/videos?view=card&page_size=7&sort=newest');
       if (key !== request) return;
       related = data.items.filter((item) => item.id !== props.video.id);
     }

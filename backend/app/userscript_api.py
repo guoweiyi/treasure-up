@@ -61,7 +61,7 @@ def _token_view(item, account_name):
 def _account(db, identifier):
     account = db.scalar(select(SourceAccount).where(SourceAccount.id == identifier).with_for_update(read=True)
                         .execution_options(populate_existing=True))
-    if not account or account.status in {"disabled", "invalid"}:
+    if not account or account.status in {"disabled", "invalid", "expired"}:
         raise HTTPException(409, "采集账号不可用，请在后台更新或验证账号")
     return account
 

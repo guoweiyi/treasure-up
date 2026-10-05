@@ -724,6 +724,10 @@
   background: #ffffff20;
   color: #fff;
 }
+.player-settings-dialog button:active:not(:disabled),
+.treasure-archive-player .player-control-button:active {
+  background: #ffffff30;
+}
 .player-settings-header button {
   border: 0;
 }
@@ -937,8 +941,8 @@
 .player-sheet .player-settings-dialog {
   inset: auto 0 0;
   width: 100%;
-  max-height: min(82dvh, 720px);
   max-height: min(82svh, 720px);
+  max-height: min(82dvh, 720px);
   border-radius: 18px 18px 0 0;
   border: 1px solid #ffffff24;
   padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -1276,5 +1280,36 @@
   }
   .queue-navigation button {
     padding: 7px 10px;
+  }
+}
+
+/* Touch targets also apply in landscape and iPad split views. */
+@media (pointer: coarse) {
+  .player-settings-dialog button,
+  .player-settings-dialog summary,
+  .player-settings-dialog input[type='range'],
+  .player-switch,
+  .player-setting-checks label {
+    min-height: 44px;
+  }
+  .player-settings-dialog summary {
+    display: flex;
+    align-items: center;
+  }
+  .player-setting-checks label {
+    padding: 4px 0;
+  }
+  .treasure-archive-player .player-control-button,
+  .treasure-archive-player .art-controls .art-control:not(.art-control-time) {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .treasure-archive-player.art-fullscreen-web .player-settings-dialog,
+  .treasure-archive-player.art-fullscreen .player-settings-dialog {
+    top: max(8px, env(safe-area-inset-top));
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+    width: auto;
   }
 }

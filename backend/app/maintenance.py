@@ -164,6 +164,28 @@ def enqueue_media_maintenance(db):
     return _locked_schedule(db, 87213003, lambda: _media_page(db))
 
 
+def _preparation_demand(variant, config):
+    package = config.package_long_videos and variant.duration >= config.min_duration_seconds
+    if not package and not config.analyze_loudness:
+        return None
+    key = (f"prepare:v2:{variant.id}:{variant.asset_id}:{config.segment_seconds}:"
+           f"{int(package)}:{int(config.analyze_loudness)}")
+    return variant.id, key, {"package": package, "analyze_loudness": config.analyze_loudness,
+                             "segment_seconds": config.segment_seconds}
+
+
+def enqueue_variant_preparation(db, variant):
+    """Prepare one explicitly created derivative; never scan/requeue history."""
+    from app.jobs import enqueue
+    row = db.get(Setting, "playback")
+    config = PlaybackSettings.model_validate(row.value if row else {})
+    demand = _preparation_demand(variant, config)
+    if demand is None:
+        return None
+    variant_id, key, policy = demand
+    return enqueue(db, "prepare_media", variant_id, policy=policy, dedupe_key=key)
+
+
 def _media_page(db):
     from app.jobs import enqueue
 
@@ -189,13 +211,9 @@ def _media_page(db):
                           MediaVariant.kind == "archive", state)
     demands = []
     for variant in rows:
-        package = config.package_long_videos and variant.duration >= config.min_duration_seconds
-        if package or config.analyze_loudness:
-            key = (f"prepare:v2:{variant.id}:{variant.asset_id}:{config.segment_seconds}:"
-                   f"{int(package)}:{int(config.analyze_loudness)}")
-            policy = {"package": package, "analyze_loudness": config.analyze_loudness,
-                      "segment_seconds": config.segment_seconds}
-            demands.append((variant.id, key, policy))
+        demand = _preparation_demand(variant, config)
+        if demand:
+            demands.append(demand)
     keys = [key for _, key, _ in demands]
     existing = set(db.scalars(select(Job.dedupe_key).where(Job.dedupe_key.in_(keys)))) if keys else set()
     count = 0

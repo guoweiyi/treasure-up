@@ -1,16 +1,27 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
-import Artplayer from 'artplayer';
-import artplayerPluginDanmuku, {
-  type Result as DanmakuPlugin,
-  type Mode,
-} from 'artplayer-plugin-danmuku';
+import type Artplayer from 'artplayer';
+import type { Result as DanmakuPlugin, Mode } from 'artplayer-plugin-danmuku';
 import { api, write, errorText, display, session } from '../api';
 import type { Part, Playback, Danmaku, MediaProperties } from '../types';
 import { createMediaAdapter } from '../player/mediaAdapter';
+import { loadPlayerEngines } from '../player/engineLoader';
+import { loadDanmaku } from '../player/danmakuLoader';
+import { preloadProgress, validResumePosition } from '../player/resumeProgress';
 import { emptyRuntimeStats } from '../player/runtimeStats';
+import type { MeasuredMedia } from '../player/mediaInfo';
+import { sameOriginalAudioAlternative } from '../player/audioAlternatives';
+import AudioCompatibilityNotice from './AudioCompatibilityNotice.vue';
 import { createEndGuard } from '../player/queue';
 import { createPlayback } from '../player/routing';
+import {
+  createProtocolFallback,
+  loadWithProtocolFallback,
+  MediaLoadError,
+  mediaFailureKind,
+  recoveryStartState,
+  type PlaybackInput,
+} from '../player/playbackRecovery';
 import { canUseElementFullscreen } from '../player/nativePlayback';
 import PlaybackOptions from './PlaybackOptions.vue';
 import DanmakuSettings from './DanmakuSettings.vue';
@@ -57,6 +68,23 @@ const routeId = ref(''),
 const playableVariants = computed(() =>
   props.part.variants.filter((variant) => variant.kind !== 'hls'),
 );
+const currentMedia = computed(
+  () =>
+    ({
+      audio_codec: playableVariants.value.find((variant) => variant.id === variantId.value)
+        ?.audio_codec,
+      ...props.mediaProperties?.[variantId.value],
+      ...playback.value?.media,
+    }) as MeasuredMedia,
+);
+const audioAlternative = computed(() =>
+  sameOriginalAudioAlternative(
+    variantId.value,
+    playableVariants.value,
+    props.mediaProperties,
+    currentMedia.value,
+  ),
+);
 watch(variantId, (id) => emit('variant', id));
 let playbackController = new AbortController(),
   expectedVolume = 0.7;
@@ -66,9 +94,23 @@ const userVolume = ref(0.7),
 let controlButtons: ReturnType<typeof installPlayerControls> | null = null;
 let rawDanmaku: { text: string; time: number; mode: Mode; color: string }[] = [];
 let danmakuReload: ReturnType<typeof setTimeout> | undefined;
-let danmakuLoading = false,
-  danmakuReloadRequested = false;
+let danmakuLoading: DanmakuPlugin | null = null;
+let danmakuReloadRequested = false;
 let rejectMediaLoad: ((error: Error) => void) | null = null;
+const protocolFallback = createProtocolFallback();
+let renewal = 0;
+let renewalController: AbortController | null = null;
+type PlaybackSnapshot = {
+  position: number;
+  paused: boolean;
+  rate: number;
+  volume: number;
+  muted: boolean;
+};
+let renewalSnapshot: PlaybackSnapshot | null = null;
+let startupPending = true,
+  startupPlayRequested = false;
+let initialProgress: ReturnType<typeof preloadProgress> | null = null;
 const mediaAdapter = createMediaAdapter(
   handleMediaFailure,
   (value) => (runtimeStats.value = value),
@@ -172,24 +214,26 @@ function filteredDanmaku() {
     .map((item) => ({ ...item, time: Math.max(0.001, item.time) }));
 }
 async function reloadDanmaku() {
-  if (danmakuLoading) {
+  const target = plugin();
+  if (!target) return;
+  if (danmakuLoading === target) {
     danmakuReloadRequested = true;
     return;
   }
-  const target = plugin();
-  if (!target) return;
-  danmakuLoading = true;
+  danmakuLoading = target;
   try {
     target.config({ danmuku: filteredDanmaku() });
     await target.load();
   } catch (e) {
-    note.value = `弹幕暂时不可用：${errorText(e)}`;
+    if (target === plugin()) note.value = `弹幕暂时不可用：${errorText(e)}`;
   } finally {
-    danmakuLoading = false;
-    if (target === plugin()) applyPreferences();
-    if (danmakuReloadRequested) {
-      danmakuReloadRequested = false;
-      void reloadDanmaku();
+    if (danmakuLoading === target) {
+      danmakuLoading = null;
+      if (target === plugin()) applyPreferences();
+      if (danmakuReloadRequested) {
+        danmakuReloadRequested = false;
+        void reloadDanmaku();
+      }
     }
   }
 }
@@ -264,15 +308,17 @@ async function saveProgress() {
   if (!session.user || !art || !activePartId || !Number.isFinite(art.duration) || art.duration <= 0)
     return;
   const partId = activePartId;
+  const player = art;
+  const key = request;
   try {
     await write(
       `/progress/${partId}`,
       { position: art.currentTime, duration: art.duration },
       'PUT',
     );
-    progressError.value = '';
+    if (key === request && player === art) progressError.value = '';
   } catch (e) {
-    progressError.value = `观看进度未保存：${errorText(e)}`;
+    if (key === request && player === art) progressError.value = `观看进度未保存：${errorText(e)}`;
   }
 }
 function applyVolume() {
@@ -288,14 +334,20 @@ function applyVolume() {
 watch(volumeBalance, applyVolume);
 function handleMediaFailure(kind: 'network' | 'media', message: string) {
   if (rejectMediaLoad) {
-    rejectMediaLoad(new Error(message));
-    return;
-  }
-  if (kind === 'media') {
-    error.value = message;
+    rejectMediaLoad(new MediaLoadError(kind, message));
     return;
   }
   if (renewing) return;
+  if (kind === 'media') {
+    const fallback = protocolFallback.claim(
+      activePartId,
+      playback.value,
+      routeId.value || undefined,
+    );
+    if (fallback) void renew(fallback);
+    else error.value = message;
+    return;
+  }
   if (recoveries === 0) {
     recoveries = 1;
     void renew();
@@ -304,14 +356,20 @@ function handleMediaFailure(kind: 'network' | 'media', message: string) {
 function switchMedia(player: Artplayer, url: string) {
   return new Promise<void>((resolve, reject) => {
     const video = player.video;
+    let settled = false;
     const ready = () => finish();
-    const failed = () => finish(new Error('当前浏览器无法播放此归档版本'));
+    const failed = () =>
+      finish(
+        new MediaLoadError(mediaFailureKind(video.error?.code), '当前浏览器无法播放此归档版本'),
+      );
     const cancel = (reason: Error) => finish(reason);
     const timeout = setTimeout(
       () => finish(new Error('播放加载超时，请重试或选择其他节点')),
       20000,
     );
     function finish(reason?: Error) {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       video.removeEventListener('canplay', ready);
       video.removeEventListener('error', failed);
@@ -336,65 +394,112 @@ function selectVariant(value: string) {
   recoveries = 0;
   void renew();
 }
-async function renew() {
-  if (renewing || !art) return;
+async function renew(input?: PlaybackInput) {
+  if (!art) return;
+  const operation = ++renewal;
+  renewalController?.abort();
+  rejectMediaLoad?.(new Error('播放选择已切换'));
+  const controller = new AbortController();
+  renewalController = controller;
+  const snapshot = renewalSnapshot || {
+    ...recoveryStartState(art.currentTime, art.video.paused, startupPending, startupPlayRequested),
+    rate: art.playbackRate,
+    volume: userVolume.value,
+    muted: art.muted,
+  };
+  renewalSnapshot = snapshot;
   renewing = true;
   switching.value = true;
   const currentPlayer = art,
     key = request,
     id = activePartId;
-  const snapshot = {
-    position: art.currentTime,
-    paused: art.video.paused,
-    rate: art.playbackRate,
-    volume: userVolume.value,
-    muted: art.muted,
-  };
+  const resumeAtStart = initialProgress;
+  const current = () => key === request && operation === renewal && currentPlayer === art;
   error.value = '';
   try {
-    const data = await createPlayback(
-      {
+    const data = await loadWithProtocolFallback(
+      input || {
         part_id: id,
         variant_id: variantId.value || undefined,
         route_id: routeId.value || undefined,
       },
-      playbackController.signal,
-      (value) => (probing.value = value),
-      false,
+      protocolFallback,
+      {
+        current,
+        create: (selection) =>
+          createPlayback(
+            selection,
+            controller.signal,
+            (value) => {
+              if (current()) probing.value = value;
+            },
+            false,
+          ),
+        attach: async (value) => {
+          if (typeof value.url !== 'string' || !value.url)
+            throw new Error('服务端未返回有效播放地址');
+          playback.value = value;
+          variantId.value = value.source_variant_id || value.variant_id;
+          await switchMedia(currentPlayer, value.url);
+        },
+        restore: async () => {
+          if (startupPending && snapshot.position < 1 && resumeAtStart) {
+            const saved = await resumeAtStart.ready;
+            if (current()) snapshot.position = validResumePosition(saved, currentPlayer.duration);
+          }
+          if (!current()) return;
+          startupPending = false;
+          currentPlayer.currentTime = snapshot.position;
+          currentPlayer.playbackRate = snapshot.rate;
+          userVolume.value = snapshot.volume;
+          applyVolume();
+          currentPlayer.muted = snapshot.muted;
+          currentPlayer.template.$player.classList.remove('art-error');
+          currentPlayer.notice.show = '';
+          if (snapshot.paused) currentPlayer.pause();
+          else {
+            try {
+              await currentPlayer.play();
+            } catch {
+              if (current()) note.value = '浏览器暂未允许自动播放，请点击播放继续。';
+            }
+          }
+        },
+      },
     );
-    if (key !== request || currentPlayer !== art) return;
-    if (typeof data.url !== 'string' || !data.url) throw new Error('服务端未返回有效播放地址');
-    playback.value = data;
-    variantId.value = data.source_variant_id || data.variant_id;
-    await switchMedia(currentPlayer, data.url);
-    if (key !== request || currentPlayer !== art) return;
-    art.currentTime = snapshot.position;
-    art.playbackRate = snapshot.rate;
-    userVolume.value = snapshot.volume;
-    applyVolume();
-    art.muted = snapshot.muted;
-    art.template.$player.classList.remove('art-error');
-    art.notice.show = '';
-    if (snapshot.paused) art.pause();
-    else await art.play();
+    if (!data || !current()) return;
   } catch (e) {
-    if (key === request) error.value = `无法恢复播放：${errorText(e)}`;
+    if (current()) error.value = `无法恢复播放：${errorText(e)}`;
   } finally {
-    if (key === request && currentPlayer === art) {
+    if (current()) {
       renewing = false;
       switching.value = false;
+      renewalSnapshot = null;
     }
   }
 }
 async function setup() {
   const key = ++request;
+  renewal++;
+  renewalController?.abort();
+  renewalSnapshot = null;
+  protocolFallback.reset();
   const endKey = endGuard.reset();
   const partAtStart = props.part.id;
   const shouldStart = props.autoStart;
   const shouldResume = props.resume !== false;
+  startupPending = true;
+  startupPlayRequested = !!shouldStart;
   emit('playing', false);
   playbackController.abort();
   playbackController = new AbortController();
+  initialProgress?.cancel();
+  const resumeAtStart = preloadProgress(
+    (signal) => api<{ position: number }>(`/progress/${partAtStart}`, { signal }),
+    playbackController.signal,
+    { enabled: !!session.user && shouldResume },
+  );
+  initialProgress = resumeAtStart;
   rejectMediaLoad?.(new Error('播放内容已切换'));
   busy.value = true;
   error.value = '';
@@ -407,7 +512,7 @@ async function setup() {
   renewing = false;
   switching.value = false;
   runtimeStats.value = emptyRuntimeStats();
-  await saveProgress();
+  void saveProgress();
   if (key !== request) return;
   closeSettings();
   fullscreenActive.value = false;
@@ -419,60 +524,51 @@ async function setup() {
   art?.destroy(false);
   art = null;
   controlButtons = null;
+  rawDanmaku = [];
+  danmakuReloadRequested = false;
+  clearTimeout(danmakuReload);
   try {
-    const data = await createPlayback(
-      {
-        part_id: partAtStart,
-        variant_id: variantId.value || undefined,
-        route_id: routeId.value || undefined,
-      },
-      playbackController.signal,
-      (value) => {
-        if (key === request) probing.value = value;
-      },
-    );
+    const [data, [{ default: Player }, { default: artplayerPluginDanmuku }]] = await Promise.all([
+      createPlayback(
+        {
+          part_id: partAtStart,
+          variant_id: variantId.value || undefined,
+          route_id: routeId.value || undefined,
+        },
+        playbackController.signal,
+        (value) => {
+          if (key === request) probing.value = value;
+        },
+      ),
+      loadPlayerEngines(),
+    ]);
     if (key !== request) return;
     if (typeof data.url !== 'string' || !data.url) throw new Error('此分 P 尚无有效的播放地址');
     playback.value = data;
     variantId.value = data.source_variant_id || data.variant_id || '';
-    let danmaku: Danmaku[] = [];
-    try {
-      danmaku = await api<Danmaku[]>(`/parts/${partAtStart}/danmaku`, {
-        signal: playbackController.signal,
-      });
-      if (key !== request) return;
-      dmCount.value = danmaku.length;
-    } catch (e) {
-      note.value = `弹幕暂时不可用：${errorText(e)}`;
-    }
-    if (key !== request) return;
     await nextTick();
+    if (key !== request) return;
     if (!container.value) return;
-    rawDanmaku = danmaku
-      .filter((d) => Number.isFinite(d.time) && [0, 1, 2].includes(d.mode))
-      .map((d) => ({
-        text: String(d.text ?? ''),
-        time: d.time,
-        mode: d.mode as Mode,
-        color:
-          typeof d.color === 'number' && Number.isFinite(d.color)
-            ? `#${Math.max(0, Math.min(0xffffff, Math.round(d.color)))
-                .toString(16)
-                .padStart(6, '0')}`
-            : typeof d.color === 'string' && /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(d.color)
-              ? d.color
-              : '#ffffff',
-      }));
     activePartId = partAtStart;
     // Renewal is bounded here, so disable the player's separate reconnect loop.
-    Artplayer.RECONNECT_TIME_MAX = 0;
-    art = new Artplayer({
+    Player.RECONNECT_TIME_MAX = 0;
+    art = new Player({
       container: container.value,
       url: data.url,
       type: 'treasure',
       customType: {
         treasure: (video, url) => {
-          void mediaAdapter.attach(video, url, playback.value?.protocol);
+          void mediaAdapter.attach(
+            video,
+            url,
+            playback.value?.protocol,
+            playback.value?.media as MeasuredMedia | undefined,
+            validResumePosition(
+              renewalSnapshot?.position ?? (startupPending ? resumeAtStart.peek() : 0),
+              (playback.value?.media as MeasuredMedia | undefined)?.duration_seconds ||
+                props.part.duration,
+            ),
+          );
         },
       },
       poster: props.poster || '',
@@ -526,29 +622,28 @@ async function setup() {
       if (art) playbackRate.value = art.playbackRate;
     });
     art.on('ready', async () => {
-      if (key !== request || !art) return;
+      if (key !== request || !art || renewing) return;
+      const readyRenewal = renewal;
       const player = art;
       applyPreferences();
       setRate(playbackRate.value);
       if (session.user && shouldResume) {
-        try {
-          const progress = await api<{ position: number }>(`/progress/${partAtStart}`, {
-            signal: playbackController.signal,
-          });
-          if (
-            key === request &&
-            player === art &&
-            player.video.paused &&
-            player.currentTime < 1 &&
-            progress.position > 0 &&
-            progress.position < player.duration - 3
-          )
-            player.currentTime = progress.position;
-        } catch {
-          /* Missing progress does not block playback. */
-        }
+        const saved = await resumeAtStart.ready;
+        const position = validResumePosition(saved, player.duration);
+        if (
+          key === request &&
+          readyRenewal === renewal &&
+          !renewing &&
+          player === art &&
+          player.video.paused &&
+          player.currentTime < 1 &&
+          position > 0
+        )
+          player.currentTime = position;
       }
-      if (shouldStart && key === request && player === art) {
+      if (key !== request || readyRenewal !== renewal || player !== art || renewing) return;
+      startupPending = false;
+      if (startupPlayRequested) {
         try {
           await player.play();
         } catch {
@@ -566,11 +661,15 @@ async function setup() {
     art.on('video:playing', () => {
       if (key === request) emit('playing', true);
     });
+    art.on('video:play', () => {
+      if (key === request && !renewing) startupPlayRequested = true;
+    });
     art.on('video:waiting', () => {
       if (key === request) emit('playing', false);
     });
     art.on('video:pause', () => {
       if (key !== request) return;
+      if (!renewing) startupPlayRequested = false;
       emit('playing', false);
       void saveProgress();
     });
@@ -586,10 +685,22 @@ async function setup() {
       if (key !== request) return;
       emit('playing', false);
       handleMediaFailure(
-        art?.video.error?.code === 3 ? 'media' : 'network',
+        mediaFailureKind(art?.video.error?.code),
         '当前浏览器无法解码此归档版本，可手动选择已保存的兼容版本。',
       );
     });
+    const danmakuPlayer = art;
+    const signal = playbackController.signal;
+    void loadDanmaku(
+      () => api<Danmaku[]>(`/parts/${partAtStart}/danmaku`, { signal }),
+      () => key === request && danmakuPlayer === art && !signal.aborted,
+      async (rows) => {
+        rawDanmaku = rows;
+        dmCount.value = rows.length;
+        await reloadDanmaku();
+      },
+      (reason) => (note.value = `弹幕暂时不可用：${errorText(reason)}`),
+    );
   } catch (e) {
     if (key === request) error.value = errorText(e);
   } finally {
@@ -643,6 +754,8 @@ onBeforeUnmount(() => {
   request++;
   clearTimeout(danmakuReload);
   playbackController.abort();
+  initialProgress?.cancel();
+  renewalController?.abort();
   rejectMediaLoad?.(new Error('播放器已关闭'));
   mediaAdapter.destroy();
   void saveProgress();
@@ -662,6 +775,12 @@ onBeforeUnmount(() => {
         <span>{{ error }}</span>
         <div>
           <button @click="art ? renew() : setup()">重试播放</button
+          ><button
+            v-if="audioAlternative"
+            :disabled="busy || switching"
+            @click="selectVariant(audioAlternative.id)"
+          >
+            使用 AAC 声音兼容版</button
           ><button v-if="playback" @click="openSettings">播放设置</button>
         </div>
       </div>
@@ -732,5 +851,13 @@ onBeforeUnmount(() => {
         </PlayerSettingsPanel>
       </Teleport>
     </Teleport>
+    <AudioCompatibilityNotice
+      v-if="!settingsOpen"
+      :media="currentMedia"
+      :support="runtimeStats.audioSupport.ec3"
+      :alternative-id="audioAlternative?.id"
+      :busy="busy || switching"
+      @variant="selectVariant"
+    />
   </section>
 </template>

@@ -56,8 +56,11 @@ def run_tool(arguments, *, check_active=None, timeout=7200, capture=False):
                     process.wait(timeout=5)
 
 
-def probe_media(path: Path, *, check_active=None):
-    raw, _ = run_tool([str(settings.ffprobe_path), "-v", "error", "-protocol_whitelist", "file,crypto,data",
+def probe_media(path: Path, *, check_active=None, extended=False):
+    # A large first video fragment can exhaust FFprobe's default 5 MB before
+    # dependent E-AC-3 frames arrive. Retry only where the caller needs it.
+    budget = ["-probesize", "33554432", "-analyzeduration", "10000000"] if extended else []
+    raw, _ = run_tool([str(settings.ffprobe_path), "-v", "error", "-protocol_whitelist", "file,crypto,data", *budget,
         "-show_streams", "-show_format", "-of", "json", str(path)],
         check_active=check_active, timeout=120, capture=True)
     try:

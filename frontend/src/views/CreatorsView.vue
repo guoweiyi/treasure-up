@@ -3,6 +3,7 @@ import { ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api, query, errorText } from '../api';
 import type { Creator, Page } from '../types';
+import CreatorBio from '../components/CreatorBio.vue';
 import EmptyState from '../components/EmptyState.vue';
 import Pagination from '../components/Pagination.vue';
 const route = useRoute(),
@@ -69,14 +70,14 @@ watch(() => route.fullPath, load, { immediate: true });
           :src="creator.avatar_url"
           alt=""
           class="avatar large"
-          loading="lazy"
-        /><span v-else class="avatar large fallback">{{ creator.name?.slice(0, 1) || '?' }}</span>
+          loading="lazy" /><span v-else class="avatar large fallback">{{
+          creator.name?.slice(0, 1) || '?'
+        }}</span>
         <div>
           <h2>{{ creator.name }}</h2>
           <p class="muted small">已保存 {{ creator.saved_count || 0 }} 条视频</p>
-          <p class="clamp-two">{{ creator.description || '暂无简介' }}</p>
-        </div></RouterLink
-      >
+          <CreatorBio :text="creator.description" :limit="60" /></div
+      ></RouterLink>
     </div>
     <EmptyState
       v-else

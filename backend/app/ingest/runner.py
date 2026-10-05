@@ -438,7 +438,9 @@ def _comment_ledger(ctx, video):
     # Legacy inventories can exceed current caps. Keep only aggregate cost plus
     # real existing refs: this ledger itself remains small and never deletes.
     count, size = ctx.db.execute(select(func.count(Asset.id), func.coalesce(func.sum(Asset.size), 0)).where(Asset.id.in_(asset_ids))).one()
-    ledger = {"legacy": {"status": "legacy", "bytes": size, "count": count}} if count else {}
+    # PostgreSQL SUM(bigint) returns Decimal, which cannot be stored in JSON.
+    # Asset sizes/counts are integral; normalize before checkpointing the ledger.
+    ledger = {"legacy": {"status": "legacy", "bytes": int(size), "count": int(count)}} if count else {}
     _image_ledger(ctx, ledger)
     return ledger
 
@@ -468,7 +470,10 @@ def _enqueue_archive(ctx, video):
     key = f"archive:{video.id}:{ctx.run.id}"
     if not ctx.db.scalar(select(Job.id).where(Job.dedupe_key == key)):
         from app.jobs import enqueue
-        submitted = enqueue(ctx.db, "archive_video", video.id, ctx.job.account_id, dict(ctx.policy), key, frozen_policy=True)
+        policy = dict(ctx.policy)
+        if ctx.job.kind == "scan_collection":
+            policy["source_collection_id"] = ctx.job.target_id
+        submitted = enqueue(ctx.db, "archive_video", video.id, ctx.job.account_id, policy, key, frozen_policy=True)
         return "queued" if submitted.dedupe_key == key else "active"
     return "active"
 
@@ -489,7 +494,7 @@ def _metadata(ctx, video):
     video.duration = float(data.get("duration") or 0)
     video.published_at = _timestamp(data.get("pubdate"))
     source_metadata = clean_raw(data)
-    for key in ("media_properties", "source_quality", "ingest_state", "capture_policy", "comment_capture", "comment_assets"):
+    for key in ("media_properties", "source_quality", "ingest_state", "capture_policy", "comment_capture", "comment_assets", "paid_capture"):
         if key in (video.metadata_json or {}):
             source_metadata[key] = deepcopy(video.metadata_json[key])
     video.metadata_json, video.source_state = source_metadata, "available"
@@ -791,10 +796,11 @@ def _ingest_state(ctx, video, **values):
 def _playback_state(ctx, video, archive, job, status=None):
     state = (video.metadata_json or {}).get("ingest_state", {})
     children = dict(state.get("playback_jobs", {}))
-    status = status or ("complete" if job.status == "succeeded" else job.status)
+    status = status or ("unsupported" if job.status == "succeeded" and (job.result or {}).get("compatibility") == "unsupported"
+                        else "complete" if job.status == "succeeded" else job.status)
     children[archive.id] = {"job_id": job.id, "part_id": archive.part_id, "status": status}
     statuses = {item["status"] for item in children.values()}
-    aggregate = next((value for value in ("failed", "partial", "blocked", "cancelled", "paused", "running", "queued") if value in statuses), "complete")
+    aggregate = next((value for value in ("failed", "partial", "blocked", "cancelled", "paused", "running", "queued", "unsupported") if value in statuses), "complete")
     _ingest_state(ctx, video, playback=aggregate, playback_job_id=job.id, playback_jobs=children)
 
 
@@ -818,21 +824,60 @@ def _profiles(ctx, video):
     return True
 
 
+def _paid_media_allowed(ctx, video, *, metadata_state=None):
+    from app.paid_capture import consent, is_paid, source_origin
+    origin = source_origin(ctx.db, ctx.job)
+    waiting = bool(origin and is_paid(video) and not consent(ctx.db, origin, ctx.job.account_id))
+    if waiting:
+        ctx.cp["paid_consent_required"] = True
+        video.metadata_json = {**(video.metadata_json or {}), "paid_capture": {
+            "consent_required": True, "source_collection_id": origin}}
+        _ingest_state(ctx, video, media="awaiting_consent", **({"metadata": metadata_state} if metadata_state else {}))
+        return False
+    ctx.cp.pop("paid_consent_required", None)
+    if (video.metadata_json or {}).get("paid_capture"):
+        video.metadata_json = {**video.metadata_json, "paid_capture": {"consent_required": False, "source_collection_id": origin}}
+    return True
+
+
 def _enqueue_media(ctx, video, *, metadata_state="ready"):
     from app.jobs import enqueue
     # A deterministic child survives redelivery without resetting a paused,
     # cancelled or exhausted task. Existing media checkpoints are transferred
     # once when upgrading pre-split archive tasks.
     key = "download:" + ctx.job.id
-    child = ctx.db.scalar(select(Job).where(Job.dedupe_key == key))
+    child = ctx.db.get(Job, ctx.cp["media_job_id"]) if ctx.cp.get("media_job_id") else None
+    if not child or child.kind != "download_media" or child.target_id != video.id or (
+            child.dedupe_key != key and (child.checkpoint or {}).get("metadata_parent_id") != ctx.job.id):
+        child = ctx.db.scalar(select(Job).where(Job.dedupe_key == key))
+    state = (video.metadata_json or {}).get("ingest_state", {})
+    complete = bool(child and not (child.checkpoint or {}).get("paid_consent_required") and (
+        child.status == "succeeded" or (state.get("media_job_id") == child.id and state.get("media") == "complete")))
+    if complete:
+        # Repairing comments/danmaku must not downgrade an existing archive when
+        # source consent is later revoked. This branch starts no media work.
+        ctx.cp.pop("paid_consent_required", None)
+        if (video.metadata_json or {}).get("paid_capture"):
+            video.metadata_json = {**video.metadata_json, "paid_capture": {
+                **video.metadata_json["paid_capture"], "consent_required": False}}
+    elif not _paid_media_allowed(ctx, video, metadata_state=metadata_state):
+        return None
+    previous = None
+    if child and child.status == "succeeded" and (child.checkpoint or {}).get("paid_consent_required"):
+        # A bounded waiting run did not download the remaining body. After a
+        # fresh grant create a successor instead of rewriting its historical
+        # success or misreporting it as complete. The key makes retries stable.
+        previous = child
+        key += ":after:" + previous.id
+        child = ctx.db.scalar(select(Job).where(Job.dedupe_key == key))
     if not child:
         child = enqueue(ctx.db, "download_media", video.id, ctx.job.account_id,
                         dict(ctx.policy), key, frozen_policy=True)
-        child.checkpoint = {key: deepcopy(ctx.cp[key]) for key in
-            ("part_ids", "media_parts", "media_variants", "playback_parts") if key in ctx.cp}
+        checkpoint = previous.checkpoint if previous else ctx.cp
+        child.checkpoint = {key: deepcopy(checkpoint[key]) for key in
+            ("part_ids", "media_parts", "media_variants", "playback_parts") if key in checkpoint}
         child.checkpoint = {**child.checkpoint, "metadata_parent_id": ctx.job.id}
     ctx.cp["media_job_id"] = child.id
-    state = (video.metadata_json or {}).get("ingest_state", {})
     status = "complete" if child.status == "succeeded" or (state.get("media_job_id") == child.id and state.get("media") == "complete") else child.status
     _ingest_state(ctx, video, metadata=metadata_state, media=status, media_job_id=child.id)
     return child
@@ -871,9 +916,17 @@ def _archive(ctx, video):
         if ctx.policy.get("comments", True) or ctx.policy.get("danmaku", True) or ctx.policy.get("subtitles", True):
             return False
     for part_id in ctx.cp.get("part_ids", []):
+        needs_danmaku = ctx.policy.get("danmaku", True) and not ctx.cp.get("danmaku", {}).get(part_id, {}).get("done")
+        needs_subtitles = ctx.policy.get("subtitles", True) and part_id not in ctx.cp.get("subtitle_parts", [])
+        # Replaying committed stages can consume an entire time slice for a
+        # large multipart video before its next unfinished component is reached.
+        if not needs_danmaku and not needs_subtitles:
+            continue
         ctx.guard()
         part = ctx.db.get(VideoPart, part_id)
-        if ctx.policy.get("danmaku", True):
+        if not part or part.video_id != video.id:
+            raise IngestError("元数据分P检查点无效", code="invalid_metadata", retryable=False)
+        if needs_danmaku:
             ctx.stage("danmaku", part_id=part_id)
             try:
                 done = _danmaku(ctx, video, part)
@@ -885,7 +938,7 @@ def _archive(ctx, video):
                 if not done:
                     _raise_capture_errors(ctx, errors)
                     return False
-        if ctx.policy.get("subtitles", True) and part_id not in ctx.cp.get("subtitle_parts", []):
+        if needs_subtitles:
             if not ctx.request_slot():
                 _raise_capture_errors(ctx, errors)
                 return False
@@ -931,6 +984,16 @@ def _archive(ctx, video):
 
 def _download(ctx, video):
     from app.jobs import enqueue
+    from app.paid_capture import PaidConsentRequired
+    def authorize_media():
+        if not _paid_media_allowed(ctx, video):
+            raise PaidConsentRequired()
+    # Re-read source consent at execution, including pre-upgrade child jobs.
+    # Paid access is checked independently by the media adapter; consent is not
+    # an entitlement. No source setting is required for an explicit single BV.
+    if not _paid_media_allowed(ctx, video):
+        ctx.stage("paid_consent_required")
+        return True
     _ingest_state(ctx, video, media="running")
     completed = list(ctx.cp.get("media_parts", []))
     archives = dict(ctx.cp.get("media_variants", {}))
@@ -940,8 +1003,16 @@ def _download(ctx, video):
         if not part or part.video_id != video.id:
             raise IngestError("媒体分P检查点无效", code="invalid_metadata", retryable=False)
         if part_id not in completed:
+            if not _paid_media_allowed(ctx, video):
+                ctx.stage("paid_consent_required")
+                return True
             ctx.stage("download", part_id=part_id, completed_parts=len(completed), total_parts=len(ctx.cp["part_ids"]))
-            variant, reused = archive_media(ctx.db, ctx.client, video, part, ctx.policy, guard=ctx.guard)
+            try:
+                variant, reused = archive_media(ctx.db, ctx.client, video, part, ctx.policy,
+                                               guard=ctx.guard, authorize_media=authorize_media)
+            except PaidConsentRequired:
+                ctx.stage("paid_consent_required")
+                return True
             _ref(ctx.db, variant.asset_id, "media_variant", variant.id, "archive")
             completed.append(part_id)
             archives[part_id] = variant.id
@@ -965,6 +1036,7 @@ def _download(ctx, video):
 
 def _create_playback(db, job):
     ctx = Context(db, job, None)
+    preparation = None
     archive = db.get(MediaVariant, job.target_id)
     part = db.get(VideoPart, archive.part_id) if archive else None
     video = db.get(Video, part.video_id) if part else None
@@ -976,18 +1048,39 @@ def _create_playback(db, job):
             ctx.stage("compatible_copy", part_id=part.id)
             playback, reused = ensure_playback_variant(db, part, archive, ctx.policy, guard=ctx.guard)
             _ref(db, playback.asset_id, "media_variant", playback.id, "playback")
+            if (playback.metadata_json or {}).get("compatibility_mode") == "audio_only":
+                # AAC has different audio packets from the original. Its HLS
+                # and loudness belong to this derivative, never the archive.
+                from app.maintenance import enqueue_variant_preparation
+                preparation = enqueue_variant_preparation(db, playback)
             _playback_state(ctx, video, archive, job, "complete")
+            _ingest_state(ctx, video, playback_error=None, playback_reason=None)
             ctx.run.status, ctx.run.finished_at = "visible_traversal_complete", _now()
             ctx.stage("compatible_ready", variant_id=playback.id)
         except IngestError as error:
             if error.code == "job_stopped":
                 raise
+            if error.code == "hdr_conversion_unsupported":
+                # This optional SDR rendition is unsupported, not a failed
+                # archive. The independent prepare_media job still handles HLS.
+                _playback_state(ctx, video, archive, job, "unsupported")
+                _ingest_state(ctx, video, playback_error=None, playback_reason=error.code)
+                ctx.run.status, ctx.run.end_reason, ctx.run.finished_at = "unsupported", error.code, _now()
+                ctx.stage("compatible_unsupported", reason=error.code)
+                return {"video_id": video.id, "archive_variant_id": archive.id, "variant_id": None,
+                        "run_id": ctx.run.id, "compatibility": "unsupported", "reason": error.code,
+                        "message": "HDR/广色域到 SDR 的兼容副本暂不支持，原档已保留，未生成兼容副本。"}
             ctx.run.status, ctx.run.end_reason = "partial", error.code
             _playback_state(ctx, video, archive, job, "partial" if error.retryable else "failed")
             _ingest_state(ctx, video, playback_error=error.code)
             ctx.save()
             raise
-    return {"video_id": video.id, "variant_id": playback.id, "run_id": ctx.run.id}
+    result = {"video_id": video.id, "variant_id": playback.id, "run_id": ctx.run.id}
+    if mode := (playback.metadata_json or {}).get("compatibility_mode"):
+        result["compatibility_mode"] = mode
+    if preparation:
+        result["prepare_job_id"] = preparation.id
+    return result
 
 
 def run_job(db, job):
@@ -1071,12 +1164,13 @@ def run_job(db, job):
                             done = _images(ctx)
                     if job.kind in ("archive_video", "download_media"):
                         state = (video.metadata_json or {}).get("ingest_state", {})
-                        media_pending = job.kind == "archive_video" and ctx.policy.get("media", True) and state.get("media") != "complete"
+                        media_pending = bool(ctx.cp.get("paid_consent_required")) or (job.kind == "archive_video" and ctx.policy.get("media", True) and state.get("media") != "complete")
                         metadata_partial = job.kind == "download_media" and state.get("metadata") in {"partial", "running"}
                         video.capture_status = "partial" if not done or metadata_partial else "metadata_ready" if media_pending else "complete"
                         if done and not media_pending:
                             video.metadata_json = {**(video.metadata_json or {}), "capture_policy": _capture_policy(ctx.policy)}
-                result = {"video_id": video.id, "media_job_id": ctx.cp.get("media_job_id")}
+                result = {"video_id": video.id, "media_job_id": ctx.cp.get("media_job_id"),
+                          "paid_consent_required": bool(ctx.cp.get("paid_consent_required"))}
             else:
                 raise IngestError("采集任务类型未支持", code="unsupported_job", retryable=False)
             ctx.run.status = "visible_traversal_complete" if done else "partial"
@@ -1087,6 +1181,8 @@ def run_job(db, job):
             if done and ctx.cp.get("unavailable_images"):
                 ctx.run.status, ctx.run.end_reason = "bounded_complete", "source_images_unavailable"
                 result["unavailable_images"] = len(ctx.cp["unavailable_images"])
+            if done and ctx.cp.get("paid_consent_required"):
+                ctx.run.status, ctx.run.end_reason = "bounded_complete", "paid_consent_required"
             if job.kind == "scan_collection" and done:
                 scan = ctx.cp.get("source_scan", {})
                 ctx.run.status = "visible_traversal_complete" if scan.get("status") == "complete" else scan.get("status", "partial")
@@ -1118,8 +1214,23 @@ def run_job(db, job):
                 update_account_identity(db, account, client.credential_generation, invalid=True)
             ctx.save()
         raise
-    except Exception:
+    except Exception as error:
         db.rollback()
+        from app.jobs import LeaseLost
+        if isinstance(error, LeaseLost):
+            raise
+        if ctx:
+            # Failed work may have appended images referencing rolled-back
+            # rows. Diagnostics extend only the last committed checkpoint.
+            db.refresh(job, attribute_names=["checkpoint"])
+            ctx.cp = deepcopy(job.checkpoint or {})
+            ctx.run = db.get(CaptureRun, ctx.cp.get("run_id")) if ctx.cp.get("run_id") else None
+            if ctx.run:
+                ctx.guard()
+                from .diagnostics import summarize
+                ctx.cp["diagnostic"] = summarize(error)
+                ctx.run.status, ctx.run.end_reason = "partial", "internal_ingest_error"
+                ctx.save()
         raise IngestError("采集处理发生内部错误，已保留最后提交的检查点", code="internal_ingest_error") from None
     finally:
         if client is not None:

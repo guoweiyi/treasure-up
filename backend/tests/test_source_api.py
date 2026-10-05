@@ -31,7 +31,9 @@ def test_sources_are_typed_and_monitoring_and_credentials_remain_private(context
         "title": "UP订阅", "account_id": account["id"], "policy": {"initial_strategy": "new_only"}})
     assert source.status_code == 201, source.text
     source = source.json()
-    assert source["kind"] == "creator" and source["monitor"] == {}
+    assert source["kind"] == "creator"
+    assert source["policy"]["include_paid_videos"] is False
+    assert source["monitor"] == {"paid": {"detected_count": 0, "pending_count": 0, "consent_required": False}}
     collection = db.get(Collection, source["collection_id"])
     assert collection.kind == "creator" and collection.owner_uid == uid
     favorite = client.post("/api/v1/admin/sources", json={"kind": "favorite", "source_id": uid,
@@ -45,6 +47,7 @@ def test_sources_are_typed_and_monitoring_and_credentials_remain_private(context
     assert history["items"][0]["counts"]["new_items"] == 2
     scan = client.post(f'/api/v1/admin/sources/{source["id"]}/scan', json={"full": True})
     assert scan.status_code == 200 and scan.json()["policy"]["force_full_scan"] is True
+    assert scan.json()["policy"]["include_paid_videos"] is False
     assert client.post(f'/api/v1/admin/sources/{source["id"]}/scan', json={}).status_code == 409
     updated = client.patch(f'/api/v1/admin/accounts/{account["id"]}', json={"cookie": "replacement-synthetic", "name": "已更新"})
     assert updated.status_code == 200 and "cookie" not in updated.json() and "secret_encrypted" not in updated.json()

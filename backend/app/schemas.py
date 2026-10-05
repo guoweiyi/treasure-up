@@ -75,6 +75,7 @@ class IngestPolicy(Input):
     incremental_pages: int = Field(default=3, ge=1, le=100)
     full_scan_interval_hours: int = Field(default=24, ge=1, le=720)
     force_full_scan: bool = False
+    include_paid_videos: bool = False
     quality: Literal["best", "4320p", "8k", "2160p", "4k", "1440p", "1080p", "720p", "480p", "360p"] = "best"
     create_compatible_copy: bool = True
     prefer_h264: bool = False

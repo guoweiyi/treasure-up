@@ -1,5 +1,6 @@
 html:root {
-  font-family: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
   color: #18191c;
   background: #fff;
   font-synthesis: none;
@@ -7,8 +8,9 @@ html:root {
   -webkit-font-smoothing: antialiased;
   --accent: #16847a;
   --accent-soft: #edf6f3;
-  --border: #e7eae7;
-  --muted: #7e8782;
+  --border: #e7e8ea;
+  --muted: #767d85;
+  --text: #18191c;
   --el-color-primary: #16847a;
   --el-color-primary-light-3: #5ca99f;
   --el-color-primary-light-5: #8bc1ba;

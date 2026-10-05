@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { ref, watch, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { api, query, errorText, session } from '../api';
 import type { Creator, Video, Page } from '../types';
+import CreatorBio from '../components/CreatorBio.vue';
 import VideoCard from '../components/VideoCard.vue';
 import PlaylistStartButton from '../player/PlaylistStartButton.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -30,7 +31,7 @@ async function search(p = 1) {
   error.value = '';
   try {
     const data = await api<Page<Video>>(
-      `/videos?${query({ creator_id: route.params.id, q: q.value, sort: sort.value, page: p, page_size: 24 })}`,
+      `/videos?${query({ view: 'card', creator_id: route.params.id, q: q.value, sort: sort.value, page: p, page_size: 24 })}`,
     );
     if (n === seq) {
       items.value = data.items;
@@ -70,6 +71,10 @@ watch(
   },
   { immediate: true },
 );
+onBeforeUnmount(() => {
+  seq++;
+  profileSeq++;
+});
 </script>
 <template>
   <main class="content-shell creator-space">
@@ -86,7 +91,7 @@ watch(
             >平台昵称 {{ creator.source_name }}</span
           >
         </p>
-        <p class="preserve-lines">{{ creator.description || '暂无简介' }}</p>
+        <CreatorBio :text="creator.description" />
         <div v-if="creator.tags?.length" class="tags">
           <span v-for="tag in creator.tags" :key="tag">{{ tag }}</span>
         </div>
@@ -119,7 +124,7 @@ watch(
         >
         <span class="profile-saved"
           ><strong>{{ creator.saved_count ?? 0 }}</strong
-          >已收藏作品</span
+          >已保存视频</span
         ><RouterLink
           v-if="['admin', 'editor'].includes(session.user?.role || '')"
           :to="{ path: '/admin/creators', query: { edit: creator.id } }"
@@ -135,7 +140,7 @@ watch(
     </div>
     <section v-if="tab === 'about' && creator" class="creator-about">
       <h2>个人简介</h2>
-      <p class="preserve-lines">{{ creator.description || '暂无简介' }}</p>
+      <CreatorBio :text="creator.description" :limit="240" expandable />
       <dl>
         <dt v-if="creator.source_name">平台昵称</dt>
         <dd v-if="creator.source_name">{{ creator.source_name }}</dd>
@@ -148,10 +153,10 @@ watch(
     <template v-else
       ><div class="section-heading">
         <h2>
-          TA 的已收藏作品 <span class="muted">{{ total }}</span>
+          TA 的已保存视频 <span class="muted">{{ total }}</span>
         </h2>
         <form class="search-form compact" @submit.prevent="search()">
-          <input v-model="q" placeholder="在这位 UP 的收藏中搜索" aria-label="UP 视频搜索" /><select
+          <input v-model="q" placeholder="搜索 TA 的已保存视频" aria-label="UP 视频搜索" /><select
             v-model="sort"
             aria-label="排序"
             @change="search()"

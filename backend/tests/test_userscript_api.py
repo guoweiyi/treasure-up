@@ -96,7 +96,7 @@ def test_admin_permissions_csrf_and_origin_boundary(context):
     assert db.scalar(select(func.count()).select_from(Job)) == 0
 
 
-@pytest.mark.parametrize("change", ["revoke", "expire", "disable_user", "demote_user", "invalid_account", "disable_account"])
+@pytest.mark.parametrize("change", ["revoke", "expire", "disable_user", "demote_user", "invalid_account", "disable_account", "expired_account"])
 def test_revocation_expiry_and_disabled_identity_are_enforced(context, change):
     client, db, _ = context
     account, item, token = setup_token(context)
@@ -111,10 +111,13 @@ def test_revocation_expiry_and_disabled_identity_are_enforced(context, change):
         if change == "disable_user": user.disabled = True
         else: user.role = "reader"
     else:
-        account.status = "invalid" if change == "invalid_account" else "disabled"
+        account.status = {"invalid_account": "invalid", "expired_account": "expired", "disable_account": "disabled"}[change]
     db.commit()
+    assert client.get(STATUS, headers=bearer(token)).status_code in {401, 409}
     assert client.post(SUBMIT, headers=bearer(token), json={"bvids": ["BV1234567890"]}).status_code in {401, 409}
     assert db.scalar(select(func.count()).select_from(Job)) == 0
+    db.refresh(stored)
+    assert stored.day_videos == stored.minute_requests == 0
 
 
 def test_inventory_states_deletion_barrier_and_metadata_only_do_not_fake_saved_media(context):

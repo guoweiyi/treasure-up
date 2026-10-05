@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import math
 import re
-import tempfile
-from pathlib import Path
 
 from app.config import settings
 from app.models import MediaVariant
-from app.storage.service import materialize_asset
+from .source import source_scope
 from .tools import PlaybackError, probe_media, run_tool
 
 
@@ -44,7 +42,7 @@ def bypass_reason(audio):
     return None, False
 
 
-def analyze_variant(db, variant_id, *, check_active=None):
+def analyze_variant(db, variant_id, *, check_active=None, source_provider=None):
     """Decode to a null sink for measurements; no normalized audio is ever stored."""
     variant = db.get(MediaVariant, variant_id)
     if not variant:
@@ -55,9 +53,8 @@ def analyze_variant(db, variant_id, *, check_active=None):
     previous = (variant.metadata_json or {}).get("loudness")
     if previous and previous.get("source_asset_id") == source_asset_id and previous.get("analysis_version") == 1:
         return previous
-    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="loudness-", dir=settings.scratch_dir) as directory:
-        source = materialize_asset(db, source_asset_id, Path(directory) / "source.media")
+    with source_scope(db, source_provider=source_provider, check_active=check_active) as provider:
+        source = provider(source_asset_id)
         probe = probe_media(source, check_active=check_active)
         audios = [s for s in probe["streams"] if s.get("codec_type") == "audio"]
         audio = audios[0] if audios else None

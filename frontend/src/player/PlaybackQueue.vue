@@ -118,7 +118,10 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
 <template>
   <section
     class="playlist-player"
-    :class="{ 'playlist-player--single': !hasList && (partCount || 0) < 2 }"
+    :class="{
+      'playlist-player--single': !hasList && (partCount || 0) < 2,
+      'playlist-player--menu-open': menuOpen,
+    }"
     aria-label="播放队列"
   >
     <div class="playlist-toolbar">
@@ -144,6 +147,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
         <span class="playlist-source"
           >视频选集<span class="playlist-position">{{ position.part }}</span></span
         ><strong :title="currentLabel">{{ currentLabel }}</strong>
+      </div>
+      <div v-else class="playlist-now-text playlist-part-heading">
+        <span class="playlist-source">播放方式</span><strong>{{ currentMode.label }}</strong>
       </div>
       <div class="playlist-actions">
         <button
@@ -278,10 +284,14 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
 <style scoped>
 .playlist-player {
   position: relative;
+  container-type: inline-size;
   margin: 12px 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface, #fff);
+}
+.playlist-player--menu-open {
+  z-index: 170;
 }
 .playlist-toolbar {
   display: flex;
@@ -361,8 +371,8 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
   align-items: center;
   justify-content: center;
   gap: 2px;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   padding: 7px;
   border: 0;
   border-radius: 5px;
@@ -420,7 +430,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
   align-items: center;
   gap: 11px;
   width: 100%;
-  min-height: 39px;
+  min-height: 44px;
   padding: 8px 9px;
   border: 0;
   border-radius: 5px;
@@ -578,6 +588,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
   font-size: 10px;
 }
 .playlist-load-more {
+  min-height: 44px;
   width: 100%;
   padding: 9px;
   border: 0;
@@ -602,15 +613,13 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
   text-decoration: underline;
 }
 .playlist-player--single {
-  display: flex;
-  justify-content: flex-end;
   border: 0;
   margin: 0;
   background: none;
 }
 .playlist-player--single .playlist-toolbar {
-  min-height: 36px;
-  padding: 0;
+  min-height: 58px;
+  padding: 6px 0;
 }
 .playlist-player button:focus-visible {
   outline: 2px solid var(--accent);
@@ -637,14 +646,6 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
   .playlist-actions {
     gap: 0;
   }
-  .playlist-icon-button {
-    width: 32px;
-    height: 38px;
-    padding: 6px;
-  }
-  .playlist-mode-button {
-    width: 40px;
-  }
   .playlist-items {
     max-height: 236px;
   }
@@ -654,6 +655,38 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
   }
   .playlist-cover {
     width: 68px;
+  }
+}
+@container (max-width: 460px) {
+  .playlist-toolbar {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    padding: 8px;
+  }
+  .playlist-now,
+  .playlist-part-heading {
+    flex-basis: 100%;
+    min-height: 44px;
+  }
+  .playlist-actions {
+    margin-left: auto;
+  }
+  .playlist-player--single .playlist-part-heading {
+    flex-basis: auto;
+  }
+  .playlist-now-text strong {
+    font-size: 12px;
+  }
+  .playlist-cover {
+    width: 60px;
+  }
+  .playlist-items li button {
+    gap: 7px;
+    padding: 8px 5px;
+    min-height: 54px;
+  }
+  .playlist-items {
+    max-height: 350px;
   }
 }
 @media (prefers-reduced-motion: no-preference) {

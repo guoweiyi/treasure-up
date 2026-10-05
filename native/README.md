@@ -35,6 +35,10 @@ Android CI 仍使用 `--debug`，通过 `CARGO_PROFILE_DEV_DEBUG=0` 与 `CARGO_P
 
 连接表单也接受以 `/api` 或 `/api/v1` 结尾的 API 地址，提交前规范化为同一服务器根地址；不支持任意挂载前缀。进入后可直接浏览视频库，个人星标、进度保存与管理操作再登录。移动播放器使用站内自定义控件；iOS 27 的实现依据与尚需真机验证的项目见 [播放器说明](../frontend/src/player/IOS_NOTES.md)。
 
+连接页在宽屏/iPad 宽度使用介绍与表单双栏，窄屏叠放；四边保留系统安全区，横屏或键盘压缩高度时允许滚动。地址输入保持 16px 字号，输入框和主按钮分别至少 52px、48px，避免把桌面表单直接缩成小触点。这次仅调整本地 HTML/CSS，不增加 IPC、网络例外或权限；CSS 视窗验收不能替代 iPhone/iPad 的键盘、安全区和旋转实测。
+
+2026-10-04 在 Windows Chrome 静态预览中检查了 1024×768 双栏和 390×844 单栏：没有横向溢出，输入框实测 52px 高、主按钮约 49.6px 高、输入字号 16px。浏览器预览正确禁用原生连接操作；这不构成 Tauri/WKWebView 实机连接或 Atmos 播放验证。临时预览服务和标签已关闭，视窗覆盖已恢复。
+
 Rust 在固定 origin 请求 `GET /api/v1/server`，8 秒超时、16 KiB 响应上限、禁止重定向、正常校验证书；只接收 `{application:"treasure-up",api_version:1}`。服务标识用于兼容性识别，不是替代 TLS 的身份凭证。服务器响应从不注入本地 HTML、JavaScript 或 CSP。
 
 验证成功后，同一 WebView 导航到 `/?client=native`，只允许选定 origin 的顶层导航。B 站及其他外链不会进入本地信任域；云存储/CDN 媒体作为网页子资源由正常 WebView 加载，顶层导航策略不是媒体请求代理。

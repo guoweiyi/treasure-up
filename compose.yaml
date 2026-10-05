@@ -93,6 +93,7 @@ services:
         condition: service_completed_successfully
   collector:
     <<: *backend
+    cpu_shares: 256
     command: [celery, -A, app.worker:celery, worker, -Q, collector, --concurrency=1, --loglevel=WARNING]
     healthcheck:
       <<: *worker-health
@@ -102,6 +103,7 @@ services:
         condition: service_completed_successfully
   media-worker:
     <<: *backend
+    cpu_shares: 256
     command: [celery, -A, app.worker:celery, worker, -Q, media, --concurrency=1, --loglevel=WARNING]
     healthcheck:
       <<: *worker-health
@@ -111,6 +113,7 @@ services:
         condition: service_completed_successfully
   download-worker:
     <<: *backend
+    cpu_shares: 256
     command: [celery, -A, app.worker:celery, worker, -Q, download, --concurrency=1, --loglevel=WARNING]
     healthcheck:
       <<: *worker-health
@@ -120,6 +123,7 @@ services:
         condition: service_completed_successfully
   backup-worker:
     <<: *backend
+    cpu_shares: 256
     command: [celery, -A, app.worker:celery, worker, -Q, backup, --concurrency=1, --loglevel=WARNING]
     healthcheck:
       <<: *worker-health
@@ -147,6 +151,12 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -T, "3", -O, /dev/null, "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   database:
