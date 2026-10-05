@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from bootstrap import create_environment
+from bootstrap import configure_origin, create_environment
 
 
 def compose_command(root, env_file, *, light=False, prebuilt=False):
@@ -45,12 +45,16 @@ def main():
     parser.add_argument("--light", action="store_true", help="Combine download/media workers; metadata and backup remain separate")
     parser.add_argument("--env-file", type=Path, default=root / ".env")
     parser.add_argument("--port", type=int, default=8788)
-    parser.add_argument("--origin", help="External HTTPS origin, or local http://localhost:<port>")
+    parser.add_argument("--origin", help="Set the external HTTPS origin, including on an existing deployment; other settings stay intact")
+    parser.add_argument("--allow-http", action="store_true", help="Explicitly allow an HTTP tunnel without passkeys; HTTPS remains recommended")
     parser.add_argument("--prebuilt", action="store_true", help="Pull published registry images, then start without a local build (also works with --light)")
     parser.add_argument("--no-build", action="store_true", help="Use only already available local images; with --prebuilt, the registry pull still runs")
     args = parser.parse_args()
     try:
-        create_environment(args.env_file, origin=args.origin or f"http://localhost:{args.port}", port=args.port)
+        created = create_environment(args.env_file, origin=args.origin or f"http://localhost:{args.port}", port=args.port,
+                                     allow_http=args.allow_http)
+        if not created and args.origin:
+            configure_origin(args.env_file, args.origin, allow_http=args.allow_http)
     except ValueError as error:
         parser.error(str(error))
     try:
