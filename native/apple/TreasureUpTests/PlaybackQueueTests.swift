@@ -357,8 +357,11 @@ private final class QueueTestURLProtocol: URLProtocol, @unchecked Sendable {
             lock.withLock { self.handler = handler; recordedPaths = [] }
         }
         func reply(_ request: URLRequest) -> Reply {
-            let handler = lock.withLock { recordedPaths.append(request.url?.path ?? ""); return handler }
-            return handler?(request) ?? Reply(status: 503, body: "{}")
+            let responseHandler = lock.withLock {
+                recordedPaths.append(request.url?.path ?? "")
+                return self.handler
+            }
+            return responseHandler?(request) ?? Reply(status: 503, body: "{}")
         }
     }
     static let store = Store()
