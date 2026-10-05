@@ -307,6 +307,163 @@ final class PlaybackQueueTests: XCTestCase {
         }
     }
 
+    func testRepeatedCurrentSelectionKeepsSecondPartAndDoesNotRecreateSession() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1), self.part("a2", position: 2)])
+            await coordinator.start(video: source, part: source.parts[1])
+            // Supply an existing local player item: this regression concerns row
+            // selection and API traffic, not a particular media decoder.
+            coordinator.errorMessage = nil
+            let item = AVPlayerItem(asset: AVMutableComposition())
+            coordinator.player.replaceCurrentItem(with: item)
+            let calls = QueueTestURLProtocol.store.paths
+            await coordinator.playQueueItem(id: "a")
+            await coordinator.start(video: source, part: source.parts[1])
+            XCTAssertEqual(coordinator.currentPart?.id, "a2")
+            XCTAssertTrue(coordinator.player.currentItem === item)
+            XCTAssertEqual(QueueTestURLProtocol.store.paths, calls)
+        }
+    }
+
+    func testRepeatedSelectionWhileStartingIssuesOnlyOneSessionRequest() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}", delay: 0.15) }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1), self.part("a2", position: 2)])
+            let starting = Task { await coordinator.start(video: source, part: source.parts[1]) }
+            for _ in 0..<100 where QueueTestURLProtocol.store.paths.isEmpty {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertTrue(coordinator.isLoading)
+            coordinator.seek(to: 75)
+            await coordinator.start(video: source, part: source.parts[1])
+            await coordinator.playQueueItem(id: "a")
+            XCTAssertEqual(coordinator.currentTime, 75)
+            await starting.value
+            XCTAssertEqual(coordinator.currentPart?.id, "a2")
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.filter { $0 == "/api/v1/playback-sessions" }.count, 1)
+        }
+    }
+
+    func testFailedCurrentSelectionRetriesSamePartInsteadOfReturningToFirstPart() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1), self.part("a2", position: 2)])
+            await coordinator.start(video: source, part: source.parts[1])
+            XCTAssertNotNil(coordinator.errorMessage)
+            await coordinator.playQueueItem(id: "a")
+            XCTAssertEqual(coordinator.currentPart?.id, "a2")
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.filter { $0 == "/api/v1/playback-sessions" }.count, 2)
+        }
+    }
+
+    func testStartupSeekWinsAgainstBothEarlyAndLateHistoryResponses() {
+        for historyFirst in [true, false] {
+            var position = PlaybackStartupPosition()
+            if historyFirst { position.acceptHistory(20, duration: 120) }
+            position.requestSeek(75)
+            if !historyFirst { position.acceptHistory(20, duration: 120) }
+            XCTAssertEqual(position.resolved(duration: 120), 75)
+            XCTAssertFalse(position.acceptsHistory)
+            let revision = position.revision
+            // Zero is a deliberate seek, not the absence of a resume position.
+            position.requestSeek(0)
+            position.acceptHistory(40, duration: 120)
+            XCTAssertNotEqual(position.revision, revision)
+            XCTAssertEqual(position.resolved(duration: 120), 0)
+            XCTAssertTrue(position.hasExplicitSeek)
+        }
+    }
+
+    func testExpiredHistoryWindowCannotJumpPlaybackAndAutomaticStartDoesNotResume() {
+        var position = PlaybackStartupPosition()
+        position.acceptHistory(25, duration: 120)
+        position.closeHistoryWindow()
+        position.acceptHistory(60, duration: 120)
+        XCTAssertEqual(position.resolved(duration: 120), 25)
+        var automatic = PlaybackStartupPosition(resumeHistory: false)
+        automatic.acceptHistory(60, duration: 120)
+        XCTAssertEqual(automatic.resolved(duration: 120), 0)
+        automatic.requestSeek(500)
+        XCTAssertEqual(automatic.resolved(duration: 120), 120)
+    }
+
+    func testReplayOnlyRestartsAtActualEndOfFiniteMedia() {
+        XCTAssertTrue(PlaybackStartupPosition.shouldReplay(position: 120, duration: 120))
+        XCTAssertTrue(PlaybackStartupPosition.shouldReplay(position: 119.95, duration: 120))
+        XCTAssertFalse(PlaybackStartupPosition.shouldReplay(position: 119, duration: 120))
+        XCTAssertFalse(PlaybackStartupPosition.shouldReplay(position: 0, duration: 0))
+        XCTAssertFalse(PlaybackStartupPosition.shouldReplay(position: .infinity, duration: 120))
+        XCTAssertFalse(PlaybackStartupPosition.shouldReplay(position: 120, duration: .nan))
+    }
+
+    func testReplayPreservesPlayIntentAcrossLatePausedKVOAndStillHonorsUserPause() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.seek(to: 120)
+            coordinator.resume()
+            await self.waitForSeek(player)
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async {
+                    Self.emitPausedKVO(player)
+                    continuation.resume()
+                }
+            }
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertTrue(player.playedRates.isEmpty)
+            player.finishNextSeek()
+            for _ in 0..<100 where player.playedRates.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+            XCTAssertEqual(player.playedRates, [1])
+
+            coordinator.seek(to: 120)
+            coordinator.resume()
+            await self.waitForSeek(player)
+            coordinator.pause()
+            player.finishNextSeek()
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertEqual(player.playedRates, [1], "An explicit pause must win while replay is seeking")
+        }
+    }
+
+    func testReplayWaitsForLatestGestureBeforeStartingAudio() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.seek(to: 120)
+            coordinator.resume()
+            // This can arrive before the replay task gets its first actor turn.
+            coordinator.seek(to: 75)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [75])
+            // A second gesture also wins while the first seek is suspended.
+            coordinator.seek(to: 90)
+            XCTAssertEqual(player.pendingTimes, [75])
+            XCTAssertEqual(coordinator.currentTime, 90)
+            player.finishNextSeek()
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [90])
+            XCTAssertTrue(player.playedRates.isEmpty)
+            player.finishNextSeek()
+            for _ in 0..<100 where player.playedRates.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+            XCTAssertEqual(player.playedRates, [1])
+            XCTAssertEqual(coordinator.currentTime, 90)
+        }
+    }
+
+    private func waitForSeek(_ player: ReplayTestPlayer) async {
+        for _ in 0..<100 where player.pendingTimes.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertFalse(player.pendingTimes.isEmpty, "Replay should issue an awaited seek")
+    }
+
     func testDiagnosticsAreBoundedAndExcludeCredentialsURLsAndTitles() async {
         QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
         await withCoordinator { coordinator in
@@ -333,7 +490,12 @@ final class PlaybackQueueTests: XCTestCase {
         player.didChangeValue(forKey: "rate")
     }
 
-    private func withCoordinator(_ operation: @MainActor (PlaybackCoordinator) async -> Void) async {
+    private nonisolated static func emitPausedKVO(_ player: AVPlayer) {
+        player.willChangeValue(forKey: "timeControlStatus")
+        player.didChangeValue(forKey: "timeControlStatus")
+    }
+
+    private func withCoordinator(player: AVPlayer = AVPlayer(), _ operation: @MainActor (PlaybackCoordinator) async -> Void) async {
         let name = "TreasureQueueCoordinatorTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -341,9 +503,48 @@ final class PlaybackQueueTests: XCTestCase {
         configuration.protocolClasses = [QueueTestURLProtocol.self]
         let api = APIClient(baseURL: URL(string: "https://queue.example.test")!, defaults: defaults,
                             sessionConfiguration: configuration, persistSession: false)
-        let coordinator = PlaybackCoordinator(api: api, defaults: defaults)
+        let coordinator = PlaybackCoordinator(api: api, defaults: defaults, player: player)
         defer { coordinator.stop(clearQueue: true, saveProgress: false) }
         await operation(coordinator)
+    }
+}
+
+/// Holds seek completions without loading media, so KVO and gestures can be
+/// delivered during the actual coordinator's asynchronous replay transition.
+private final class ReplayTestPlayer: AVPlayer, @unchecked Sendable {
+    private struct Seek {
+        let time: CMTime
+        let completion: @Sendable (Bool) -> Void
+    }
+    private let stateLock = NSLock()
+    private var seeks: [Seek] = []
+    private var position = CMTime.zero
+    private var rates: [Float] = []
+    var pendingTimes: [Double] { stateLock.withLock { seeks.map { $0.time.seconds } } }
+    var playedRates: [Float] { stateLock.withLock { rates } }
+    override var timeControlStatus: AVPlayer.TimeControlStatus { .paused }
+    override func currentTime() -> CMTime { stateLock.withLock { position } }
+    override func pause() { }
+    override func playImmediately(atRate rate: Float) { stateLock.withLock { rates.append(rate) } }
+    override func seek(to time: CMTime, toleranceBefore: CMTime, toleranceAfter: CMTime) {
+        stateLock.withLock { position = time }
+    }
+    override func seek(to time: CMTime, toleranceBefore: CMTime, toleranceAfter: CMTime,
+                       completionHandler: @escaping @Sendable (Bool) -> Void) {
+        stateLock.withLock { seeks.append(Seek(time: time, completion: completionHandler)) }
+    }
+    func finishNextSeek() {
+        let seek: Seek? = stateLock.withLock {
+            guard !seeks.isEmpty else { return nil }
+            let seek = seeks.removeFirst()
+            position = seek.time
+            return seek
+        }
+        seek?.completion(true)
+    }
+    func finishRemainingSeeks() {
+        let pending = stateLock.withLock { let pending = seeks; seeks.removeAll(); return pending }
+        for seek in pending { seek.completion(false) }
     }
 }
 

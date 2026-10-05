@@ -16,9 +16,13 @@ struct VideoLibraryView: View {
     @State private var tag = ""
     @State private var total = 0
     @State private var page = 1
-    @State private var loading = false
+    @State private var loading = true
+    @State private var loadingMore = false
+    @State private var loadedKey: String?
+    @State private var hasMore = true
     @State private var error: String?
     @State private var filters = false
+    @State private var draftTag = ""
     @State private var generation = 0
     private var columns: [GridItem] {
         if typeSize.isAccessibilitySize { return [GridItem(.flexible())] }
@@ -38,12 +42,14 @@ struct VideoLibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if let creatorProfile { CreatorProfileHeader(creator: creatorProfile) }
-                HStack(alignment: .firstTextBaseline) {
+                let headerLayout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) : AnyLayout(HStackLayout(alignment: .firstTextBaseline))
+                headerLayout {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(query.isEmpty ? (creatorProfile == nil ? "你的珍藏" : "已归档作品") : "搜索结果").font(.title3.bold())
-                        Text("\(total) 个已保存视频").font(.subheadline).foregroundStyle(.secondary)
+                        Text(loading && videos.isEmpty ? "正在加载…" : "\(total) 个已保存视频")
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
-                    Spacer()
+                    if !typeSize.isAccessibilitySize { Spacer() }
                     Menu {
                         Picker("排序", selection: $sort) {
                             Text("最近保存").tag("newest")
@@ -52,13 +58,13 @@ struct VideoLibraryView: View {
                             Text("标题").tag("title")
                             Text("时长").tag("duration")
                         }
-                        Button("筛选标签", systemImage: "tag") { filters = true }
+                        Button("筛选标签", systemImage: "tag") { draftTag = tag; filters = true }
                         if !tag.isEmpty { Button("清除标签筛选") { tag = "" } }
                     } label: { Label("筛选", systemImage: "line.3.horizontal.decrease") }
                         .nativeGlassButton()
                 }
                 if !tag.isEmpty { Label(tag, systemImage: "tag").font(.subheadline).foregroundStyle(.secondary) }
-                if let error { FailureView(message: error) { await load() } }
+                if let error, videos.isEmpty { FailureView(message: error) { await load() } }
                 if loading && videos.isEmpty { ProgressView().frame(maxWidth: .infinity).padding(60) }
                 else if videos.isEmpty && error == nil {
                     ContentUnavailableView(query.isEmpty ? "还没有视频" : "没有匹配的视频", systemImage: "rectangle.stack", description: Text("调整搜索或筛选条件，或在管理中心添加归档来源。"))
@@ -75,43 +81,59 @@ struct VideoLibraryView: View {
                             }
                     }
                 }
-                if !videos.isEmpty { PaginationFooter(count: videos.count, total: total, busy: loading) { await load(more: true) } }
+                if !videos.isEmpty {
+                    if let error {
+                        Label(error, systemImage: "wifi.exclamationmark").font(.callout).foregroundStyle(.secondary)
+                        Button("重试") { Task { await load(more: loadingMore) } }.buttonStyle(.bordered)
+                    }
+                    PaginationFooter(count: videos.count, total: total, busy: loading, hasMore: hasMore) { await load(more: true) }
+                }
             }.padding(16).frame(maxWidth: 1600).frame(maxWidth: .infinity)
         }
         .navigationTitle(title)
         .searchable(text: $query, prompt: "搜索标题、简介、UP 主")
+        .scrollDismissesKeyboard(.interactively)
         .refreshable { await load() }
-        .task(id: searchKey) {
-            do { try await Task.sleep(for: .milliseconds(query.isEmpty ? 0 : 300)); try Task.checkCancellation(); await load() }
-            catch { }
-        }
+        .task(id: searchKey) { await load(debounce: !query.isEmpty) }
         .alert("筛选标签", isPresented: $filters) {
-            TextField("标签", text: $tag)
-            Button("完成") { }
+            TextField("标签", text: $draftTag)
+            Button("完成") { tag = draftTag.trimmingCharacters(in: .whitespacesAndNewlines) }
+            Button("取消", role: .cancel) { }
         } message: { Text("输入归档视频的标签名称。") }
     }
 
-    private func load(more: Bool = false) async {
-        if more && loading { return }
+    private func load(more: Bool = false, debounce: Bool = false) async {
+        let key = searchKey
+        if more && (loading || loadedKey != key || !hasMore) { return }
         generation += 1
         let current = generation
+        // Invalidate old results before the debounce so a new query cannot append
+        // page N using the previous query's page counter.
+        if !more && loadedKey != key { videos = []; total = 0; page = 0; hasMore = true }
         let target = more ? page + 1 : 1
         loading = true
+        loadingMore = more
         error = nil
+        defer { if generation == current { loading = false } }
         var params = ["view": "card", "q": query, "sort": sort, "tag": tag, "page": String(target), "page_size": "24"]
         if let collectionId { params["collection_id"] = collectionId }
         if let creatorId { params["creator_id"] = creatorId }
         if starredOnly { params["starred"] = "true" }
         do {
+            if debounce { try await Task.sleep(for: .milliseconds(300)) }
+            try Task.checkCancellation()
             let result: Page<ArchiveVideo> = try await api.get("/videos", query: params)
-            guard generation == current, !Task.isCancelled else { return }
-            videos = more ? videos + result.items : result.items
+            guard generation == current, key == searchKey, !Task.isCancelled else { return }
+            var seen = Set(more ? videos.map(\.id) : [])
+            let newItems = result.items.filter { seen.insert($0.id).inserted }
+            videos = more ? videos + newItems : newItems
             total = result.total
             page = target
+            loadedKey = key
+            hasMore = !result.items.isEmpty && videos.count < total
         } catch {
-            if generation == current && !Task.isCancelled { self.error = error.localizedDescription }
+            if generation == current && key == searchKey && !Task.isCancelled { self.error = error.localizedDescription }
         }
-        if generation == current { loading = false }
     }
 }
 
@@ -119,7 +141,10 @@ struct CollectionsView: View {
     @Environment(APIClient.self) private var api
     @State private var items: [ArchiveCollection] = []
     @State private var error: String?
-    @State private var loading = false
+    @State private var loading = true
+    @State private var loadingMore = false
+    @State private var generation = 0
+    @State private var hasMore = true
     @State private var total = 0
     @State private var page = 0
     var body: some View {
@@ -141,9 +166,9 @@ struct CollectionsView: View {
                     }
                 }
             } header: { Text("\(total) 个来源") } footer: { Text("归档的收藏夹、合集和 UP 主订阅，集中整理于此。") }
-            if let error { FailureView(message: error) { await load() } }
+            if let error { FailureView(message: error) { await load(more: loadingMore) } }
             if loading { ProgressView().frame(maxWidth: .infinity) }
-            if items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
+            if hasMore && items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
         }
         .overlay { if !loading && error == nil && items.isEmpty { ContentUnavailableView("暂无收藏与订阅", systemImage: "square.stack") } }
         .navigationTitle("收藏与订阅")
@@ -153,13 +178,19 @@ struct CollectionsView: View {
         ["creator": "UP 主订阅", "favorite": "收藏夹", "favorites": "收藏夹", "series": "系列", "ugc_season": "合集"][kind] ?? "视频集合"
     }
     private func load(more: Bool = false) async {
-        guard !loading else { return }; loading = true; error = nil
-        defer { loading = false }
+        if more && (loading || !hasMore) { return }
+        generation += 1; let current = generation
+        loading = true; loadingMore = more; error = nil
+        defer { if current == generation { loading = false } }
         do {
             let next = more ? page + 1 : 1
             let data: Page<ArchiveCollection> = try await api.get("/collections", query: ["page": String(next), "page_size": "40"])
-            items = more ? items + data.items : data.items; total = data.total; page = next
-        } catch { self.error = error.localizedDescription }
+            guard current == generation, !Task.isCancelled else { return }
+            var seen = Set(more ? items.map(\.id) : [])
+            let newItems = data.items.filter { seen.insert($0.id).inserted }
+            items = more ? items + newItems : newItems; total = data.total; page = next
+            hasMore = !data.items.isEmpty && items.count < total
+        } catch { if current == generation && !Task.isCancelled { self.error = error.localizedDescription } }
     }
 }
 
@@ -170,7 +201,11 @@ struct CreatorsView: View {
     @State private var error: String?
     @State private var total = 0
     @State private var page = 0
-    @State private var loading = false
+    @State private var loading = true
+    @State private var loadingMore = false
+    @State private var loadedQuery: String?
+    @State private var generation = 0
+    @State private var hasMore = true
     var body: some View {
         List {
             ForEach(items) { creator in
@@ -185,27 +220,37 @@ struct CreatorsView: View {
                     }.padding(.vertical, 5)
                 }
             }
-            if let error { FailureView(message: error) { await load() } }
+            if let error { FailureView(message: error) { await load(more: loadingMore) } }
             if loading { ProgressView().frame(maxWidth: .infinity) }
-            if items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
+            if hasMore && items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
         }
         .overlay { if items.isEmpty && !loading && error == nil { ContentUnavailableView.search(text: query) } }
         .navigationTitle("UP 主")
         .searchable(text: $query, prompt: "搜索 UP 主")
-        .task(id: query) {
-            do { try await Task.sleep(for: .milliseconds(300)); try Task.checkCancellation(); await load() } catch { }
-        }
+        .scrollDismissesKeyboard(.interactively)
+        .task(id: query) { await load(debounce: !query.isEmpty) }
         .refreshable { await load() }
     }
-    private func load(more: Bool = false) async {
-        let key = query; loading = true; error = nil
-        defer { if key == query { loading = false } }
+    private func load(more: Bool = false, debounce: Bool = false) async {
+        let key = query
+        if more && (loading || loadedQuery != key || !hasMore) { return }
+        generation += 1
+        let current = generation
+        if !more && loadedQuery != key { items = []; total = 0; page = 0; hasMore = true }
+        loading = true; loadingMore = more; error = nil
+        defer { if current == generation { loading = false } }
         do {
+            if debounce { try await Task.sleep(for: .milliseconds(300)) }
+            try Task.checkCancellation()
             let next = more ? page + 1 : 1
-            let data: Page<ArchiveCreator> = try await api.get("/creators", query: ["q": query, "page": String(next), "page_size": "40"])
-            guard key == query, !Task.isCancelled else { return }
-            items = more ? items + data.items : data.items; total = data.total; page = next
-        } catch { if key == query && !Task.isCancelled { self.error = error.localizedDescription } }
+            let data: Page<ArchiveCreator> = try await api.get("/creators", query: ["q": key, "page": String(next), "page_size": "40"])
+            guard current == generation, key == query, !Task.isCancelled else { return }
+            var seen = Set(more ? items.map(\.id) : [])
+            let newItems = data.items.filter { seen.insert($0.id).inserted }
+            items = more ? items + newItems : newItems
+            total = data.total; page = next; loadedQuery = key
+            hasMore = !data.items.isEmpty && items.count < total
+        } catch { if current == generation && key == query && !Task.isCancelled { self.error = error.localizedDescription } }
     }
 }
 

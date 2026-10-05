@@ -20,14 +20,15 @@ struct VideoDetailView: View {
     @State private var followsPlayback = false
     @State private var isPageVisible = false
     @State private var page: VideoPage = .info
+    @State private var visitedPages: Set<VideoPage> = [.info]
     @State private var starredOverrides: [String: Bool] = [:]
 
     private var displayedVideo: ArchiveVideo? {
-        var result = followsPlayback ? playback.currentVideo ?? video : video
+        var result = followsPlayback && isPageVisible ? playback.currentVideo ?? video : video
         if let id = result?.id, let starred = starredOverrides[id] { result?.starred = starred }
         return result
     }
-    private var isCurrent: Bool { displayedVideo?.id == playback.currentVideo?.id && playback.currentVideo != nil }
+    private var isCurrent: Bool { isPageVisible && displayedVideo?.id == playback.currentVideo?.id && playback.currentVideo != nil }
 
     var body: some View {
         Group {
@@ -40,24 +41,29 @@ struct VideoDetailView: View {
                             .frame(width: wide ? geometry.size.width * 0.64 : geometry.size.width,
                                    height: expanded || wide ? geometry.size.height : min(geometry.size.width * 9 / 16, geometry.size.height * 0.48))
                             .background(.black)
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 20) {
-                                Picker("视频内容", selection: $page) {
-                                    ForEach(VideoPage.allCases) { Text($0.rawValue).tag($0) }
-                                }.pickerStyle(.segmented).accessibilityIdentifier("videoSections")
-                                switch page {
-                                case .info:
-                                    metadata(video)
-                                    parts(video)
-                                    RelatedVideosView(videoId: video.id, creatorId: video.creators.first?.id)
-                                    Link(destination: URL(string: "https://github.com/guoweiyi/treasure-up")!) {
-                                        Label("Treasure Up · 开源项目", systemImage: "chevron.left.forwardslash.chevron.right")
-                                            .font(.footnote)
-                                    }.padding(.top, 12)
-                                case .comments: VideoCommentsSection(videoId: video.id).id(video.id)
-                                case .queue: PlaybackQueueSection { followsPlayback = true }
+                        VStack(spacing: 0) {
+                            Picker("视频内容", selection: $page) {
+                                ForEach(VideoPage.allCases) { Text($0.rawValue).tag($0) }
+                            }.pickerStyle(.segmented).accessibilityIdentifier("videoSections")
+                                .padding(12)
+                            Divider()
+                            // Keep visited sections mounted so switching back preserves
+                            // comment searches, expanded replies and each scroll position.
+                            ZStack(alignment: .top) {
+                                ForEach(VideoPage.allCases) { section in
+                                    if visitedPages.contains(section) {
+                                        ScrollView {
+                                            sectionContent(section, video: video)
+                                                .padding(16).frame(maxWidth: 800).frame(maxWidth: .infinity)
+                                        }
+                                        .scrollDismissesKeyboard(.interactively)
+                                        .opacity(page == section ? 1 : 0)
+                                        .allowsHitTesting(page == section)
+                                        .accessibilityHidden(page != section)
+                                        .zIndex(page == section ? 1 : 0)
+                                    }
                                 }
-                            }.padding(16).frame(maxWidth: 800).frame(maxWidth: .infinity)
+                            }.id(video.id)
                         }
                         .frame(width: expanded ? 0 : (wide ? geometry.size.width * 0.36 : nil),
                                height: expanded ? 0 : nil)
@@ -72,14 +78,43 @@ struct VideoDetailView: View {
         .statusBarHidden(expanded)
         .preference(key: PlayerExpandedPreferenceKey.self, value: isPageVisible && expanded)
         .preference(key: PlayerVisiblePreferenceKey.self, value: isPageVisible && isCurrent)
-        .onAppear { isPageVisible = true }
-        .onDisappear { isPageVisible = false }
+        .onAppear {
+            isPageVisible = true
+            followsPlayback = playback.currentVideo?.id == (video?.id ?? videoId)
+            if video == nil && followsPlayback { video = playback.currentVideo }
+        }
+        .onDisappear {
+            // A covered navigation destination must not follow another page's player.
+            if followsPlayback, let current = playback.currentVideo { video = current }
+            followsPlayback = false
+            isPageVisible = false
+        }
+        .onChange(of: page) { _, section in visitedPages.insert(section) }
+        .onChange(of: playback.currentVideo?.id) { _, _ in
+            if isPageVisible && followsPlayback, let current = playback.currentVideo { video = current }
+        }
         .task(id: videoId) {
-            if playback.currentVideo?.id == videoId { followsPlayback = true }
-            await load()
+            if video == nil { await load() }
         }
         .sheet(isPresented: $savePresented) { NavigationStack { SaveToPlaylistView(videoId: displayedVideo?.id ?? videoId) } }
         .sheet(isPresented: $loginPresented) { NavigationStack { LoginView() } }
+    }
+
+    @ViewBuilder private func sectionContent(_ section: VideoPage, video: ArchiveVideo) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            switch section {
+            case .info:
+                metadata(video)
+                parts(video)
+                RelatedVideosView(videoId: video.id, creatorId: video.creators.first?.id)
+                Link(destination: URL(string: "https://github.com/guoweiyi/treasure-up")!) {
+                    Label("Treasure Up · 开源项目", systemImage: "chevron.left.forwardslash.chevron.right")
+                        .font(.footnote)
+                }.padding(.top, 12)
+            case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !expanded && isPageVisible)
+            case .queue: PlaybackQueueSection { followsPlayback = true }
+            }
+        }
     }
 
     @ViewBuilder private func playerSurface(_ video: ArchiveVideo) -> some View {
@@ -99,20 +134,21 @@ struct VideoDetailView: View {
     }
     private func metadata(_ video: ArchiveVideo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            ForEach(video.creators) { creator in
+            Text(video.title).font(.title3.bold()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            ForEach(uniqueCreators(video.creators)) { creator in
                 NavigationLink { CreatorDetailView(creator: creator) } label: {
                     HStack(spacing: 12) {
                         Artwork(path: creator.avatarUrl, symbol: "person.fill").frame(width: 44, height: 44).clipShape(.circle)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(creator.name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                            Text("UP 主 · \(creator.savedCount) 个已保存视频").font(.caption).foregroundStyle(.secondary)
+                            Text(creator.roleTitle ?? "投稿 UP 主")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                     }
                 }.buttonStyle(.plain)
             }
-            Text(video.title).font(.title3.bold()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 14) { stats(video) }
                 VStack(alignment: .leading, spacing: 8) { stats(video) }
@@ -133,6 +169,20 @@ struct VideoDetailView: View {
             }
             if let error { Text(error).font(.callout).foregroundStyle(.red) }
         }
+    }
+    private func uniqueCreators(_ creators: [ArchiveCreator]) -> [ArchiveCreator] {
+        var people: [ArchiveCreator] = []
+        var indexes: [String: Int] = [:]
+        var roles: [String: [String]] = [:]
+        for creator in creators {
+            let key = creator.id.isEmpty ? (creator.uid ?? creator.name) : creator.id
+            let title = creator.roleTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let role = title.isEmpty ? (creator.role == "staff" ? "联合投稿" : "投稿 UP 主") : title
+            if !roles[key, default: []].contains(role) { roles[key, default: []].append(role) }
+            if indexes[key] == nil { indexes[key] = people.count; people.append(creator) }
+            if let index = indexes[key] { people[index].roleTitle = roles[key]?.joined(separator: " · ") }
+        }
+        return people
     }
     @ViewBuilder private func stats(_ video: ArchiveVideo) -> some View {
         if let views = video.stats?.view { Label(archiveCount(views), systemImage: "play.rectangle") }

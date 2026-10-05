@@ -6,7 +6,7 @@ import UIKit
 
 @MainActor @Observable
 final class PlaybackCoordinator {
-    let player = AVPlayer()
+    let player: AVPlayer
     private(set) var currentVideo: ArchiveVideo?
     private(set) var currentPart: VideoPart?
     private(set) var currentVariant: MediaVariant?
@@ -93,12 +93,14 @@ final class PlaybackCoordinator {
     @ObservationIgnored private var stallTask: Task<Void, Never>?
     @ObservationIgnored private var audioGroup: AVMediaSelectionGroup?
     @ObservationIgnored private var subtitleGroup: AVMediaSelectionGroup?
-    @ObservationIgnored private var pendingPosition = 0.0
+    @ObservationIgnored private var startupPosition = PlaybackStartupPosition()
+    @ObservationIgnored private var historyReadPending = false
+    @ObservationIgnored private var requestedPartID: String?
+    @ObservationIgnored private var replayTask: Task<Void, Never>?
     @ObservationIgnored private var wantsPlayback = true
     @ObservationIgnored private var initialResumeApplied = false
     @ObservationIgnored private var lastProgressSave = Date.distantPast
     @ObservationIgnored private var recovery = NativePlaybackRecovery()
-    @ObservationIgnored private var resumingHistory = true
     @ObservationIgnored private var selectedTransport = "auto"
     @ObservationIgnored private var wasPlayingBeforeInterruption = false
     @ObservationIgnored private var playbackAnchor = Date()
@@ -107,9 +109,10 @@ final class PlaybackCoordinator {
     @ObservationIgnored private var currentArtwork: MPMediaItemArtwork?
     @ObservationIgnored private var lastNowPlayingUpdate = Date.distantPast
 
-    init(api: APIClient, defaults: UserDefaults = .standard) {
+    init(api: APIClient, defaults: UserDefaults = .standard, player: AVPlayer = AVPlayer()) {
         self.api = api
         self.defaults = defaults
+        self.player = player
         danmakuEnabled = defaults.object(forKey: "treasure.native.playback.danmaku") as? Bool ?? api.defaultDanmaku
         danmakuOpacity = defaults.object(forKey: "treasure.native.playback.danmakuOpacity") as? Double ?? 0.85
         danmakuFontSize = defaults.object(forKey: "treasure.native.playback.danmakuFontSize") as? Double ?? 18
@@ -157,6 +160,7 @@ final class PlaybackCoordinator {
 
     func play(video: ArchiveVideo, part: VideoPart? = nil, variant: MediaVariant? = nil) async {
         ensureQueueIdentity()
+        if await resumeCurrentSelection(videoID: video.id, partID: part?.id, variantID: variant?.id) { return }
         navigationGeneration = UUID()
         queueTransitioning = false
         playbackQueue.select(video)
@@ -175,6 +179,7 @@ final class PlaybackCoordinator {
         temporaryRate = nil
         playbackIdentityRevision = api.sessionRevision
         currentVideo = video
+        requestedPartID = part?.id
         currentPart = nil
         currentVariant = nil
         session = nil
@@ -196,10 +201,10 @@ final class PlaybackCoordinator {
         if defaults.object(forKey: "treasure.native.playback.danmaku") == nil { danmakuEnabled = api.defaultDanmaku }
         selectedRouteID = ""
         selectedTransport = "auto"
-        pendingPosition = 0
+        startupPosition = PlaybackStartupPosition(resumeHistory: resumeHistory)
+        historyReadPending = false
         recovery = NativePlaybackRecovery()
         initialResumeApplied = false
-        resumingHistory = resumeHistory
         wantsPlayback = true
         isLoading = true
         recordDiagnostic("play-request")
@@ -222,13 +227,15 @@ final class PlaybackCoordinator {
             duration = selectedPart.duration
             recordDiagnostic("source-selected")
             if resumeHistory && api.user != nil {
+                historyReadPending = true
                 progressTask = Task { [weak self] in
                     guard let self else { return }
+                    defer { if self.generation == key { self.historyReadPending = false } }
                     do {
                         let saved: NativeWatchProgress = try await self.api.get("/progress/\(selectedPart.id)")
-                        guard self.generation == key, !self.initialResumeApplied else { return }
-                        self.pendingPosition = PlaybackTimeline.resumePosition(saved.position, duration: selectedPart.duration > 0 ? selectedPart.duration : saved.duration)
-                    } catch { /* An optional resume read never blocks media startup. */ }
+                        guard self.generation == key else { return }
+                        self.startupPosition.acceptHistory(saved.position, duration: selectedPart.duration > 0 ? selectedPart.duration : saved.duration)
+                    } catch { /* History is optional and has a bounded startup window. */ }
                 }
             }
             try configureAudioSession()
@@ -262,6 +269,8 @@ final class PlaybackCoordinator {
         itemObservation = nil
         player.replaceCurrentItem(with: nil)
         currentVideo = nil
+        requestedPartID = nil
+        historyReadPending = false
         currentPart = nil
         currentVariant = nil
         session = nil
@@ -300,8 +309,35 @@ final class PlaybackCoordinator {
         do {
             try configureAudioSession()
             wantsPlayback = true
-            player.playImmediately(atRate: effectiveRate)
-            recordDiagnostic("resume-request")
+            // A pending history/gesture seek must finish before audio starts.
+            guard !isLoading, replayTask == nil else { return }
+            if PlaybackStartupPosition.shouldReplay(position: currentTime, duration: duration), player.currentItem != nil {
+                let key = generation
+                startupPosition.requestSeek(0)
+                currentTime = 0
+                endGuard.rearm(key)
+                recordDiagnostic("replay-request")
+                replayTask = Task { [weak self] in
+                    guard let self else { return }
+                    var destination = 0.0
+                    while true {
+                        guard self.generation == key else { return }
+                        let revision = self.startupPosition.revision
+                        destination = self.startupPosition.resolved(duration: self.duration)
+                        await self.player.seek(to: CMTime(seconds: destination, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                        guard self.generation == key else { return }
+                        if revision == self.startupPosition.revision { break }
+                    }
+                    self.replayTask = nil
+                    self.currentTime = destination
+                    if self.wantsPlayback { self.player.playImmediately(atRate: self.effectiveRate) }
+                    self.updateTimeAnchor()
+                    self.updateNowPlaying()
+                }
+            } else {
+                player.playImmediately(atRate: effectiveRate)
+                recordDiagnostic("resume-request")
+            }
         } catch { errorMessage = error.localizedDescription }
         updateNowPlaying()
     }
@@ -310,7 +346,10 @@ final class PlaybackCoordinator {
         guard seconds.isFinite else { return }
         let bounded = min(max(0, seconds), max(0, duration))
         if bounded < duration - 0.5 { endGuard.rearm(generation) }
-        player.seek(to: CMTime(seconds: bounded, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        startupPosition.requestSeek(bounded)
+        if !isLoading, replayTask == nil {
+            player.seek(to: CMTime(seconds: bounded, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         currentTime = bounded
         recordDiagnostic("seek-request")
         updateTimeAnchor()
@@ -400,8 +439,31 @@ final class PlaybackCoordinator {
     func playQueueItem(id: String) async {
         ensureQueueIdentity()
         guard queue.contains(where: { $0.id == id }) else { return }
+        if await resumeCurrentSelection(videoID: id) { return }
         cancelQueueNavigation()
         await navigateQueue(direction: 1, startingAt: id, automatic: false)
+    }
+
+    /// Reopening the selected row means continue, including when its active part
+    /// is not P1. Explicit queue transitions and loop playback bypass this path.
+    private func resumeCurrentSelection(videoID: String, partID: String? = nil, variantID: String? = nil) async -> Bool {
+        guard currentVideo?.id == videoID,
+              partID == nil || partID == (currentPart?.id ?? requestedPartID),
+              variantID == nil || variantID == currentVariant?.id else { return false }
+        cancelQueueNavigation()
+        if isLoading { wantsPlayback = true; return true }
+        if errorMessage != nil {
+            if currentPart == nil {
+                // Detail hydration previously failed; let play() retry it.
+                return false
+            }
+            wantsPlayback = true
+            await retry()
+            return true
+        }
+        guard player.currentItem != nil else { return false }
+        if !isPlaying { resume() }
+        return true
     }
 
     func nextPart() async { await advance(direction: 1) }
@@ -564,19 +626,21 @@ final class PlaybackCoordinator {
     func renew() async {
         guard currentPart != nil else { return }
         recordDiagnostic("renew-request")
-        let resumeAt = initialResumeApplied ? currentTime : pendingPosition
+        let resumeAt = initialResumeApplied ? currentTime : startupPosition.position
         let shouldPlay = wantsPlayback
         generation = UUID()
         activeItemGeneration = nil
         let key = generation
+        replayTask?.cancel()
+        replayTask = nil
         renewalTask?.cancel()
         startupTimeoutTask?.cancel()
         stallTask?.cancel()
         itemObservation = nil
         player.pause()
-        pendingPosition = resumeAt
+        startupPosition = PlaybackStartupPosition(resumeHistory: false, position: resumeAt)
+        historyReadPending = false
         initialResumeApplied = false
-        resumingHistory = false
         wantsPlayback = shouldPlay
         await createSession(key: key)
     }
@@ -691,12 +755,25 @@ final class PlaybackCoordinator {
         recordDiagnostic("item-ready")
         let measured = item.duration.seconds
         if measured.isFinite, measured > 0 { duration = measured }
-        let resume = resumingHistory ? PlaybackTimeline.resumePosition(pendingPosition, duration: duration)
-            : min(max(0, pendingPosition), max(0, duration))
-        if resume > 0 {
-            await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        // Media can become ready before the progress API responds. Allow a
+        // short grace period; an explicit gesture immediately closes this window.
+        let historyDeadline = ContinuousClock.now.advanced(by: .milliseconds(250))
+        while historyReadPending && startupPosition.acceptsHistory && ContinuousClock.now < historyDeadline {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
+            guard generation == key, player.currentItem === item else { return }
         }
-        guard generation == key, player.currentItem === item else { return }
+        startupPosition.closeHistoryWindow()
+        var resume = startupPosition.resolved(duration: duration)
+        while true {
+            let intentRevision = startupPosition.revision
+            resume = startupPosition.resolved(duration: duration)
+            if resume > 0 || startupPosition.hasExplicitSeek {
+                await player.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            guard generation == key, player.currentItem === item else { return }
+            // A second gesture arriving during an awaited seek takes precedence.
+            if intentRevision == startupPosition.revision { break }
+        }
         isLoading = false
         currentTime = resume
         if resume > 0 { recordDiagnostic("resume-seek-complete") }
@@ -836,7 +913,7 @@ final class PlaybackCoordinator {
             Task { @MainActor in
                 guard let self, self.player.currentItem != nil else { return }
                 let value = self.player.currentTime().seconds
-                if value.isFinite { self.currentTime = max(0, value) }
+                if value.isFinite, self.replayTask == nil, !self.isLoading || !self.startupPosition.hasExplicitSeek { self.currentTime = max(0, value) }
                 if let item = self.player.currentItem {
                     let total = item.duration.seconds
                     if total.isFinite, total > 0 { self.duration = total }
@@ -859,7 +936,7 @@ final class PlaybackCoordinator {
                 self.isPlaying = self.player.timeControlStatus == .playing
                 self.isBuffering = self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate && !self.isLoading
                 if self.isPlaying { self.wantsPlayback = true }
-                else if self.player.timeControlStatus == .paused, !self.isLoading {
+                else if self.player.timeControlStatus == .paused, !self.isLoading, self.replayTask == nil {
                     self.wantsPlayback = false
                     if wasPlaying { self.persistProgress() }
                 }
@@ -1048,6 +1125,8 @@ final class PlaybackCoordinator {
     }
 
     private func cancelMediaTasks() {
+        replayTask?.cancel()
+        replayTask = nil
         ancillaryTask?.cancel()
         progressTask?.cancel()
         renewalTask?.cancel()
@@ -1137,5 +1216,47 @@ private struct NativeRemoteCommand: Sendable {
     init(_ event: MPRemoteCommandEvent) {
         position = (event as? MPChangePlaybackPositionCommandEvent)?.positionTime
         rate = (event as? MPChangePlaybackRateCommandEvent)?.playbackRate
+    }
+}
+
+/// Startup seek intent is separate from persisted watch history. This prevents
+/// late API responses or an in-flight seek from undoing the user's gesture.
+struct PlaybackStartupPosition {
+    private(set) var position: Double
+    private(set) var acceptsHistory: Bool
+    private(set) var hasExplicitSeek = false
+    private(set) var revision = 0
+    private var isHistory: Bool
+
+    init(resumeHistory: Bool = true, position: Double = 0) {
+        self.position = position
+        acceptsHistory = resumeHistory
+        isHistory = resumeHistory
+    }
+
+    mutating func acceptHistory(_ position: Double, duration: Double) {
+        guard acceptsHistory else { return }
+        self.position = PlaybackTimeline.resumePosition(position, duration: duration)
+    }
+
+    mutating func requestSeek(_ position: Double) {
+        guard position.isFinite else { return }
+        self.position = max(0, position)
+        hasExplicitSeek = true
+        isHistory = false
+        acceptsHistory = false
+        revision += 1
+    }
+
+    mutating func closeHistoryWindow() { acceptsHistory = false }
+
+    func resolved(duration: Double) -> Double {
+        guard position.isFinite, duration.isFinite, duration > 0 else { return 0 }
+        return isHistory ? PlaybackTimeline.resumePosition(position, duration: duration)
+            : min(max(0, position), duration)
+    }
+
+    static func shouldReplay(position: Double, duration: Double) -> Bool {
+        position.isFinite && duration.isFinite && duration > 0 && position >= duration - 0.1
     }
 }

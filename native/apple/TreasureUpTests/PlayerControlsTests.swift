@@ -2,6 +2,24 @@ import XCTest
 @testable import TreasureUp
 
 final class PlayerControlsTests: XCTestCase {
+    func testOnlyClearlyHorizontalDragsBeginSeeking() {
+        XCTAssertEqual(PlayerGestureMath.dragAxis(horizontal: 30, vertical: 5), .horizontal)
+        XCTAssertEqual(PlayerGestureMath.dragAxis(horizontal: -30, vertical: -5), .horizontal)
+        XCTAssertEqual(PlayerGestureMath.dragAxis(horizontal: 5, vertical: 30), .vertical)
+        XCTAssertEqual(PlayerGestureMath.dragAxis(horizontal: 20, vertical: 20), .vertical)
+        XCTAssertEqual(PlayerGestureMath.dragAxis(horizontal: .nan, vertical: 0), .vertical)
+    }
+
+    func testProgressClampsTransientPlaybackTimesToSliderRange() {
+        // Duration and current time arrive independently during a part change.
+        XCTAssertEqual(PlayerGestureMath.clampedTime(120, duration: 30), 30)
+        XCTAssertEqual(PlayerGestureMath.clampedTime(-10, duration: 30), 0)
+        XCTAssertEqual(PlayerGestureMath.clampedTime(12, duration: 30), 12)
+        XCTAssertEqual(PlayerGestureMath.clampedTime(12, duration: 0), 0)
+        XCTAssertEqual(PlayerGestureMath.clampedTime(.nan, duration: 30), 0)
+        XCTAssertEqual(PlayerGestureMath.clampedTime(12, duration: .infinity), 0)
+    }
+
     func testHorizontalScrubUsesDragStartAndClampsBothEnds() {
         XCTAssertEqual(PlayerGestureMath.scrubPosition(start: 60, translation: 100, width: 400, duration: 600), 90)
         XCTAssertEqual(PlayerGestureMath.scrubPosition(start: 60, translation: -100, width: 400, duration: 600), 30)

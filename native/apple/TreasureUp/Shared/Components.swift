@@ -79,12 +79,16 @@ struct PaginationFooter: View {
     let count: Int
     let total: Int
     let busy: Bool
+    var hasMore = true
     let more: () async -> Void
     var body: some View {
         VStack(spacing: 12) {
-            if count < total {
+            if hasMore && count < total {
                 Button { Task { await more() } } label: {
-                    if busy { ProgressView() } else { Text("载入更多") }
+                    HStack(spacing: 8) {
+                        if busy { ProgressView() }
+                        Text(busy ? "正在加载…" : "载入更多")
+                    }.frame(minHeight: 32)
                 }.buttonStyle(.bordered).disabled(busy)
             }
             Text("已显示 \(count) / \(total)").font(.caption).foregroundStyle(.secondary)

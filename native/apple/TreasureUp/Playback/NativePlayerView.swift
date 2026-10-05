@@ -115,6 +115,7 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
     @ObservationIgnored private var pipObservation: NSKeyValueObservation?
     @ObservationIgnored private var restoreCompletion: ((Bool) -> Void)?
     @ObservationIgnored private weak var visibleContainer: NativePlayerContainerViewController?
+    @ObservationIgnored private var controlsVisible = false
     private(set) var canStartPictureInPicture = false
 
     init(coordinator: PlaybackCoordinator) {
@@ -176,8 +177,17 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
     }
 
     func setControlsVisible(_ visible: Bool) {
+        controlsVisible = visible
+        refreshOverlayVisibility()
+    }
+
+    private func refreshOverlayVisibility() {
         guard let coordinator else { return }
-        overlay.rootView = NativePlaybackOverlay(coordinator: coordinator, controlsVisible: visible)
+        // The hosting controller is retained with playback even after leaving
+        // the video page. Stop its animation clock while no overlay is visible.
+        overlay.rootView = NativePlaybackOverlay(coordinator: coordinator,
+                                                  controlsVisible: controlsVisible,
+                                                  isVisible: visibleContainer != nil && !coordinator.isPictureInPictureActive)
     }
 
     func togglePictureInPicture() {
@@ -189,6 +199,7 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
     func containerDidAppear(_ container: NativePlayerContainerViewController) {
         guard controller.parent === container else { return }
         visibleContainer = container
+        refreshOverlayVisibility()
         refreshBackgroundConfiguration()
         let completion = restoreCompletion
         restoreCompletion = nil
@@ -197,17 +208,21 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
 
     func containerWillDisappear(_ container: NativePlayerContainerViewController) {
         if visibleContainer === container { visibleContainer = nil }
+        refreshOverlayVisibility()
         refreshBackgroundConfiguration()
     }
 
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         coordinator?.isPictureInPictureActive = true
+        refreshOverlayVisibility()
     }
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         coordinator?.isPictureInPictureActive = false
+        refreshOverlayVisibility()
     }
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         coordinator?.isPictureInPictureActive = false
+        refreshOverlayVisibility()
         coordinator?.statusMessage = "画中画暂不可用：\(error.localizedDescription)"
     }
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
@@ -226,67 +241,70 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
 private struct NativePlaybackOverlay: View {
     let coordinator: PlaybackCoordinator
     var controlsVisible = false
+    var isVisible = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : 1.0 / 30,
-                                paused: !coordinator.isPlaying || scenePhase != .active)) { context in
-            let time = coordinator.presentationTime(at: context.date)
-            ZStack(alignment: .bottom) {
-                if coordinator.danmakuEnabled {
-                    let activeRows = PlaybackTimeline.activeDanmaku(coordinator.danmaku, at: time)
-                    let fontSize = coordinator.danmakuFontSize
-                    let opacity = coordinator.danmakuOpacity
-                    let reduceMotion = reduceMotion
-                    Canvas { @Sendable canvas, size in
-                        guard size.height > 120 else { return }
-                        let laneHeight = min(29, max(17, (size.height - 100) / 8))
-                        for row in activeRows {
-                            let elapsed = time - row.cue.time
-                            guard elapsed >= 0, elapsed <= row.duration else { continue }
-                            let color = Color(red: Double((row.cue.color >> 16) & 255) / 255,
-                                              green: Double((row.cue.color >> 8) & 255) / 255,
-                                              blue: Double(row.cue.color & 255) / 255)
-                            let text = Text(row.cue.text)
-                                .font(.system(size: min(fontSize, laneHeight - 2), weight: .medium))
-                                .foregroundStyle(color.opacity(opacity))
-                            let resolved = canvas.resolve(text)
-                            let textSize = resolved.measure(in: CGSize(width: .greatestFiniteMagnitude, height: laneHeight))
-                            let x: CGFloat
-                            let y: CGFloat
-                            if row.cue.mode == 0 && !reduceMotion {
-                                x = size.width - (size.width + textSize.width) * (elapsed / row.duration)
-                                y = 46 + CGFloat(row.lane) * laneHeight
-                            } else if row.cue.mode == 2 {
-                                x = (size.width - textSize.width) / 2
-                                y = size.height - 105 - CGFloat(row.lane) * laneHeight
-                            } else {
-                                x = (size.width - textSize.width) / 2
-                                y = 46 + CGFloat(row.lane) * laneHeight
+        if isVisible {
+            TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : 1.0 / 30,
+                                    paused: !coordinator.isPlaying || scenePhase != .active)) { context in
+                let time = coordinator.presentationTime(at: context.date)
+                ZStack(alignment: .bottom) {
+                    if coordinator.danmakuEnabled {
+                        let activeRows = PlaybackTimeline.activeDanmaku(coordinator.danmaku, at: time)
+                        let fontSize = coordinator.danmakuFontSize
+                        let opacity = coordinator.danmakuOpacity
+                        let reduceMotion = reduceMotion
+                        Canvas { @Sendable canvas, size in
+                            guard size.height > 120 else { return }
+                            let laneHeight = min(29, max(17, (size.height - 100) / 8))
+                            for row in activeRows {
+                                let elapsed = time - row.cue.time
+                                guard elapsed >= 0, elapsed <= row.duration else { continue }
+                                let color = Color(red: Double((row.cue.color >> 16) & 255) / 255,
+                                                  green: Double((row.cue.color >> 8) & 255) / 255,
+                                                  blue: Double(row.cue.color & 255) / 255)
+                                let text = Text(row.cue.text)
+                                    .font(.system(size: min(fontSize, laneHeight - 2), weight: .medium))
+                                    .foregroundStyle(color.opacity(opacity))
+                                let resolved = canvas.resolve(text)
+                                let textSize = resolved.measure(in: CGSize(width: .greatestFiniteMagnitude, height: laneHeight))
+                                let x: CGFloat
+                                let y: CGFloat
+                                if row.cue.mode == 0 && !reduceMotion {
+                                    x = size.width - (size.width + textSize.width) * (elapsed / row.duration)
+                                    y = 46 + CGFloat(row.lane) * laneHeight
+                                } else if row.cue.mode == 2 {
+                                    x = (size.width - textSize.width) / 2
+                                    y = size.height - 105 - CGFloat(row.lane) * laneHeight
+                                } else {
+                                    x = (size.width - textSize.width) / 2
+                                    y = 46 + CGFloat(row.lane) * laneHeight
+                                }
+                                var cueCanvas = canvas
+                                cueCanvas.addFilter(.shadow(color: .black.opacity(0.95), radius: 1, x: 1, y: 1))
+                                cueCanvas.draw(resolved, at: CGPoint(x: x, y: y), anchor: .topLeading)
                             }
-                            var cueCanvas = canvas
-                            cueCanvas.addFilter(.shadow(color: .black.opacity(0.95), radius: 1, x: 1, y: 1))
-                            cueCanvas.draw(resolved, at: CGPoint(x: x, y: y), anchor: .topLeading)
                         }
                     }
-                }
-                let text = PlaybackTimeline.subtitleText(coordinator.subtitleCues, at: time)
-                if !text.isEmpty {
-                    Text(text)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(.black.opacity(0.72), in: .rect(cornerRadius: 6))
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, controlsVisible ? 88 : 22)
+                    let text = PlaybackTimeline.subtitleText(coordinator.subtitleCues, at: time)
+                    if !text.isEmpty {
+                        Text(text)
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.72), in: .rect(cornerRadius: 6))
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, controlsVisible ? 88 : 22)
+                    }
                 }
             }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
 

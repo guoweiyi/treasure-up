@@ -9,7 +9,7 @@ struct PlaybackQueueSection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(playback.queueTitle).font(.headline)
-                    Text("\(playback.queue.count) 个视频 · 优先播放分 P").font(.caption).foregroundStyle(.secondary)
+                    Text("\(playback.queue.count) 个视频").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Menu {
@@ -63,7 +63,7 @@ struct PlaybackQueueSection: View {
                         Text(video.title).font(.subheadline.weight(active ? .semibold : .regular)).lineLimit(2)
                         HStack(spacing: 5) {
                             if active { Image(systemName: playback.isPlaying ? "waveform" : "pause.fill") }
-                            Text(active ? "正在播放 · P\(playback.currentPart?.position ?? 1)" : "\(index + 1) · \(video.creators.first?.name ?? "归档视频")")
+                            Text(active ? "\(activeState) · P\(playback.currentPart?.position ?? 1)" : "\(index + 1) · \(video.creators.first?.name ?? "归档视频")")
                         }.font(.caption).foregroundStyle(active ? Color.accentColor : .secondary).lineLimit(1)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -78,8 +78,13 @@ struct PlaybackQueueSection: View {
                 Button(active ? "移除并停止当前播放" : "移出队列", systemImage: "minus.circle", role: .destructive) {
                     playback.removeFromQueue(id: video.id)
                 }
-            } label: { Image(systemName: "ellipsis").frame(width: 32, height: 44) }
+            } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
                 .accessibilityLabel("\(video.title) 的队列操作")
         }.padding(10).background(active ? Color.accentColor.opacity(0.08) : Color.secondary.opacity(0.05), in: .rect(cornerRadius: 12))
+    }
+    private var activeState: String {
+        if playback.errorMessage != nil { return "播放失败" }
+        if playback.isLoading || playback.isBuffering { return "缓冲中" }
+        return playback.isPlaying ? "正在播放" : "已暂停"
     }
 }

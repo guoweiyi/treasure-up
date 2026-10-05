@@ -75,6 +75,9 @@ struct RootView: View {
             if requested { playerPresented = true; playback.requestsPresentation = false }
         }
         .onChange(of: api.sessionRevision) { _, _ in playback.resetForIdentityChange(); playerPresented = false }
+        .onChange(of: playback.currentVideo?.id) { _, id in
+            if id == nil { playerPresented = false }
+        }
         .fullScreenCover(isPresented: $playerPresented) {
             if let video = playback.currentVideo {
                 NavigationStack {
