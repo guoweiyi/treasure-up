@@ -30,11 +30,25 @@ cd treasure-up
 python deploy/start.py
 ```
 
-访问 <http://localhost:8788>。初始账号为 `admin`，首次初始化会在交互式终端显示随机密码，并保存在本机 `.env` 的 `TREASURE_ADMIN_PASSWORD`。重定向日志与 CI 不打印密码；再次执行不会覆盖已有配置或密码。使用 `localhost` 才与本地通行密钥的站点地址一致。
+访问 <http://localhost:8788>。初始账号为 `admin`，首次初始化会在交互式终端显示随机密码，并保存在本机 `.env` 的 `TREASURE_ADMIN_PASSWORD`。重定向日志与 CI 不打印密码；普通重复启动保留原配置，显式传入 `--origin` 时只更新站点相关配置，保留密码与密钥。使用 `localhost` 才与本地通行密钥的站点地址一致。
 
 资源有限时运行 `python deploy/start.py --light`，下载和媒体处理共用一个 Worker，元数据采集仍独立运行；数据库、队列和独立备份 Worker 保留。脚本启动成功后停止上一模式的处理 Worker，不删除数据卷。Compose 默认仅监听回环地址，数据库、Redis 不发布主机端口。
 
 登录后台添加并验证授权账号，在“自动备份”选择自己创建 / 已收藏的收藏夹，或按最常访问排序的关注 UP；也可粘贴收藏夹链接或 UP 主页解析名称。选择首次全量、最近 N 个或只追踪新增。新建表单默认开启自动检查，API 未传 enabled 时仍默认关闭。首次元数据基线尚未完成时，不把发现的历史视频当成新发布。
+
+## 反向代理与内网穿透
+
+外部访问域名需要写入应用站点配置。遇到 `Invalid host header` 时，在部署目录执行：
+
+```bash
+python deploy/bootstrap.py --origin https://video.example.com
+# 源码部署；使用自定义 Compose 文件时，沿用原来的 -f / --env-file 参数：
+docker compose up -d --no-deps --no-build --wait api
+```
+
+这会同步精确域名白名单、登录 / 通行密钥 Origin、RP ID、安全 Cookie 和通行密钥开关；不更换账号密码、加密密钥、端口或数据。外层代理应保留浏览器的 `Host`（包括非默认端口）。以后更换域名时重复执行；已有通行密钥绑定原 RP 域名，新域名需要使用密码登录后重新注册。
+
+如果穿透服务暂时仅提供 HTTP，显式运行 `python deploy/bootstrap.py --origin http://video.example.com --allow-http` 后按上面命令重建 API。该模式保留密码登录，禁用不受浏览器支持的远程 HTTP 通行密钥；HTTP 不加密登录凭据和会话，长期使用请为穿透入口配置 HTTPS。完整说明及预构建镜像命令见[运维说明](docs/operations.md#反向代理与内网穿透)。
 
 ## 已提供的功能
 

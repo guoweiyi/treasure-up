@@ -124,9 +124,37 @@ docker compose exec api python -m app.cli reset-password admin
 
 ## HTTPS 和云端上线前验收
 
-默认 Nginx 只服务本机 HTTP。公网部署需配置证书与可信代理，将 `TREASURE_COOKIE_SECURE=true`，并添加真实域名到 `TREASURE_ALLOWED_HOSTS`。`Host` 和协议必须贯穿代理链；当前 Nginx 使用 `$scheme` 转发，若外层终止 TLS，应修改为仅信任该外层代理的 HTTPS 协议配置，不能接纳客户端任意伪造的 Forwarded 头。完成登录 Origin / CSRF、管理接口鉴权、Range、云端 CORS、过期续签和恢复演练后再开放网络。当前视频库是访客可读的，未引用的原始采集资产不向访客开放。
+默认 Nginx 只服务本机 HTTP。公网部署需配置证书与可信代理，将 `TREASURE_COOKIE_SECURE=true`，并添加真实域名到 `TREASURE_ALLOWED_HOSTS`。外层代理须保留浏览器 `Host` 及非默认端口。内置 Nginx 使用内部连接的 `$scheme`；登录和 CSRF 校验额外接受明确配置的外部 Origin，因此外层终止 TLS、内部 HTTP 转发的部署可通过站点配置支持，不依赖客户端提供的任意 Forwarded 头。当前视频库是访客可读的，未引用的原始采集资产不向访客开放。
 
-首次创建配置可使用 `python deploy/start.py --origin https://video.example.com`；此参数只生成站点 / Cookie 配置，不安装证书、不改变默认回环监听。已有 `.env` 始终保留，重复传入 `--origin` 不会重置它。初始化会按浏览器规则去掉默认 `:443` / `:80`，避免通行密钥 Origin 不匹配。手机上的 `localhost` 指手机本身，连接另一台服务器应使用可达的 HTTPS 域名；当前初始化器不接受 HTTP 局域网 IP 作为通行密钥站点。
+首次创建配置可使用 `python deploy/start.py --origin https://video.example.com`；此参数不安装证书、不改变默认回环监听。已有 `.env` 时，普通启动原样保留配置；显式传入 `--origin` 会仅更新站点白名单、Origin、RP ID、Cookie Secure 和通行密钥开关，其他行及密钥不变。默认 `:443` / `:80` 按浏览器规则规范化；非默认端口保留在 Origin 中，但不进入 Host 白名单和 RP ID。手机上的 `localhost` 指手机本身，连接另一台服务器应使用可达的 HTTPS 域名；初始化器不接受 IP 地址作为通行密钥站点。
+
+### 反向代理与内网穿透
+
+`Invalid host header` 表示请求域名不在 `TREASURE_ALLOWED_HOSTS`，常见于使用默认 localhost 配置后新接入穿透域名。更新到含此修复的部署脚本后执行：
+
+```bash
+python deploy/bootstrap.py --origin https://video.example.com
+docker compose up -d --no-deps --no-build --wait api
+```
+
+只重建 API 即可生效，采集 Worker 不必为了站点配置重启。使用镜像覆盖文件时，重建命令必须与原部署使用相同的文件和环境参数，例如：
+
+```bash
+docker compose -f compose.yaml -f compose.registry.yaml up -d --no-deps --no-build --wait api
+```
+
+轻量或自定义部署同样沿用原 `-f` 和 `--env-file` 参数。也可用 `python deploy/start.py --origin https://video.example.com --no-build` 完整启动；预构建或轻量模式继续传入原 `--prebuilt` / `--light` 参数。
+
+仅有 HTTP 的临时穿透入口可显式选择：
+
+```bash
+python deploy/bootstrap.py --origin http://video.example.com --allow-http
+docker compose up -d --no-deps --no-build --wait api
+```
+
+默认仍要求远程 HTTPS；`--allow-http` 将 Cookie Secure 设为 false 并禁用通行密钥。HTTP 的密码和会话没有传输加密。切换到 HTTPS 后，用新的 HTTPS Origin 重新配置即可恢复 Secure Cookie 与通行密钥。改域名后需用密码登录并重新注册属于新域名的通行密钥；已有密钥记录不会删除。
+
+脚本通过专用临时文件原子替换配置，不打印或重新生成旧密码、备份密钥和加密密钥。白名单设置为当前精确域名以及 localhost / 127.0.0.1；多个别名需自行明确补充。重复的站点键、符号链接或多行引号值会拒绝自动修改，避免误改配置。旧发布包可手工配置上述五个环境项，原有后端无需修改即可按此策略工作。
 
 当前没有完成公网渗透测试、万条视频性能测试或跨浏览器 HDR 兼容验收。多码率转码梯度、CDN 托管、远程字体和公开分享不在本次交付范围。
 
@@ -205,6 +233,6 @@ TREASURE_PASSKEYS_ENABLED=true
 
 `python deploy/start.py` 启动标准模式；`python deploy/start.py --light` 将下载和媒体处理合并为单并发 Worker，元数据采集与备份进程继续独立运行。轻量模式下下载与转码可能互相等待，但不会阻塞后续视频资料采集。模式切换仅在新模式启动健康后停止旧处理进程，采用 60 秒优雅停止；被中断的任务由已有租约恢复机制接管。持久卷、备份和数据库不删除。直接手工 Compose 启动时应自行停止上一模式的 Worker。
 
-首次部署可传 `--origin https://archive.example.com --port 8788`；这只生成站点配置，不申请 TLS 证书或建立公网代理。已有 `.env` 时参数不覆盖配置，需自行编辑站点环境项。非交互终端不输出初始密码，已有部署不重新打印旧密码。遗忘密码仍用上文维护命令。
+首次部署可传 `--origin https://archive.example.com --port 8788`；这只生成站点配置，不申请 TLS 证书或建立公网代理。已有 `.env` 时，显式 `--origin` 只更新上述站点环境项，`--port` 不覆盖已有端口。非交互终端不输出初始密码，已有部署不重新打印旧密码。遗忘密码仍用上文维护命令。
 
 可安装 Web 应用只缓存离线提示和公共图标，API、媒体、凭据与 Range 请求不进入 Service Worker 缓存。独立客户端工程、平台构建与签名要求见 [native/README](../native/README.md)。客户端仅保存服务地址；B 站 Cookie、云存储密钥和采集调度留在 Docker 服务端。

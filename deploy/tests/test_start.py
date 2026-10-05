@@ -97,3 +97,22 @@ def test_main_prebuilt_preserves_existing_environment_and_passes_flags(tmp_path,
     assert env.read_text() == original
     assert calls[0][0][1] == env
     assert calls[0][1] == {"light": True, "build": False, "prebuilt": True}
+
+
+def test_main_explicit_origin_repairs_existing_tunnel_configuration_before_start(tmp_path, monkeypatch):
+    env = tmp_path / "existing.env"
+    env.write_text("TREASURE_ADMIN_PASSWORD=synthetic-password\nTREASURE_PORT=8788\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["start.py", "--no-build", "--origin", "https://tunnel.example.com:18443", "--env-file", str(env)])
+    calls = []
+    def run(*args, **kwargs):
+        contents = env.read_text(encoding="utf-8")
+        assert "TREASURE_ALLOWED_HOSTS=tunnel.example.com,localhost,127.0.0.1" in contents
+        assert "TREASURE_PASSKEY_ORIGIN=https://tunnel.example.com:18443" in contents
+        assert "TREASURE_PASSKEY_RP_ID=tunnel.example.com" in contents
+        assert "TREASURE_COOKIE_SECURE=true" in contents
+        assert "TREASURE_ADMIN_PASSWORD=synthetic-password" in contents
+        assert "TREASURE_PORT=8788" in contents
+        calls.append(kwargs)
+    monkeypatch.setattr(start, "start_services", run)
+    assert start.main() == 0
+    assert calls == [{"light": False, "build": False, "prebuilt": False}]
