@@ -268,7 +268,12 @@ final class PlaybackQueueTests: XCTestCase {
             coordinator.beginTemporaryRate(2)
             coordinator.player.rate = 2
             let player = coordinator.player
-            await Task.detached { Self.emitRateKVO(player) }.value
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async {
+                    Self.emitRateKVO(player)
+                    continuation.resume()
+                }
+            }
             await Task.yield()
             XCTAssertEqual(coordinator.temporaryRate, 2)
             XCTAssertEqual(coordinator.preferredRate, 1.25)

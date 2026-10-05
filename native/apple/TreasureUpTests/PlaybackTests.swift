@@ -11,7 +11,12 @@ final class PlaybackTests: XCTestCase {
         // AVFoundation can deliver KVO on its media/network queues. Emitting real
         // KVO notifications here catches an inherited MainActor entry thunk before
         // a callback gets the chance to enqueue its inner MainActor Task.
-        await Task.detached { Self.emitPlaybackKVO(player) }.value
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                Self.emitPlaybackKVO(player)
+                continuation.resume()
+            }
+        }
         await Task.yield()
         XCTAssertFalse(coordinator.isPlaying)
         XCTAssertEqual(coordinator.currentTime, 0)
