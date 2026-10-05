@@ -13,7 +13,11 @@
     "android:prepare": "node scripts/prepare-android.mjs",
     "android:build": "node scripts/locked-tauri.mjs android build",
     "ios:init": "tauri ios init",
-    "ios:build": "node scripts/locked-tauri.mjs ios build"
+    "ios:build": "node scripts/locked-tauri.mjs ios build",
+    "swift:generate": "xcodegen generate --spec apple/project.yml",
+    "swift:xcode": "open apple/TreasureUp.xcodeproj",
+    "swift:build": "xcodebuild -project apple/TreasureUp.xcodeproj -scheme TreasureUp -destination 'generic/platform=iOS Simulator' -derivedDataPath apple/build CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES build",
+    "swift:test": "xcodebuild -project apple/TreasureUp.xcodeproj -scheme TreasureUp -only-testing:TreasureUpTests CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES test"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.1"

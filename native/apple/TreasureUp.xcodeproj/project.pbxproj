@@ -1,0 +1,671 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		020EF17F887D323A5B32BFD6 /* AdminMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4118406527BF647E4B9852 /* AdminMaintenance.swift */; };
+		0A250EAB1214726F25D06117 /* SessionCookieVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC36E461E30CEC302566F4E3 /* SessionCookieVault.swift */; };
+		0BFFD73E0595766D7E862CD1 /* PlayerControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A373D29FE2A013920CC377E /* PlayerControls.swift */; };
+		0D3333BDD8BAC46C11980D98 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C313386880949F2564EBF49 /* Components.swift */; };
+		0D9916E4953E55F88D6A56FE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A46595F5EF0A1F5C6A36245E /* Assets.xcassets */; };
+		0F2E573B23F22B1BBF55D87B /* AdminIntegrations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27BBA1DC5334F016CE85D79D /* AdminIntegrations.swift */; };
+		14BA7969250D795FF5E60FF6 /* PlayerControlsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */; };
+		18241A4CCFCBC3BA88F036E0 /* PlaybackQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEFE56CE2C882AE34C1C945E /* PlaybackQueue.swift */; };
+		20A21A081DFE5596EEB0FC82 /* PlaybackTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */; };
+		3740349DCE82FF6B0558A2C7 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D9C0BB24661158CB314E7CE /* APIClient.swift */; };
+		55B9D29546D391F4BA38874C /* NativePlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD544656E3959724986FFF81 /* NativePlayerView.swift */; };
+		5B874CFCC636AB811D195869 /* PlaybackQueueSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */; };
+		643A2F6869FA186CD2C4B6A6 /* VideoDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECBAA25E116EFED140426EF8 /* VideoDetailView.swift */; };
+		8DFE74BF5FBB3C22C08DCC13 /* VideoCommentsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF15A04D85A795AA725CB043 /* VideoCommentsSection.swift */; };
+		8F8B3263AA8CF02D19006285 /* TreasureUpApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */; };
+		A17A51C283B9FDB2D815C99F /* CoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99D08916B4C68FE268D7A5D /* CoreTests.swift */; };
+		A93AD24D9C20E1D4E2A61A87 /* AdminEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */; };
+		B5ED8B8EC988438F6724AA65 /* AdminSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7D8D33202B91CB285E1E70A /* AdminSettings.swift */; };
+		B9929BBD442B1955C268E2FB /* SavedPlaylistsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */; };
+		BE22C0B378D0FA727A5C633E /* PlaybackRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */; };
+		BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */; };
+		C6F2CD5F02BAC5ECC221F94C /* AdminSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55F1B7BE3013F9A938AFA4A /* AdminSupport.swift */; };
+		CF038D291F8DB5C416396298 /* PlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9DF7300701A329C819838D6 /* PlaybackTests.swift */; };
+		CF2E51B6FBB211634AF66A30 /* NativeSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */; };
+		D34E4535478B448BB0DE3BA7 /* PlaybackCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75C82F42FB25F757AB436C02 /* PlaybackCoordinator.swift */; };
+		D665BB811019D3188E91A74E /* AdminLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1083D7D0490215656759582E /* AdminLists.swift */; };
+		DAF8374D7E2D0FEAEA87F7E9 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AFB945A035F68273F530841 /* Models.swift */; };
+		E2817CD1EA0B8311AF285507 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA580EDA6BA6B4A3727A3CF4 /* JSONValue.swift */; };
+		E374EDA822D5C3F692A282B6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FBB4DA2ADB04C488FCD668E /* SettingsView.swift */; };
+		E9273220A15824EA7056263E /* VideoLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2842D50C134401B327F19407 /* VideoLibraryView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		3BEFE967812B37EC66553A70 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3B374DDB569C466DBEF551CC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 12A13F04F93F8E4803752378;
+			remoteInfo = TreasureUp;
+		};
+		501991669BFA137294612FC4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3B374DDB569C466DBEF551CC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 12A13F04F93F8E4803752378;
+			remoteInfo = TreasureUp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSmokeTests.swift; sourceTree = "<group>"; };
+		1083D7D0490215656759582E /* AdminLists.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminLists.swift; sourceTree = "<group>"; };
+		12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminEditor.swift; sourceTree = "<group>"; };
+		1D4118406527BF647E4B9852 /* AdminMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminMaintenance.swift; sourceTree = "<group>"; };
+		27BBA1DC5334F016CE85D79D /* AdminIntegrations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminIntegrations.swift; sourceTree = "<group>"; };
+		2842D50C134401B327F19407 /* VideoLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoLibraryView.swift; sourceTree = "<group>"; };
+		2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreasureUpApp.swift; sourceTree = "<group>"; };
+		4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueSection.swift; sourceTree = "<group>"; };
+		4C313386880949F2564EBF49 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedPlaylistsView.swift; sourceTree = "<group>"; };
+		5B69416559B2B7301A186E06 /* TreasureUpUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TreasureUpUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackRecovery.swift; sourceTree = "<group>"; };
+		75C82F42FB25F757AB436C02 /* PlaybackCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackCoordinator.swift; sourceTree = "<group>"; };
+		8A373D29FE2A013920CC377E /* PlayerControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControls.swift; sourceTree = "<group>"; };
+		8AFB945A035F68273F530841 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		8D9C0BB24661158CB314E7CE /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		8FBB4DA2ADB04C488FCD668E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A46595F5EF0A1F5C6A36245E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A55F1B7BE3013F9A938AFA4A /* AdminSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSupport.swift; sourceTree = "<group>"; };
+		A9DF7300701A329C819838D6 /* PlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackTests.swift; sourceTree = "<group>"; };
+		AD544656E3959724986FFF81 /* NativePlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePlayerView.swift; sourceTree = "<group>"; };
+		AED4677AD2EE5E557337B938 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		AF15A04D85A795AA725CB043 /* VideoCommentsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoCommentsSection.swift; sourceTree = "<group>"; };
+		B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueTests.swift; sourceTree = "<group>"; };
+		CC36E461E30CEC302566F4E3 /* SessionCookieVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCookieVault.swift; sourceTree = "<group>"; };
+		D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControlsTests.swift; sourceTree = "<group>"; };
+		DA2C67FBE25943886183992A /* TreasureUpTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TreasureUpTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		DA580EDA6BA6B4A3727A3CF4 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackTimeline.swift; sourceTree = "<group>"; };
+		E7D8D33202B91CB285E1E70A /* AdminSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSettings.swift; sourceTree = "<group>"; };
+		ECBAA25E116EFED140426EF8 /* VideoDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDetailView.swift; sourceTree = "<group>"; };
+		EFE5E0CB8D1E79A6D96DAB4A /* TreasureUp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TreasureUp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F99D08916B4C68FE268D7A5D /* CoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreTests.swift; sourceTree = "<group>"; };
+		FEFE56CE2C882AE34C1C945E /* PlaybackQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueue.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0B9977F73E927E0876385494 /* TreasureUp */ = {
+			isa = PBXGroup;
+			children = (
+				A46595F5EF0A1F5C6A36245E /* Assets.xcassets */,
+				AED4677AD2EE5E557337B938 /* Info.plist */,
+				2E6FC928759279D74A215D21 /* Admin */,
+				E1D16BE9F8ECE1AA3EC88CE7 /* App */,
+				9E2A829AB40CD59A96A522EE /* Catalog */,
+				F3AE97904B5471F6636EBC14 /* Core */,
+				1EA3EA25F04DF6F397C0F067 /* Playback */,
+				0E10CB48F766C51851DB9CB4 /* Shared */,
+			);
+			path = TreasureUp;
+			sourceTree = "<group>";
+		};
+		0E10CB48F766C51851DB9CB4 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				4C313386880949F2564EBF49 /* Components.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		1EA3EA25F04DF6F397C0F067 /* Playback */ = {
+			isa = PBXGroup;
+			children = (
+				AD544656E3959724986FFF81 /* NativePlayerView.swift */,
+				75C82F42FB25F757AB436C02 /* PlaybackCoordinator.swift */,
+				FEFE56CE2C882AE34C1C945E /* PlaybackQueue.swift */,
+				6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */,
+				DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */,
+				8A373D29FE2A013920CC377E /* PlayerControls.swift */,
+			);
+			path = Playback;
+			sourceTree = "<group>";
+		};
+		2E6FC928759279D74A215D21 /* Admin */ = {
+			isa = PBXGroup;
+			children = (
+				12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */,
+				27BBA1DC5334F016CE85D79D /* AdminIntegrations.swift */,
+				1083D7D0490215656759582E /* AdminLists.swift */,
+				1D4118406527BF647E4B9852 /* AdminMaintenance.swift */,
+				E7D8D33202B91CB285E1E70A /* AdminSettings.swift */,
+				A55F1B7BE3013F9A938AFA4A /* AdminSupport.swift */,
+			);
+			path = Admin;
+			sourceTree = "<group>";
+		};
+		2ECDE9502E15661BAAEE570A /* TreasureUpTests */ = {
+			isa = PBXGroup;
+			children = (
+				F99D08916B4C68FE268D7A5D /* CoreTests.swift */,
+				B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */,
+				A9DF7300701A329C819838D6 /* PlaybackTests.swift */,
+				D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */,
+			);
+			path = TreasureUpTests;
+			sourceTree = "<group>";
+		};
+		456D92474731B019A2802DCB = {
+			isa = PBXGroup;
+			children = (
+				0B9977F73E927E0876385494 /* TreasureUp */,
+				2ECDE9502E15661BAAEE570A /* TreasureUpTests */,
+				BCB1CCC84388954AC2BE0D98 /* TreasureUpUITests */,
+				4FEADCF5FF3639CD62889CDC /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4FEADCF5FF3639CD62889CDC /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				EFE5E0CB8D1E79A6D96DAB4A /* TreasureUp.app */,
+				DA2C67FBE25943886183992A /* TreasureUpTests.xctest */,
+				5B69416559B2B7301A186E06 /* TreasureUpUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9E2A829AB40CD59A96A522EE /* Catalog */ = {
+			isa = PBXGroup;
+			children = (
+				4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */,
+				50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */,
+				AF15A04D85A795AA725CB043 /* VideoCommentsSection.swift */,
+				ECBAA25E116EFED140426EF8 /* VideoDetailView.swift */,
+				2842D50C134401B327F19407 /* VideoLibraryView.swift */,
+			);
+			path = Catalog;
+			sourceTree = "<group>";
+		};
+		BCB1CCC84388954AC2BE0D98 /* TreasureUpUITests */ = {
+			isa = PBXGroup;
+			children = (
+				062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */,
+			);
+			path = TreasureUpUITests;
+			sourceTree = "<group>";
+		};
+		E1D16BE9F8ECE1AA3EC88CE7 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				8FBB4DA2ADB04C488FCD668E /* SettingsView.swift */,
+				2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		F3AE97904B5471F6636EBC14 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				8D9C0BB24661158CB314E7CE /* APIClient.swift */,
+				DA580EDA6BA6B4A3727A3CF4 /* JSONValue.swift */,
+				8AFB945A035F68273F530841 /* Models.swift */,
+				CC36E461E30CEC302566F4E3 /* SessionCookieVault.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		12A13F04F93F8E4803752378 /* TreasureUp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 90618AD953416FF41DA02CDC /* Build configuration list for PBXNativeTarget "TreasureUp" */;
+			buildPhases = (
+				90BC4C2B0780285340259FCF /* Sources */,
+				DEEB745BE24A0EC9AB3339E3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TreasureUp;
+			packageProductDependencies = (
+			);
+			productName = TreasureUp;
+			productReference = EFE5E0CB8D1E79A6D96DAB4A /* TreasureUp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		27E7D91367ADAE68364B8039 /* TreasureUpUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7114037D951986534E6A11E3 /* Build configuration list for PBXNativeTarget "TreasureUpUITests" */;
+			buildPhases = (
+				ED139BF5B2FF1EB5AA4DA21C /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0394CB9158782A1B42CBBE02 /* PBXTargetDependency */,
+			);
+			name = TreasureUpUITests;
+			packageProductDependencies = (
+			);
+			productName = TreasureUpUITests;
+			productReference = 5B69416559B2B7301A186E06 /* TreasureUpUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		B08325D05956FCBDFD44BCD7 /* TreasureUpTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 986F483424B4A28AF5FF86F6 /* Build configuration list for PBXNativeTarget "TreasureUpTests" */;
+			buildPhases = (
+				A880DB03D8DFCA9EB926011E /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A51AC5987D560F5D46284556 /* PBXTargetDependency */,
+			);
+			name = TreasureUpTests;
+			packageProductDependencies = (
+			);
+			productName = TreasureUpTests;
+			productReference = DA2C67FBE25943886183992A /* TreasureUpTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3B374DDB569C466DBEF551CC /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					12A13F04F93F8E4803752378 = {
+						ProvisioningStyle = Automatic;
+					};
+					27E7D91367ADAE68364B8039 = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 12A13F04F93F8E4803752378;
+					};
+					B08325D05956FCBDFD44BCD7 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 8C564C91C335DA5A8AC5FB99 /* Build configuration list for PBXProject "TreasureUp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 456D92474731B019A2802DCB;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4FEADCF5FF3639CD62889CDC /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				12A13F04F93F8E4803752378 /* TreasureUp */,
+				B08325D05956FCBDFD44BCD7 /* TreasureUpTests */,
+				27E7D91367ADAE68364B8039 /* TreasureUpUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		DEEB745BE24A0EC9AB3339E3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0D9916E4953E55F88D6A56FE /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		90BC4C2B0780285340259FCF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3740349DCE82FF6B0558A2C7 /* APIClient.swift in Sources */,
+				A93AD24D9C20E1D4E2A61A87 /* AdminEditor.swift in Sources */,
+				0F2E573B23F22B1BBF55D87B /* AdminIntegrations.swift in Sources */,
+				D665BB811019D3188E91A74E /* AdminLists.swift in Sources */,
+				020EF17F887D323A5B32BFD6 /* AdminMaintenance.swift in Sources */,
+				B5ED8B8EC988438F6724AA65 /* AdminSettings.swift in Sources */,
+				C6F2CD5F02BAC5ECC221F94C /* AdminSupport.swift in Sources */,
+				0D3333BDD8BAC46C11980D98 /* Components.swift in Sources */,
+				E2817CD1EA0B8311AF285507 /* JSONValue.swift in Sources */,
+				DAF8374D7E2D0FEAEA87F7E9 /* Models.swift in Sources */,
+				55B9D29546D391F4BA38874C /* NativePlayerView.swift in Sources */,
+				D34E4535478B448BB0DE3BA7 /* PlaybackCoordinator.swift in Sources */,
+				18241A4CCFCBC3BA88F036E0 /* PlaybackQueue.swift in Sources */,
+				5B874CFCC636AB811D195869 /* PlaybackQueueSection.swift in Sources */,
+				BE22C0B378D0FA727A5C633E /* PlaybackRecovery.swift in Sources */,
+				20A21A081DFE5596EEB0FC82 /* PlaybackTimeline.swift in Sources */,
+				0BFFD73E0595766D7E862CD1 /* PlayerControls.swift in Sources */,
+				B9929BBD442B1955C268E2FB /* SavedPlaylistsView.swift in Sources */,
+				0A250EAB1214726F25D06117 /* SessionCookieVault.swift in Sources */,
+				E374EDA822D5C3F692A282B6 /* SettingsView.swift in Sources */,
+				8F8B3263AA8CF02D19006285 /* TreasureUpApp.swift in Sources */,
+				8DFE74BF5FBB3C22C08DCC13 /* VideoCommentsSection.swift in Sources */,
+				643A2F6869FA186CD2C4B6A6 /* VideoDetailView.swift in Sources */,
+				E9273220A15824EA7056263E /* VideoLibraryView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A880DB03D8DFCA9EB926011E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A17A51C283B9FDB2D815C99F /* CoreTests.swift in Sources */,
+				BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */,
+				CF038D291F8DB5C416396298 /* PlaybackTests.swift in Sources */,
+				14BA7969250D795FF5E60FF6 /* PlayerControlsTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ED139BF5B2FF1EB5AA4DA21C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CF2E51B6FBB211634AF66A30 /* NativeSmokeTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0394CB9158782A1B42CBBE02 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 12A13F04F93F8E4803752378 /* TreasureUp */;
+			targetProxy = 3BEFE967812B37EC66553A70 /* PBXContainerItemProxy */;
+		};
+		A51AC5987D560F5D46284556 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 12A13F04F93F8E4803752378 /* TreasureUp */;
+			targetProxy = 501991669BFA137294612FC4 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1334EFD05BB39D6DF456EE86 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.4.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		386ED8AADA87A0B2D979D057 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.4.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		4A307F360E12C38EAD8B64B1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TreasureUp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.guoweiyi.treasureup;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		7E3DE1E3E4FC385BEE658789 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.guoweiyi.TreasureUpUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = TreasureUp;
+			};
+			name = Release;
+		};
+		8351BA8D3D516D0B9CF2F27B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TreasureUp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.guoweiyi.treasureup;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		85082F2E17EBA9B312F2AAE9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.guoweiyi.TreasureUpUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = TreasureUp;
+			};
+			name = Debug;
+		};
+		DB99E024D522E26E6EA830E7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.guoweiyi.TreasureUpTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TreasureUp.app/TreasureUp";
+			};
+			name = Debug;
+		};
+		F28E24B9FFE14B6B302420D6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.guoweiyi.TreasureUpTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TreasureUp.app/TreasureUp";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		7114037D951986534E6A11E3 /* Build configuration list for PBXNativeTarget "TreasureUpUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				85082F2E17EBA9B312F2AAE9 /* Debug */,
+				7E3DE1E3E4FC385BEE658789 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8C564C91C335DA5A8AC5FB99 /* Build configuration list for PBXProject "TreasureUp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1334EFD05BB39D6DF456EE86 /* Debug */,
+				386ED8AADA87A0B2D979D057 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		90618AD953416FF41DA02CDC /* Build configuration list for PBXNativeTarget "TreasureUp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4A307F360E12C38EAD8B64B1 /* Debug */,
+				8351BA8D3D516D0B9CF2F27B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		986F483424B4A28AF5FF86F6 /* Build configuration list for PBXNativeTarget "TreasureUpTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DB99E024D522E26E6EA830E7 /* Debug */,
+				F28E24B9FFE14B6B302420D6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 3B374DDB569C466DBEF551CC /* Project object */;
+}

@@ -146,53 +146,47 @@ jobs:
           include-hidden-files: false
           compression-level: 0
   ios-simulator:
-    name: iOS unsigned simulator compile
+    name: Swift iOS simulator compile and tests
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     defaults:
       run:
-        working-directory: native
+        working-directory: native/apple
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ inputs.source_ref || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: native/package-lock.json
-      - name: Prepare simulator toolchain
+      - name: Select installed Xcode with iOS 26.1 or newer SDK
         run: |
-          rustup update stable --no-self-update
-          rustup default stable
-          rustup target add aarch64-apple-ios-sim
-          brew install xcodegen
-      - name: Cache Rust dependencies for iOS ARM64 simulator
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: native/src-tauri -> target
-          key: ios-aarch64-apple-ios-sim-debug
-          env-vars: CARGO CC CFLAGS CXX CMAKE RUST DEVELOPER_DIR SDKROOT
-          cache-bin: false
-          cache-workspace-crates: false
-          save-if: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
-      - run: npm ci --ignore-scripts
-      - run: npm test
-      - run: npm run build
-      - run: npm run tauri -- ios init --ci --skip-targets-install
-      - name: Compile simulator application without distribution signing
-        run: npm run tauri -- ios build --debug --target aarch64-sim --no-sign --ci -- --locked
+          python3 - <<'PYCODE'
+          import pathlib, re, subprocess
+          candidates = []
+          for app in pathlib.Path('/Applications').glob('Xcode*.app'):
+              sdk = app / 'Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs'
+              versions = [tuple(map(int, m.group(1).split('.'))) for p in sdk.glob('iPhoneOS*.sdk') if (m := re.search(r'iPhoneOS(\d+(?:\.\d+)*)\.sdk', p.name))]
+              if versions and max(versions) >= (26, 1):
+                  candidates.append((max(versions), str(app / 'Contents/Developer')))
+          if not candidates:
+              raise SystemExit('This native target requires an installed iOS 26.1+ SDK; update the runner image.')
+          subprocess.run(['sudo', 'xcode-select', '--switch', max(candidates)[1]], check=True)
+          PYCODE
+          xcodebuild -version
+      - name: Compile the pure Swift app
+        run: xcodebuild -project TreasureUp.xcodeproj -scheme TreasureUp -destination 'generic/platform=iOS Simulator' -derivedDataPath build CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES build
+      - name: Run native regression tests on an available iPhone
+        run: |
+          python3 - <<'PYCODE'
+          import json, re, subprocess
+          devices = json.loads(subprocess.check_output(['xcrun','simctl','list','devices','available','--json']))['devices']
+          phones = [(tuple(map(int, m.group(1).split('-'))), d) for runtime, rows in devices.items() if (m := re.search(r'iOS-([0-9-]+)$', runtime)) and int(m.group(1).split('-')[0]) >= 18 for d in rows if d.get('isAvailable') and d['name'].startswith('iPhone')]
+          phones.sort(key=lambda entry: (entry[0], entry[1]['name']))
+          if not phones:
+              raise SystemExit('No available iPhone simulator runtime')
+          subprocess.run(['xcodebuild','-project','TreasureUp.xcodeproj','-scheme','TreasureUp','-destination','platform=iOS Simulator,id='+phones[-1][1]['udid'],'-derivedDataPath','build','-only-testing:TreasureUpTests','CODE_SIGN_IDENTITY=-','CODE_SIGNING_ALLOWED=YES','test'],check=True)
+          PYCODE
       - name: Archive simulator bundle
-        run: |
-          python3 - <<'PY'
-          import pathlib, subprocess
-          apps = [p for p in pathlib.Path('src-tauri/gen/apple').glob('**/*.app') if p.is_dir()]
-          if not apps:
-              raise SystemExit('No iOS simulator app produced')
-          app = apps[0]
-          subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), 'ios-simulator.zip'], check=True)
-          PY
+        run: ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Debug-iphonesimulator/TreasureUp.app ../ios-simulator.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: treasure-up-ios-simulator-unsigned

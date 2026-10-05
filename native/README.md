@@ -1,4 +1,8 @@
-# Treasure Up 原生连接壳
+# Treasure Up 原生客户端
+
+iOS 已新增独立的纯 SwiftUI / AVKit 客户端，直接连接后端 API；请打开 `apple/TreasureUp.xcodeproj`。构建、功能覆盖和验收边界见 [iOS 原生工程说明](apple/README.md)。Bundle ID 为 `com.guoweiyi.treasureup`，开发入口为 `npm run swift:xcode`。
+
+以下 Tauri 说明适用于桌面、Android 及保留的旧 iOS 网页壳；旧 `ios:*` 命令不会打开新的 Swift 工程。
 
 这是独立 Tauri 2 工程，复用远程 Docker 部署的网页。安装包不附带 FFmpeg、语音模型、BT 引擎或数据库；这些任务仍在服务器执行。
 
@@ -9,7 +13,7 @@
 | Windows x64 | Node 测试 → Rust 单元测试/编译 → `tauri build --target x86_64-pc-windows-msvc --bundles nsis` | NSIS 安装包；未配置 Authenticode 签名，需要系统 WebView2。 |
 | macOS ARM64 / Intel | Node 测试 → 主机 Rust 单元测试 → 分别编译两种目标并打包 | app/DMG，使用 ad-hoc 签名；没有开发者证书、公证或商店发布。Intel 目标单独编译，测试运行在 runner 主机架构。 |
 | Android ARM64 | 安装 CI SDK/NDK → 生成 Android 项目 → `tauri android build --debug --apk --target aarch64 --ci` | 调试 APK，不能作为已完成签名的商店发布包。 |
-| iOS ARM64 模拟器 | 安装模拟器 Rust 目标/XcodeGen → 生成 iOS 项目 → `tauri ios build --debug --target aarch64-sim --no-sign --ci` | 模拟器 `.app` 的 ZIP；不是可以装到 iPhone 的签名 IPA。 |
+| iOS 模拟器 | Xcode 26.1+ → 编译 `apple/TreasureUp.xcodeproj` → 原生 XCTest | 纯 Swift `.app` ZIP；真机仍需开发签名。 |
 
 本机已执行 `npm test`（7 项，包含连接页初始化/操作竞态、安全边界与 Android 工具链修正回归）和 `npm run build`。本机缺少 Rust/Cargo/MSVC；原生编译由 CI 验证。[0.3.1 发布构建 37188301393](https://github.com/guoweiyi/treasure-up/actions/runs/37188301393) 的五个原生目标均已成功，包含桌面的 6 项 Rust 导航、连接超时和身份探测测试。本轮缓存与 APK 体积调整需由新 CI 验证，不沿用旧构建结果。各系统实机交互、登录、播放及发布签名仍需下述验收。
 
@@ -21,7 +25,7 @@ npm 与 Cargo 锁均已入库。CLI `2.12.1`、Rust `tauri=2.12.1`、`tauri-buil
 
 `native.yml` 可通过 `workflow_call` 复用，`source_ref` 为空时构建调用方 ref；发布工作流先解析版本 tag，再传入不可变 commit SHA。三个 job 的 checkout 与 concurrency 使用同一个值，避免手工触发把默认分支代码装入旧版本包，也避免 tag 在作业之间移动造成版本不一致。构建权限保持 `contents: read`，checkout 不持久化 Git 凭据。
 
-[Swatinem/rust-cache v2.9.2](https://github.com/Swatinem/rust-cache/commit/6323deb102c322ba6fcbdcafc7e3dddab59af2b6) 固定完整提交 SHA，按桌面 target、Android ARM64、iOS 模拟器分开。Action 还将 Rust 版本、锁文件及 Cargo/Rust 编译环境纳入缓存键，Android 加入 NDK 环境。缓存仅保存依赖与 registry，不缓存工作区自身 crate、Cargo bin、整个 home 或生成的移动工程。只有默认分支或版本 tag 的非 PR 构建可保存，PR 只恢复；GitHub 的分支/merge-ref 缓存隔离仍生效。缓存不含签名材料，未来引入签名时也不得将密钥放入缓存目录。
+[Swatinem/rust-cache v2.9.2](https://github.com/Swatinem/rust-cache/commit/6323deb102c322ba6fcbdcafc7e3dddab59af2b6) 固定完整提交 SHA，按桌面 target、Android ARM64 分开；纯 Swift iOS job 不使用 Rust 缓存。Action 还将 Rust 版本、锁文件及 Cargo/Rust 编译环境纳入缓存键，Android 加入 NDK 环境。缓存仅保存依赖与 registry，不缓存工作区自身 crate、Cargo bin、整个 home 或生成的移动工程。只有默认分支或版本 tag 的非 PR 构建可保存，PR 只恢复；GitHub 的分支/merge-ref 缓存隔离仍生效。缓存不含签名材料，未来引入签名时也不得将密钥放入缓存目录。
 
 仅上传明确的 NSIS `.exe`、DMG、Android `.apk` 和 iOS 模拟器 ZIP，不上传整个 target/gen、Cargo.lock、密钥或本地配置。已移除临时用的 Cargo.lock base64 日志；公开依赖锁从相同 tag 的源码获取。上传已压缩安装包时禁用重复 ZIP 压缩以节省 runner 时间，这不改变安装包字节及签名。
 
@@ -33,7 +37,7 @@ Android CI 仍使用 `--debug`，通过 `CARGO_PROFILE_DEV_DEBUG=0` 与 `CARGO_P
 
 应用始终从随包附带的本地连接页开始，只持久化规范化的服务器 origin。地址只接受 HTTPS；HTTP 例外仅限 localhost/IPv4 或 IPv6 回环，用于本机开发。不支持反向代理子路径，不接受 URL 凭据、query、fragment、本地协议或保留的 Tauri/IPC 地址。移动设备的 localhost 指移动设备自己；移动发布版本的 ATS/网络安全策略仍可能拒绝 HTTP，应连接有效 HTTPS 站点，不要通过允许任意明文流量绕过。
 
-连接表单也接受以 `/api` 或 `/api/v1` 结尾的 API 地址，提交前规范化为同一服务器根地址；不支持任意挂载前缀。进入后可直接浏览视频库，个人星标、进度保存与管理操作再登录。移动播放器使用站内自定义控件；iOS 27 的实现依据与尚需真机验证的项目见 [播放器说明](../frontend/src/player/IOS_NOTES.md)。
+HTML 连接表单也接受以 `/api` 或 `/api/v1` 结尾的 API 地址，提交前规范化为同一服务器根地址；iOS 原生表单明确要求站点根地址。不支持任意挂载前缀。进入后可直接浏览视频库，个人星标、进度保存与管理操作再登录。移动播放器使用站内自定义控件；iOS 27 的实现依据与尚需真机验证的项目见 [播放器说明](../frontend/src/player/IOS_NOTES.md)。
 
 连接页在宽屏/iPad 宽度使用介绍与表单双栏，窄屏叠放；四边保留系统安全区，横屏或键盘压缩高度时允许滚动。地址输入保持 16px 字号，输入框和主按钮分别至少 52px、48px，避免把桌面表单直接缩成小触点。这次仅调整本地 HTML/CSS，不增加 IPC、网络例外或权限；CSS 视窗验收不能替代 iPhone/iPad 的键盘、安全区和旋转实测。
 

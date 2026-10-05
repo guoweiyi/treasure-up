@@ -5,3 +5,4 @@ src-tauri/gen/
 *.keystore
 *.p12
 *.mobileprovision
+ios-simulator.zip
