@@ -48,7 +48,14 @@ def proxy(tmp_path):
     config += ('\nserver { listen 8000; location = /api/v1/parts/slow/danmaku { '
                'limit_rate 1k; alias /fixture/slow-body; '
                '} location / { return 200 "fixture"; } }\n')
-    (tmp_path / "slow-body").write_bytes(b"x" * 65536)
+    # pytest makes tmp_path 0700 on Linux. Only mount this synthetic public
+    # fixture directory so nginx's unprivileged worker can traverse it.
+    public_fixture = tmp_path / "fixture"
+    public_fixture.mkdir()
+    public_fixture.chmod(0o755)
+    slow_body = public_fixture / "slow-body"
+    slow_body.write_bytes(b"x" * 65536)
+    slow_body.chmod(0o644)
     assets = tmp_path / "site" / "assets"
     assets.mkdir(parents=True)
     bundle = b"const publicBundle = 'static code only';\n" * 1000
@@ -60,7 +67,7 @@ def proxy(tmp_path):
         docker("run", "--rm", "-d", "--pull=never", "--name", name,
                "-p", "127.0.0.1::80",
                "--mount", f"type=bind,source={fixture},target=/etc/nginx/conf.d/default.conf,readonly",
-               "--mount", f"type=bind,source={tmp_path},target=/fixture,readonly",
+               "--mount", f"type=bind,source={public_fixture},target=/fixture,readonly",
                "--mount", f"type=bind,source={tmp_path / 'site'},target=/usr/share/nginx/html,readonly",
                "--mount", f"type=bind,source={DEPLOY / 'security-headers.conf'},target=/etc/nginx/security-headers.conf,readonly",
                os.environ.get("TREASURE_NGINX_TEST_IMAGE", "treasure-up-web:0.3.2"))
@@ -136,7 +143,13 @@ def test_slow_danmaku_responses_have_a_concurrency_ceiling(proxy):
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(hold, index) for index in range(4)]
         try:
-            assert all(event.wait(5) for event in ready)
+            if not all(event.wait(5) for event in ready):
+                # Report an HTTP/setup error instead of hiding it behind a
+                # readiness timeout from the worker thread.
+                for future in futures:
+                    if future.done():
+                        future.result()
+                pytest.fail("Slow fixture responses did not become ready")
             assert request(proxy, "/api/v1/parts/another/danmaku")[0] == 429
             assert request(proxy, "/api/v1/videos")[0] == 200
         finally:
