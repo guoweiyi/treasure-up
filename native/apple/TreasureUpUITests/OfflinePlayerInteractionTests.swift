@@ -99,10 +99,8 @@ final class OfflinePlayerInteractionTests: XCTestCase {
                           "Portrait media must not crop the real 44pt control targets")
         }
         more.tap()
-        let information = app.buttons["播放信息"].firstMatch
-        XCTAssertTrue(information.waitForExistence(timeout: 5))
-        information.tap()
-        let close = app.buttons["关闭"].firstMatch
+        XCTAssertTrue(app.descendants(matching: .any)["player-options-panel"].firstMatch.waitForExistence(timeout: 5))
+        let close = app.buttons["player-panel-close"].firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 5))
         close.tap()
         setPlaying(true, in: app)
@@ -120,6 +118,69 @@ final class OfflinePlayerInteractionTests: XCTestCase {
         control("player-fullscreen", in: app).tap()
         wait("Portrait fullscreen must dismiss") { !fullscreen.exists }
         setPlaying(true, in: app)
+    }
+
+    func testNativeScrubberAndHiddenDoubleTapKeepPausedPlaybackAtRequestedPosition() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch()
+        let progress = app.sliders["player-progress"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 5))
+        progress.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        waitForSeek(near: 60, in: app)
+        XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
+
+        // Hide controls, then double tap the moving picture without first
+        // revealing it: that same pair of touches must skip only once.
+        pictureCoordinate(in: app, x: 0.5).tap()
+        wait("A single tap hides the controls") { !app.buttons["player-play-pause"].exists }
+        pictureCoordinate(in: app, x: 0.8).doubleTap()
+        waitForSeek(near: 75, in: app)
+        XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
+
+        // A horizontal picture gesture previews locally and commits on release.
+        let start = pictureCoordinate(in: app, x: 0.3)
+        let end = pictureCoordinate(in: app, x: 0.7)
+        start.press(forDuration: 0.05, thenDragTo: end)
+        waitForSeek(near: 87, in: app)
+        XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
+    }
+
+    func testInlineSpeedSelectionAndPanelDismissalRestoreAutoHide() {
+        let app = launch()
+        setPlaying(true, in: app)
+        control("player-speed", in: app).tap()
+        XCTAssertTrue(app.descendants(matching: .any)["player-options-panel"].firstMatch.waitForExistence(timeout: 5))
+        let panelScreenshot = XCTAttachment(screenshot: app.screenshot())
+        panelScreenshot.name = "Inline speed panel"
+        panelScreenshot.lifetime = .keepAlways
+        add(panelScreenshot)
+        let rate = app.buttons["1.5 倍速"].firstMatch
+        XCTAssertTrue(rate.waitForExistence(timeout: 5))
+        rate.tap()
+        wait("Speed selection must reach the player") { app.staticTexts["offline-player-rate"].label == "1.50" }
+        control("更多播放选项", in: app).tap()
+        let close = app.buttons["player-panel-close"].firstMatch
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        close.tap()
+        wait("Closing a panel must rearm normal auto-hide", timeout: 8) { !app.buttons["player-play-pause"].exists }
+        pictureCoordinate(in: app, x: 0.5).tap()
+        XCTAssertTrue(app.buttons["player-play-pause"].waitForExistence(timeout: 2))
+        setPlaying(false, in: app)
+    }
+
+    private func pictureCoordinate(in app: XCUIApplication, x: CGFloat) -> XCUICoordinate {
+        // SwiftUI's focus/accessibility group can include the navigation safe
+        // area. Its native rendering child reports the actual video viewport.
+        let frame = app.otherElements["inline-player"].firstMatch.children(matching: .other).firstMatch.frame
+        return app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.minX + frame.width * x, dy: frame.minY + frame.height * 0.42))
+    }
+
+    private func waitForSeek(near target: Double, in app: XCUIApplication) {
+        wait("The real paused AVPlayer must settle near \(target)") {
+            let actual = Double(app.staticTexts["offline-player-actual-time"].label) ?? -1000
+            return app.staticTexts["offline-player-seek-state"].label == "settled" && abs(actual - target) < 3
+        }
     }
 
     private func launch(portrait: Bool = false, landscapeWindow: Bool = false) -> XCUIApplication {

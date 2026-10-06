@@ -459,6 +459,358 @@ final class PlaybackQueueTests: XCTestCase {
         }
     }
 
+    func testContinuousSeekCoalescesTargetsAndRejectsOldClockSamplesUntilLastCompletion() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.resume()
+            player.reportTimeControlStatus(.playing)
+            await self.waitForTransport("Initial playback should be active") { coordinator.isPlaying }
+            let plays = player.playedRates.count
+            coordinator.seek(to: 40)
+            await self.waitForSeek(player)
+            for target in [50.0, 60, 75, 90] { coordinator.seek(to: target) }
+            XCTAssertEqual(player.pendingTimes, [40], "Only one AVPlayer seek may be in flight")
+            XCTAssertTrue(coordinator.isSeeking)
+            player.reportPeriodicTime(12)
+            XCTAssertEqual(coordinator.currentTime, 90, "Old clock samples cannot undo the gesture preview")
+            XCTAssertEqual(coordinator.presentationTime(at: Date().addingTimeInterval(10)), 90)
+            player.reportTimeControlStatus(.paused)
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertTrue(coordinator.wantsPlayback, "Temporary seek suspension is not a user pause")
+            player.finishNextSeek()
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [90], "Intermediate drag targets should be coalesced")
+            player.reportPeriodicTime(40)
+            XCTAssertEqual(coordinator.currentTime, 90)
+            XCTAssertEqual(player.playedRates.count, plays)
+            player.finishNextSeek()
+            await self.waitForTransport("Last seek should complete") { !coordinator.isSeeking }
+            XCTAssertEqual(coordinator.currentTime, 90)
+            XCTAssertEqual(player.playedRates.count, plays + 1)
+            player.reportPeriodicTime(91)
+            XCTAssertEqual(coordinator.currentTime, 91, "The real clock resumes after the latest seek completes")
+        }
+    }
+
+    func testPauseDuringSeekWinsAndResumeWaitsForLatestPosition() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.resume()
+            let plays = player.playedRates.count
+            coordinator.seek(to: 45)
+            await self.waitForSeek(player)
+            coordinator.pause()
+            XCTAssertFalse(coordinator.isBuffering)
+            player.finishNextSeek()
+            await self.waitForTransport("Paused seek should finish") { !coordinator.isSeeking }
+            XCTAssertEqual(player.playedRates.count, plays)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertEqual(coordinator.currentTime, 45)
+            coordinator.seek(to: 70)
+            await self.waitForSeek(player)
+            coordinator.resume()
+            XCTAssertEqual(player.playedRates.count, plays, "Resume must wait for a pending seek")
+            player.finishNextSeek()
+            await self.waitForTransport("Resumed seek should finish") { !coordinator.isSeeking }
+            XCTAssertEqual(player.playedRates.count, plays + 1)
+            XCTAssertTrue(coordinator.wantsPlayback)
+        }
+    }
+
+    func testLateSeekCompletionCannotChangeStoppedOrReplacementPlayback() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.resume()
+            coordinator.seek(to: 60)
+            await self.waitForSeek(player)
+            coordinator.stop(saveProgress: false)
+            let plays = player.playedRates.count
+            player.finishNextSeek()
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertNil(coordinator.currentVideo)
+            XCTAssertFalse(coordinator.isSeeking)
+            XCTAssertEqual(coordinator.currentTime, 0)
+            XCTAssertEqual(player.playedRates.count, plays)
+
+            await coordinator.start(video: self.video("b", parts: [self.part("b1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.seek(to: 50)
+            await self.waitForSeek(player)
+            await coordinator.start(video: self.video("c", parts: [self.part("c1", position: 1)]))
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.seek(to: 80)
+            XCTAssertTrue(coordinator.isSeeking)
+            // Old B completion must neither clear C's seeking flag nor publish 50.
+            player.finishNextSeek()
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertEqual(coordinator.currentVideo?.id, "c")
+            XCTAssertTrue(coordinator.isSeeking)
+            XCTAssertEqual(coordinator.currentTime, 80)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [80])
+            player.finishNextSeek()
+            await self.waitForTransport("Replacement seek should finish") { !coordinator.isSeeking }
+            XCTAssertEqual(coordinator.currentTime, 80)
+        }
+    }
+
+    func testInterruptedSeekDoesNotPublishUnreachedTarget() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            player.reportPeriodicTime(12)
+            coordinator.seek(to: 100)
+            await self.waitForSeek(player)
+            player.finishNextSeek(success: false)
+            await self.waitForTransport("Interrupted seek should settle") { !coordinator.isSeeking }
+            XCTAssertEqual(coordinator.currentTime, 12)
+            XCTAssertNotNil(coordinator.statusMessage)
+            XCTAssertFalse(coordinator.isBuffering)
+        }
+    }
+
+    func testObsoleteSeekIsCancelledOnceAndImmediatelyChasesLatestTarget() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        player.completeCancelledSeeksImmediately = true
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: player.makeCancellationItem())
+            coordinator.resume()
+            let plays = player.playedRates.count
+            coordinator.seek(to: 40)
+            await self.waitForSeek(player)
+            let cancellations = player.seekCancellationCount
+            for target in [50.0, 60, 75, 90] { coordinator.seek(to: target) }
+            XCTAssertEqual(player.seekCancellationCount, cancellations + 1)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [90], "The obsolete network seek needs no manual completion before its replacement starts")
+            XCTAssertTrue(coordinator.isSeeking)
+            XCTAssertEqual(coordinator.currentTime, 90)
+            XCTAssertNil(coordinator.statusMessage, "Superseding a request is not a seek failure")
+            XCTAssertEqual(player.playedRates.count, plays)
+            for _ in 0..<20 { coordinator.seek(to: 90) }
+            XCTAssertEqual(player.seekCancellationCount, cancellations + 1, "Identical destinations must not cancel the replacement")
+            player.finishNextSeek()
+            await self.waitForTransport("Latest seek should finish") { !coordinator.isSeeking }
+            XCTAssertEqual(player.playedRates.count, plays + 1)
+            XCTAssertEqual(coordinator.currentTime, 90)
+        }
+    }
+
+    func testSeekCancellationCanCompleteLateWithoutRepeatedCancellationOrStaleProgress() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: player.makeCancellationItem())
+            let cancellations = player.seekCancellationCount
+            coordinator.seek(to: 30)
+            // The task has not yet issued an AVPlayer operation: do not cancel.
+            coordinator.seek(to: 40)
+            XCTAssertEqual(player.seekCancellationCount, cancellations)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [40])
+            for target in [50.0, 60, 70, 70] { coordinator.seek(to: target) }
+            XCTAssertEqual(player.seekCancellationCount, cancellations + 1)
+            XCTAssertEqual(player.pendingTimes, [40], "This fixture deliberately delays the canceled completion")
+            coordinator.pause()
+            player.finishNextSeek(success: false)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [70])
+            XCTAssertEqual(coordinator.currentTime, 70)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertNil(coordinator.statusMessage)
+            player.finishNextSeek()
+            await self.waitForTransport("Paused replacement seek should finish") { !coordinator.isSeeking }
+            XCTAssertTrue(player.playedRates.isEmpty)
+        }
+    }
+
+    func testReplaySeekCancellationHonorsNewTargetAndPause() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        player.completeCancelledSeeksImmediately = true
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: player.makeCancellationItem())
+            coordinator.seek(to: 120)
+            coordinator.resume()
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [0])
+            let cancellations = player.seekCancellationCount
+            coordinator.seek(to: 75)
+            coordinator.pause()
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.seekCancellationCount, cancellations + 1)
+            XCTAssertEqual(player.pendingTimes, [75])
+            player.finishNextSeek()
+            await self.waitForTransport("Replay replacement should finish") { !coordinator.isSeeking }
+            XCTAssertEqual(coordinator.currentTime, 75)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertTrue(player.playedRates.isEmpty)
+        }
+    }
+
+    func testPlayingSeekToEndSettlesPauseWithoutAnotherEndNotification() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: player.makeCancellationItem())
+            coordinator.queueMode = .pause
+            coordinator.resume()
+            let plays = player.playedRates.count
+            coordinator.seek(to: 120)
+            await self.waitForSeek(player)
+            player.finishNextSeek()
+            await self.waitForTransport("EOF seek should settle the transport without an AVPlayer end notification") { !coordinator.isSeeking }
+            XCTAssertEqual(coordinator.currentTime, 120)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertFalse(coordinator.isBuffering)
+            XCTAssertFalse(coordinator.isPlaying)
+            XCTAssertEqual(player.playedRates.count, plays, "Do not request playback at an already completed position")
+        }
+    }
+
+    func testPlayingSeekToEndPreservesRepeatAndContinuousModes() async {
+        for mode in [PlaybackQueueMode.repeatVideo, .continuous] {
+            QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+            let player = ReplayTestPlayer()
+            await withCoordinator(player: player) { coordinator in
+                let source = self.video("a", parts: [self.part("a1", position: 1)])
+                let next = self.video("b", parts: [self.part("b1", position: 1)])
+                coordinator.configureQueue(videos: [source, next], currentVideoId: "a")
+                await coordinator.start(video: source)
+                coordinator.errorMessage = nil
+                player.replaceCurrentItem(with: player.makeCancellationItem())
+                coordinator.queueMode = mode
+                coordinator.resume()
+                let plays = player.playedRates.count
+                coordinator.seek(to: 120)
+                await self.waitForSeek(player)
+                player.finishNextSeek()
+                if mode == .repeatVideo {
+                    await self.waitForSeek(player)
+                    XCTAssertEqual(player.pendingTimes, [0])
+                    XCTAssertEqual(coordinator.currentVideo?.id, "a")
+                    XCTAssertEqual(player.playedRates.count, plays)
+                    player.finishNextSeek()
+                    await self.waitForTransport("Loop seek should finish") { !coordinator.isSeeking }
+                    XCTAssertEqual(player.playedRates.count, plays + 1)
+                    XCTAssertEqual(coordinator.currentTime, 0)
+                } else {
+                    await self.waitForTransport("Continuous mode should select the next video") { coordinator.currentVideo?.id == "b" }
+                    XCTAssertEqual(coordinator.currentPart?.id, "b1")
+                }
+            }
+            player.finishRemainingSeeks()
+        }
+    }
+
+    func testPausedSeekToEndNeverAdvancesEvenWhenAutoplayIsEnabled() async {
+        for mode in [PlaybackQueueMode.repeatVideo, .continuous] {
+            QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+            let player = ReplayTestPlayer()
+            await withCoordinator(player: player) { coordinator in
+                let source = self.video("a", parts: [self.part("a1", position: 1)])
+                coordinator.configureQueue(videos: [source, self.video("b", parts: [self.part("b1", position: 1)])], currentVideoId: "a")
+                await coordinator.start(video: source)
+                coordinator.errorMessage = nil
+                player.replaceCurrentItem(with: player.makeCancellationItem())
+                coordinator.queueMode = mode
+                coordinator.pause()
+                coordinator.seek(to: 120)
+                await self.waitForSeek(player)
+                player.finishNextSeek()
+                await self.waitForTransport("Paused EOF seek should finish") { !coordinator.isSeeking }
+                for _ in 0..<10 { await Task.yield() }
+                XCTAssertEqual(coordinator.currentVideo?.id, "a")
+                XCTAssertEqual(coordinator.currentTime, 120)
+                XCTAssertFalse(coordinator.wantsPlayback)
+                XCTAssertTrue(player.playedRates.isEmpty)
+                XCTAssertTrue(player.pendingTimes.isEmpty)
+            }
+            player.finishRemainingSeeks()
+        }
+    }
+
+    func testOldStallCheckpointCannotRecoverAfterBackwardSeekOrPauseResume() {
+        let stalled = PlaybackStallCheckpoint(intentRevision: 10, position: 100)
+        XCTAssertTrue(stalled.shouldRecover(intentRevision: 10, position: 100.05, wantsPlayback: true, isSeeking: false))
+        XCTAssertFalse(stalled.shouldRecover(intentRevision: 11, position: 10, wantsPlayback: true, isSeeking: false),
+                       "A successful backward seek cannot be compared with the old stalled position")
+        XCTAssertFalse(stalled.shouldRecover(intentRevision: 12, position: 100, wantsPlayback: true, isSeeking: false),
+                       "A pause/resume cycle also invalidates an old transport watchdog")
+        XCTAssertFalse(stalled.shouldRecover(intentRevision: 10, position: 100, wantsPlayback: false, isSeeking: false))
+        XCTAssertFalse(stalled.shouldRecover(intentRevision: 10, position: 100, wantsPlayback: true, isSeeking: true))
+        XCTAssertFalse(stalled.shouldRecover(intentRevision: 10, position: 101, wantsPlayback: true, isSeeking: false))
+    }
+
+    func testProgressPersistsOnlySettledPositionsDuringPausedAndFailedSeeks() async {
+        let progress = PlaybackProgressRequestStore()
+        QueueTestURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/auth/login" {
+                return .init(body: "{\"user\":{\"id\":\"fixture-user\",\"username\":\"fixture\"},\"csrf_token\":\"fixture-token\"}")
+            }
+            if request.httpMethod == "PUT", request.url?.path == "/api/v1/progress/a1" {
+                progress.record(request)
+                return .init(body: "{}")
+            }
+            return .init(status: 503, body: "{}")
+        }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player, authenticated: true) { coordinator in
+            await coordinator.start(video: self.video("a", parts: [self.part("a1", position: 1)]))
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: player.makeCancellationItem())
+            player.reportPeriodicTime(12)
+            coordinator.seek(to: 100)
+            await self.waitForSeek(player)
+            coordinator.pause()
+            await self.waitForTransport("Pause should persist the last confirmed position") { !progress.positions.isEmpty }
+            XCTAssertEqual(progress.positions.last, 12)
+            player.finishNextSeek(success: false)
+            await self.waitForTransport("Failed seek should persist its true position") { !coordinator.isSeeking && progress.positions.count >= 2 }
+            XCTAssertEqual(coordinator.currentTime, 12)
+            XCTAssertFalse(progress.positions.contains(100), "An optimistic preview is not watch history")
+            coordinator.seek(to: 80)
+            await self.waitForSeek(player)
+            player.finishNextSeek()
+            await self.waitForTransport("Successful paused seek should persist its new position") { progress.positions.last == 80 }
+            XCTAssertFalse(coordinator.wantsPlayback)
+        }
+    }
+
     private func waitForSeek(_ player: ReplayTestPlayer) async {
         for _ in 0..<100 where player.pendingTimes.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
         XCTAssertFalse(player.pendingTimes.isEmpty, "Replay should issue an awaited seek")
@@ -840,7 +1192,8 @@ final class PlaybackQueueTests: XCTestCase {
         player.didChangeValue(forKey: "timeControlStatus")
     }
 
-    private func withCoordinator(player: AVPlayer = AVPlayer(), _ operation: @MainActor (PlaybackCoordinator) async -> Void) async {
+    private func withCoordinator(player: AVPlayer = AVPlayer(), authenticated: Bool = false,
+                                 _ operation: @MainActor (PlaybackCoordinator) async -> Void) async {
         let name = "TreasureQueueCoordinatorTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -848,6 +1201,10 @@ final class PlaybackQueueTests: XCTestCase {
         configuration.protocolClasses = [QueueTestURLProtocol.self]
         let api = APIClient(baseURL: URL(string: "https://queue.example.test")!, defaults: defaults,
                             sessionConfiguration: configuration, persistSession: false)
+        if authenticated {
+            do { try await api.login(username: "fixture", password: "fixture") }
+            catch { XCTFail("Offline authentication fixture failed: \(error)"); return }
+        }
         let coordinator = PlaybackCoordinator(api: api, defaults: defaults, player: player)
         defer { coordinator.stop(clearQueue: true, saveProgress: false) }
         await operation(coordinator)
@@ -862,6 +1219,12 @@ private final class ReplayTestPlayer: AVPlayer, @unchecked Sendable {
     private nonisolated let testState = ReplayTestPlayerState()
     var pendingTimes: [Double] { testState.pendingTimes }
     var playedRates: [Float] { testState.playedRates }
+    var seekCancellationCount: Int { testState.cancellationCount }
+    var completeCancelledSeeksImmediately: Bool {
+        get { testState.completesCancelledSeeksImmediately }
+        set { testState.setCompletesCancelledSeeksImmediately(newValue) }
+    }
+    func makeCancellationItem() -> AVPlayerItem { CancellationTestPlayerItem(state: testState) }
     override var timeControlStatus: AVPlayer.TimeControlStatus { testState.timeControlStatus }
     override var rate: Float {
         get { testState.rate }
@@ -878,7 +1241,17 @@ private final class ReplayTestPlayer: AVPlayer, @unchecked Sendable {
         didChangeValue(forKey: "timeControlStatus")
     }
     override func currentTime() -> CMTime { testState.currentTime }
-    override func pause() { }
+    override func pause() { testState.setRate(0) }
+    override func addPeriodicTimeObserver(forInterval interval: CMTime, queue: DispatchQueue?,
+                                          using block: @escaping @Sendable (CMTime) -> Void) -> Any {
+        testState.setTimeObserver(block)
+        return UUID()
+    }
+    override func removeTimeObserver(_ observer: Any) { testState.setTimeObserver(nil) }
+    func reportPeriodicTime(_ seconds: Double) {
+        testState.setPosition(CMTime(seconds: seconds, preferredTimescale: 600))
+        testState.emitTimeObserver()
+    }
     override func playImmediately(atRate rate: Float) { testState.recordPlayback(rate: rate) }
     override func seek(to time: CMTime, toleranceBefore: CMTime, toleranceAfter: CMTime) {
         testState.setPosition(time)
@@ -887,7 +1260,7 @@ private final class ReplayTestPlayer: AVPlayer, @unchecked Sendable {
                        completionHandler: @escaping @Sendable (Bool) -> Void) {
         testState.appendSeek(time: time, completion: completionHandler)
     }
-    func finishNextSeek() { testState.finishNextSeek() }
+    func finishNextSeek(success: Bool = true) { testState.finishNextSeek(success: success) }
     func finishRemainingSeeks() { testState.finishRemainingSeeks() }
 }
 
@@ -904,31 +1277,88 @@ private final class ReplayTestPlayerState: @unchecked Sendable {
     private var rates: [Float] = []
     private var reportedStatus: AVPlayer.TimeControlStatus = .paused
     private var reportedRate: Float = 0
+    private var timeObserver: (@Sendable (CMTime) -> Void)?
+    private var cancellations = 0
+    private var immediateCancellationCompletion = false
 
     var pendingTimes: [Double] { lock.withLock { seeks.map { $0.time.seconds } } }
     var playedRates: [Float] { lock.withLock { rates } }
+    var cancellationCount: Int { lock.withLock { cancellations } }
+    var completesCancelledSeeksImmediately: Bool { lock.withLock { immediateCancellationCompletion } }
+    func setCompletesCancelledSeeksImmediately(_ value: Bool) { lock.withLock { immediateCancellationCompletion = value } }
+    func cancelPendingSeeks() {
+        let pending: [Seek] = lock.withLock {
+            cancellations += 1
+            guard immediateCancellationCompletion else { return [] }
+            let pending = seeks
+            seeks.removeAll()
+            return pending
+        }
+        for seek in pending { seek.completion(false) }
+    }
     var timeControlStatus: AVPlayer.TimeControlStatus { lock.withLock { reportedStatus } }
     var rate: Float { lock.withLock { reportedRate } }
     func setRate(_ rate: Float) { lock.withLock { reportedRate = rate } }
     var currentTime: CMTime { lock.withLock { position } }
     func setTimeControlStatus(_ status: AVPlayer.TimeControlStatus) { lock.withLock { reportedStatus = status } }
-    func recordPlayback(rate: Float) { lock.withLock { rates.append(rate) } }
+    func recordPlayback(rate: Float) { lock.withLock { rates.append(rate); reportedRate = rate } }
+    func setTimeObserver(_ callback: (@Sendable (CMTime) -> Void)?) { lock.withLock { timeObserver = callback } }
+    func emitTimeObserver() {
+        let (callback, time) = lock.withLock { (timeObserver, position) }
+        callback?(time)
+    }
     func setPosition(_ time: CMTime) { lock.withLock { position = time } }
     func appendSeek(time: CMTime, completion: @escaping @Sendable (Bool) -> Void) {
         lock.withLock { seeks.append(Seek(time: time, completion: completion)) }
     }
-    func finishNextSeek() {
+    func finishNextSeek(success: Bool) {
         let seek: Seek? = lock.withLock {
             guard !seeks.isEmpty else { return nil }
             let seek = seeks.removeFirst()
-            position = seek.time
+            if success { position = seek.time }
             return seek
         }
-        seek?.completion(true)
+        seek?.completion(success)
     }
     func finishRemainingSeeks() {
         let pending = lock.withLock { let pending = seeks; seeks.removeAll(); return pending }
         for seek in pending { seek.completion(false) }
+    }
+}
+
+/// Delivers cancellation back through the fake player's real seek completion,
+/// optionally holding it to reproduce delayed AVFoundation callbacks.
+private final class CancellationTestPlayerItem: AVPlayerItem, @unchecked Sendable {
+    private nonisolated let state: ReplayTestPlayerState
+    init(state: ReplayTestPlayerState) {
+        self.state = state
+        super.init(asset: AVMutableComposition(), automaticallyLoadedAssetKeys: nil)
+    }
+    override func cancelPendingSeeks() { state.cancelPendingSeeks() }
+}
+
+/// Captures actual API request payloads while URLProtocol handles all traffic
+/// locally. HTTP body streams are consumed only by this protocol fixture.
+private final class PlaybackProgressRequestStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Double] = []
+    var positions: [Double] { lock.withLock { values } }
+
+    func record(_ request: URLRequest) {
+        var body = request.httpBody ?? Data()
+        if body.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                body.append(contentsOf: buffer.prefix(count))
+            }
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let position = json["position"] as? NSNumber else { return }
+        lock.withLock { values.append(position.doubleValue) }
     }
 }
 

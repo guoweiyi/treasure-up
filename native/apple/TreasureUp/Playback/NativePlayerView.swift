@@ -517,14 +517,39 @@ final class NativeDanmakuOverlayView: UIView {
 
 struct NativeAirPlayButton: UIViewRepresentable {
     var tint: UIColor = .label
+    var onPresent: () -> Void = {}
+    var onDismiss: () -> Void = {}
+
+    func makeCoordinator() -> Delegate { Delegate(onPresent: onPresent, onDismiss: onDismiss) }
+
     func makeUIView(context: Context) -> AVRoutePickerView {
         let view = AVRoutePickerView()
         view.prioritizesVideoDevices = true
         view.tintColor = tint
         view.activeTintColor = .systemCyan
+        view.delegate = context.coordinator
         return view
     }
-    func updateUIView(_ uiView: AVRoutePickerView, context: Context) { uiView.tintColor = tint }
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {
+        uiView.tintColor = tint
+        context.coordinator.onPresent = onPresent
+        context.coordinator.onDismiss = onDismiss
+    }
+
+    @MainActor final class Delegate: NSObject, AVRoutePickerViewDelegate {
+        var onPresent: () -> Void
+        var onDismiss: () -> Void
+        init(onPresent: @escaping () -> Void, onDismiss: @escaping () -> Void) {
+            self.onPresent = onPresent
+            self.onDismiss = onDismiss
+        }
+        nonisolated func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+            Task { @MainActor [weak self] in self?.onPresent() }
+        }
+        nonisolated func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+            Task { @MainActor [weak self] in self?.onDismiss() }
+        }
+    }
 }
 
 struct PlaybackSettingsView: View {

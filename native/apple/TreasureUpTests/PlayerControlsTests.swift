@@ -3,6 +3,49 @@ import SwiftUI
 @testable import TreasureUp
 
 final class PlayerControlsTests: XCTestCase {
+    @MainActor
+    func testBriefWaitingAndCancelledDelayDoNotLeaveStaleBufferingFeedback() async throws {
+        let state = PlayerWaitingState(delay: .milliseconds(20))
+        state.update(isWaiting: true)
+        XCTAssertFalse(state.isVisible, "A decoder wait does not show a spinner immediately")
+        state.update(isWaiting: false)
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertFalse(state.isVisible, "A cancelled wait must not publish its delayed spinner")
+
+        state.update(isWaiting: true)
+        for _ in 0..<100 where !state.isVisible { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(state.isVisible, "A persistent wait should explain why playback has stopped")
+        state.update(isWaiting: false)
+        XCTAssertFalse(state.isVisible, "Playback recovery removes feedback immediately")
+    }
+
+    func testInlineAndFullscreenPanelsReserveCloseTargetInsideTheirSafeRectangle() {
+        let inline = PlayerPanelGeometry(size: CGSize(width: 320, height: 221), insets: EdgeInsets(), preferredHeight: 420)
+        XCTAssertEqual(inline.panelSize, CGSize(width: 296, height: 197))
+        XCTAssertGreaterThan(inline.panelSize.height - 24, 44, "The close row leaves scrollable content below it")
+
+        let insets = EdgeInsets(top: 24, leading: 59, bottom: 21, trailing: 59)
+        let fullscreen = PlayerPanelGeometry(size: CGSize(width: 852, height: 393), insets: insets, preferredHeight: 420)
+        XCTAssertEqual(fullscreen.panelSize, CGSize(width: 480, height: 324))
+        XCTAssertLessThanOrEqual(fullscreen.panelSize.width + insets.leading + insets.trailing, 852 - 24)
+        XCTAssertLessThanOrEqual(fullscreen.panelSize.height + insets.top + insets.bottom, 393 - 24)
+        let speed = PlayerPanelGeometry(size: CGSize(width: 852, height: 393), insets: insets, preferredHeight: 188)
+        XCTAssertEqual(speed.panelSize.height, 188, "A short speed panel should not expand to a settings-sized sheet")
+    }
+
+    func testPanelGeometryRejectsTransientInvalidAndOversizedSafeAreas() {
+        let invalid = PlayerPanelGeometry(size: CGSize(width: CGFloat.nan, height: -1),
+                                          insets: EdgeInsets(top: .infinity, leading: -20, bottom: 50, trailing: 50),
+                                          preferredHeight: .nan)
+        XCTAssertEqual(invalid.panelSize, .zero)
+        let covered = PlayerPanelGeometry(size: CGSize(width: 100, height: 100),
+                                          insets: EdgeInsets(top: 200, leading: 200, bottom: 200, trailing: 200),
+                                          preferredHeight: 420)
+        XCTAssertEqual(covered.panelSize, .zero)
+        XCTAssertEqual(covered.insets.leading + covered.insets.trailing, 100)
+        XCTAssertEqual(covered.insets.top + covered.insets.bottom, 100)
+    }
+
     func testInlineViewportDoesNotApplyAncestorNavigationInsetsTwice() {
         let inherited = EdgeInsets(top: 106, leading: 24, bottom: 34, trailing: 24)
         let insets = PlayerGestureMath.controlInsets(isExpanded: false, reported: inherited)

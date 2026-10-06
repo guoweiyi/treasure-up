@@ -21,7 +21,9 @@ struct InlineNativePlayer: View {
     @State private var scrubbing = PlayerScrubbingState()
     @State private var feedback: String?
     @State private var panel: PlayerInlinePanel?
-    @GestureState private var holdingSpeed = false
+    @State private var holdingSpeed = false
+    @State private var controlPressed = false
+    @State private var routePickerPresented = false
 
     private var seekableDuration: Double { coordinator.duration.isFinite ? max(0, coordinator.duration) : 0 }
 
@@ -34,9 +36,8 @@ struct InlineNativePlayer: View {
                 NativePlayerView(coordinator: coordinator)
                     .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                     .allowsHitTesting(false)
-                gestureSurface(width: geometry.size.width)
-                    .frame(width: gestureBounds.width, height: gestureBounds.height)
-                    .position(x: gestureBounds.midX, y: gestureBounds.midY)
+                gestureSurface(width: geometry.size.width, bounds: gestureBounds)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
                     .allowsHitTesting(panel == nil)
                 if coordinator.isPictureInPictureActive {
                     VStack(spacing: 10) {
@@ -52,11 +53,8 @@ struct InlineNativePlayer: View {
                 }
                 PlayerInteractionFeedback(coordinator: coordinator, scrubbing: scrubbing,
                     holdingSpeed: holdingSpeed, feedback: feedback, topInset: controlInsets.top)
-                if coordinator.isLoading || coordinator.isBuffering {
-                    ProgressView().tint(.white).controlSize(.large)
-                        .padding(18).background(.black.opacity(0.35), in: .circle)
-                        .allowsHitTesting(false)
-                }
+                PlayerWaitingFeedback(isLoading: coordinator.isLoading, isBuffering: coordinator.isBuffering,
+                                      wantsPlayback: coordinator.wantsPlayback, hasError: coordinator.errorMessage != nil)
                 if let error = coordinator.errorMessage {
                     VStack(spacing: 10) {
                         Label(appPrompt("播放遇到问题"), systemImage: "exclamationmark.triangle")
@@ -73,7 +71,7 @@ struct InlineNativePlayer: View {
                     Color.black.opacity(0.3).contentShape(Rectangle())
                         .onTapGesture { closePanel() }
                         .accessibilityHidden(true)
-                    inlinePanel(panel, size: geometry.size)
+                    inlinePanel(panel, size: geometry.size, insets: controlInsets)
                         .accessibilityAddTraits(.isModal)
                 }
             }
@@ -83,11 +81,31 @@ struct InlineNativePlayer: View {
                 if coordinator.presentation == nil { coordinator.presentation = NativePlaybackPresentation(coordinator: coordinator) }
                 presentation = coordinator.presentation
                 coordinator.presentation?.setControlsVisible(controlsVisible)
+                controlPressed = false
                 scheduleHide()
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inline-player")
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.space, .leftArrow, .rightArrow, .escape]) { key in
+            guard scenePhase == .active else { return .ignored }
+            if key.key == .escape {
+                if panel != nil { closePanel(); return .handled }
+                if isExpanded { onToggleExpanded(); return .handled }
+                return .ignored
+            }
+            guard panel == nil else { return .ignored }
+            if key.key == .space { coordinator.togglePlayback(); revealControls() }
+            else {
+                let delta = key.key == .leftArrow ? -15.0 : 15.0
+                coordinator.skip(delta)
+                showFeedback(delta < 0 ? "后退 15 秒" : "前进 15 秒")
+                revealControls()
+            }
+            return .handled
+        }
         .onChange(of: coordinator.wantsPlayback) { _, requested in
             if !requested { revealControls() }
             else { scheduleHide() }
@@ -95,11 +113,24 @@ struct InlineNativePlayer: View {
         .onChange(of: controlsVisible) { _, visible in presentation?.setControlsVisible(visible || voiceOver) }
         .onChange(of: voiceOver) { _, _ in revealControls() }
         .onChange(of: coordinator.backgroundPlayback) { _, _ in presentation?.refreshBackgroundConfiguration() }
+        .onChange(of: coordinator.isLoading || coordinator.isBuffering) { _, waiting in
+            if waiting { revealControls() }
+            else { scheduleHide() }
+        }
+        .onChange(of: coordinator.isSeeking) { _, seeking in
+            if seeking { holdingSpeed = false; revealControls() }
+            else { scheduleHide() }
+        }
+        .onChange(of: coordinator.errorMessage) { _, error in
+            if error != nil { revealControls() }
+            else { scheduleHide() }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { revealControls() }
             else {
                 hideTask?.cancel()
                 resetScrubbing()
+                holdingSpeed = false
                 coordinator.endTemporaryRate()
             }
         }
@@ -114,6 +145,7 @@ struct InlineNativePlayer: View {
         }
         .onChange(of: coordinator.currentPart?.id) { _, _ in
             resetScrubbing()
+            holdingSpeed = false
             coordinator.endTemporaryRate()
             revealControls()
         }
@@ -121,6 +153,9 @@ struct InlineNativePlayer: View {
         .onDisappear {
             hideTask?.cancel()
             noticeTask?.cancel()
+            feedback = nil
+            controlPressed = false
+            holdingSpeed = false
             resetScrubbing()
             coordinator.endTemporaryRate()
             coordinator.flushProgress()
@@ -129,58 +164,48 @@ struct InlineNativePlayer: View {
         .accessibilityAction(named: Text("后退十五秒")) { coordinator.skip(-15) }
     }
 
-    private func gestureSurface(width: CGFloat) -> some View {
-        let supportsSkipping = controlsVisible || voiceOver
-        return Color.clear
-            .contentShape(Rectangle())
-            .gesture(
-                // When hidden, reveal immediately instead of waiting for the
-                // double-tap timeout before the transport buttons can be hit.
-                SpatialTapGesture(count: supportsSkipping ? 2 : 1)
-                    .exclusively(before: SpatialTapGesture(count: 1))
-                    .onEnded { result in
-                        switch result {
-                        case .first(let value):
-                            guard supportsSkipping else {
-                                revealControls()
-                                return
-                            }
-                            let delta = value.location.x < width / 2 ? -15.0 : 15.0
-                            coordinator.skip(delta)
-                            showFeedback(delta < 0 ? "后退 15 秒" : "前进 15 秒")
-                            scheduleHide()
-                        case .second:
-                            if controlsVisible && !voiceOver { setControlsVisible(false) }
-                            else { revealControls() }
-                        }
+    private func gestureSurface(width: CGFloat, bounds: CGRect) -> some View {
+        PlayerGestureSurface(activeBounds: bounds, controlsVisible: controlsVisible || voiceOver,
+            isEnabled: panel == nil && scenePhase == .active && !controlPressed &&
+                !scrubbing.isSliderEditing && !routePickerPresented,
+            onReveal: { revealControls() },
+            onToggleControls: {
+                if controlsVisible && !voiceOver { setControlsVisible(false) }
+                else { revealControls() }
+            },
+            onSkip: { delta in
+                coordinator.skip(delta)
+                showFeedback(delta < 0 ? "后退 15 秒" : "前进 15 秒")
+                scheduleHide()
+            },
+            onScrub: { translation, phase in
+                switch phase {
+                case .began:
+                    guard !holdingSpeed, seekableDuration > 0, scenePhase == .active else { return }
+                    scrubbing.gestureStartTime = coordinator.currentTime
+                    scrubbing.seekPreview = PlayerGestureMath.scrubPosition(start: coordinator.currentTime,
+                        translation: translation, width: width, duration: coordinator.duration)
+                    hideTask?.cancel()
+                case .changed:
+                    guard let start = scrubbing.gestureStartTime else { return }
+                    scrubbing.seekPreview = PlayerGestureMath.scrubPosition(start: start,
+                        translation: translation, width: width, duration: coordinator.duration)
+                case .ended:
+                    if let start = scrubbing.gestureStartTime {
+                        coordinator.seek(to: PlayerGestureMath.scrubPosition(start: start,
+                            translation: translation, width: width, duration: coordinator.duration))
                     }
-            )
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 18)
-                    .onChanged { value in
-                        guard !holdingSpeed, seekableDuration > 0, scenePhase == .active else { return }
-                        if scrubbing.dragAxis == nil {
-                            scrubbing.dragAxis = PlayerGestureMath.dragAxis(horizontal: value.translation.width, vertical: value.translation.height)
-                        }
-                        guard scrubbing.dragAxis == .horizontal else { return }
-                        if scrubbing.gestureStartTime == nil { scrubbing.gestureStartTime = coordinator.currentTime; hideTask?.cancel() }
-                        scrubbing.seekPreview = PlayerGestureMath.scrubPosition(start: scrubbing.gestureStartTime ?? coordinator.currentTime,
-                            translation: value.translation.width, width: width, duration: coordinator.duration)
-                    }
-                    .onEnded { _ in
-                        if let preview = scrubbing.seekPreview, scrubbing.gestureStartTime != nil { coordinator.seek(to: preview) }
-                        resetScrubbing()
-                        scheduleHide()
-                    }
-            )
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.35, maximumDistance: 22)
-                    .sequenced(before: DragGesture(minimumDistance: 0))
-                    .updating($holdingSpeed) { value, state, _ in
-                        if case .second(true, _) = value, coordinator.isPlaying,
-                           scenePhase == .active, scrubbing.dragAxis == nil { state = true }
-                    }
-            )
+                    resetScrubbing()
+                    scheduleHide()
+                case .cancelled:
+                    resetScrubbing()
+                    scheduleHide()
+                }
+            },
+            onHold: { active in
+                holdingSpeed = active && coordinator.isPlaying && !coordinator.isSeeking &&
+                    scenePhase == .active && scrubbing.gestureStartTime == nil
+            })
             .accessibilityHidden(true)
     }
 
@@ -211,8 +236,15 @@ struct InlineNativePlayer: View {
                 .disabled(presentation?.canStartPictureInPicture != true && !coordinator.isPictureInPictureActive)
                 .opacity(presentation?.canStartPictureInPicture == true || coordinator.isPictureInPictureActive ? 1 : 0.4)
                 .accessibilityLabel(coordinator.isPictureInPictureActive ? "退出画中画" : "画中画")
-                NativeAirPlayButton(tint: .white).frame(width: 44, height: 44).accessibilityLabel("AirPlay 输出")
-                moreMenu.frame(width: 44, height: 44)
+                NativeAirPlayButton(tint: .white, onPresent: {
+                    routePickerPresented = true
+                    hideTask?.cancel()
+                }, onDismiss: {
+                    routePickerPresented = false
+                    revealControls()
+                }).frame(width: 44, height: 44).accessibilityLabel("AirPlay 输出")
+                controlButton("更多播放选项", symbol: "ellipsis") { openPanel(.settings) }
+                    .accessibilityIdentifier("player-settings")
             }
             .padding(.horizontal, max(8, max(insets.leading, insets.trailing)))
             .padding(.top, max(0, insets.top))
@@ -238,10 +270,10 @@ struct InlineNativePlayer: View {
                             scheduleHide()
                         }
                     }
-                    // The same choices remain in More when the overlay cannot
-                    // fit them without shrinking the clock or transport targets.
-                    if size.width >= (isExpanded ? 390 : 350) && !dynamicTypeSize.isAccessibilitySize { rateMenu }
-                    if size.width >= (isExpanded ? 600 : 430) && dynamicTypeSize <= .xxxLarge { qualityMenu }
+                    // Optional controls yield to the clock and 44pt transport
+                    // buttons; their choices stay available in the same panel.
+                    if size.width >= (isExpanded ? 390 : 350) && !dynamicTypeSize.isAccessibilitySize { rateButton }
+                    if size.width >= (isExpanded ? 600 : 430) && dynamicTypeSize <= .xxxLarge { qualityButton }
                     controlButton(isExpanded ? "退出全屏" : "展开播放器", symbol: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
                         coordinator.endTemporaryRate()
                         onToggleExpanded()
@@ -256,155 +288,196 @@ struct InlineNativePlayer: View {
             }
         }
         .foregroundStyle(.white)
-        .buttonStyle(PlayerOverlayButtonStyle { hideTask?.cancel() })
+        .buttonStyle(PlayerOverlayButtonStyle { pressed in
+            controlPressed = pressed
+            if pressed { hideTask?.cancel() }
+            else { scheduleHide() }
+        })
         .font(.system(size: 17, weight: .medium))
     }
 
-    private var rateMenu: some View {
-        Menu {
-            rateChoices
-        } label: {
+    private var rateButton: some View {
+        Button { openPanel(.speed) } label: {
             Text("\(Double(coordinator.preferredRate).formatted())×")
                 .font(.subheadline.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }.accessibilityLabel("播放速度")
-            .simultaneousGesture(TapGesture().onEnded { hideTask?.cancel() })
+            .accessibilityIdentifier("player-speed")
     }
 
-    private var rateChoices: some View {
-        ForEach([0.5, 0.75, 1, 1.25, 1.5, 2.0], id: \.self) { rate in
-            selectedMenuButton("\(rate.formatted())×", selected: abs(Double(coordinator.preferredRate) - rate) < 0.01) {
-                coordinator.setRate(Float(rate)); revealControls()
-            }
-        }
-    }
-
-    private var qualityMenu: some View {
-        Menu {
-            qualityChoices
-        } label: {
+    private var qualityButton: some View {
+        Button { openPanel(.quality) } label: {
             Text(coordinator.currentVariant?.height.map { "\($0)p" } ?? "原画")
                 .font(.caption.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }.accessibilityLabel("分辨率与音轨")
-            .simultaneousGesture(TapGesture().onEnded { hideTask?.cancel() })
+    }
+
+    private var speedChoices: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8),
+                                count: dynamicTypeSize.isAccessibilitySize ? 2 : 3), spacing: 8) {
+            ForEach([0.5, 0.75, 1, 1.25, 1.5, 2.0], id: \.self) { rate in
+                let selected = abs(Double(coordinator.preferredRate) - rate) < 0.01
+                Button {
+                    coordinator.setRate(Float(rate))
+                    closePanel()
+                    showFeedback("已切换为 \(rate.formatted())×")
+                } label: {
+                    Text("\(rate.formatted())×").font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(selected ? Color.cyan.opacity(0.26) : Color.white.opacity(0.09), in: .rect(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? .cyan : .clear, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("\(rate.formatted()) 倍速")
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
     }
 
     private var qualityChoices: some View {
-        ForEach(coordinator.variants) { variant in
-            Button {
-                Task { await coordinator.selectVariant(variant) }
-                revealControls()
-            } label: {
-                if coordinator.currentVariant?.id == variant.id { Label(coordinator.variantLabel(variant), systemImage: "checkmark") }
-                else { Text(coordinator.variantLabel(variant)) }
+        VStack(spacing: 0) {
+            ForEach(coordinator.variants) { variant in
+                choiceRow(coordinator.variantLabel(variant), selected: coordinator.currentVariant?.id == variant.id) {
+                    closePanel()
+                    Task { await coordinator.selectVariant(variant) }
+                }
+            }
+            if coordinator.variants.isEmpty {
+                Text(appPrompt("暂无其他画质")).font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 12)
             }
         }
     }
 
-    private var moreMenu: some View {
-        Menu {
-            Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled)
-            Menu("分辨率与音轨") { qualityChoices }
-            Menu("速度") { rateChoices }
-            Menu("字幕") {
-                subtitleChoice("跟随系统", id: "auto")
-                subtitleChoice("关闭", id: "off")
-                ForEach(coordinator.embeddedSubtitleOptions) { option in
-                    subtitleChoice(option.title, id: option.id)
-                }
-                ForEach(Array(coordinator.availableSubtitles.enumerated()), id: \.offset) { index, track in
-                    subtitleChoice(track.label, id: "sidecar:\(index)")
-                }
+    private var subtitleChoices: some View {
+        VStack(spacing: 0) {
+            subtitleChoice("跟随系统", id: "auto")
+            subtitleChoice("关闭", id: "off")
+            ForEach(coordinator.embeddedSubtitleOptions) { option in subtitleChoice(option.title, id: option.id) }
+            ForEach(Array(coordinator.availableSubtitles.enumerated()), id: \.offset) { index, track in
+                subtitleChoice(track.label, id: "sidecar:\(index)")
             }
-            if !coordinator.audioOptions.isEmpty {
-                Menu("内嵌音轨") {
-                    selectedMenuButton("跟随系统", selected: coordinator.selectedAudio == "auto") {
-                        coordinator.selectAudio("auto"); revealControls()
-                    }
-                    ForEach(coordinator.audioOptions) { option in
-                        selectedMenuButton(option.title, selected: coordinator.selectedAudio == option.id) {
-                            coordinator.selectAudio(option.id); revealControls()
-                        }
-                    }
-                }
-            }
-            Toggle("填满画面", isOn: $coordinator.fitToFill)
-            Toggle("响度平衡", isOn: $coordinator.loudnessBalance)
-            Toggle("允许后台播放", isOn: $coordinator.backgroundPlayback)
-            Menu("分发节点") {
-                selectedMenuButton("自动选择", selected: coordinator.selectedRouteID.isEmpty) {
-                    Task { await coordinator.selectRoute("") }; revealControls()
-                }
-                ForEach(coordinator.session?.routes ?? []) { route in
-                    selectedMenuButton(route.name, selected: coordinator.selectedRouteID == route.id) {
-                        Task { await coordinator.selectRoute(route.id) }; revealControls()
-                    }
-                        .disabled(route.status == "unavailable")
-                }
-            }
-            Divider()
-            Button("弹幕设置", systemImage: "text.bubble") { openPanel(.danmaku) }
-            Button("播放信息", systemImage: "info.circle") { openPanel(.information) }
-        } label: {
-            Image(systemName: "ellipsis").frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }.accessibilityLabel("更多播放选项")
-            .simultaneousGesture(TapGesture().onEnded { hideTask?.cancel() })
+        }
     }
 
     private func subtitleChoice(_ title: String, id: String) -> some View {
-        selectedMenuButton(title, selected: coordinator.selectedSubtitle == id) {
+        choiceRow(title, selected: coordinator.selectedSubtitle == id) {
+            closePanel()
             Task { await coordinator.selectSubtitle(id) }
-            revealControls()
         }
     }
 
-    private func selectedMenuButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func choiceRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            if selected { Label(title, systemImage: "checkmark") }
-            else { Text(title) }
+            HStack(spacing: 12) {
+                Text(title).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                if selected { Image(systemName: "checkmark").foregroundStyle(.cyan) }
+            }.font(.subheadline).padding(.vertical, 8).frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }.accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func panelSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            content()
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var settingsContent: some View {
+        LazyVStack(alignment: .leading, spacing: 20) {
+            panelSection("播放速度") { speedChoices }
+            panelSection("画质与音轨") { qualityChoices }
+            panelSection("字幕") { subtitleChoices }
+            if !coordinator.audioOptions.isEmpty {
+                panelSection("声音") {
+                    choiceRow("跟随系统", selected: coordinator.selectedAudio == "auto") {
+                        coordinator.selectAudio("auto"); closePanel()
+                    }
+                    ForEach(coordinator.audioOptions) { option in
+                        choiceRow(option.title, selected: coordinator.selectedAudio == option.id) {
+                            coordinator.selectAudio(option.id); closePanel()
+                        }
+                    }
+                }
+            }
+            panelSection("画面与播放") {
+                Toggle("填满画面", isOn: $coordinator.fitToFill).frame(minHeight: 44)
+                Toggle("响度平衡", isOn: $coordinator.loudnessBalance).frame(minHeight: 44)
+                Toggle("允许后台播放", isOn: $coordinator.backgroundPlayback).frame(minHeight: 44)
+            }
+            panelSection("弹幕") {
+                Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled).frame(minHeight: 44)
+                if coordinator.danmakuEnabled {
+                    Text("透明度 \(Int(coordinator.danmakuOpacity * 100))%").font(.subheadline)
+                    Slider(value: $coordinator.danmakuOpacity, in: 0.2...1).frame(minHeight: 44)
+                        .accessibilityLabel("弹幕透明度")
+                    Text("字号 \(Int(coordinator.danmakuFontSize))").font(.subheadline)
+                    Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1).frame(minHeight: 44)
+                        .accessibilityLabel("弹幕字号")
+                }
+            }
+            if !(coordinator.session?.routes.isEmpty ?? true) {
+                panelSection("分发节点") {
+                    choiceRow("自动选择", selected: coordinator.selectedRouteID.isEmpty) {
+                        closePanel(); Task { await coordinator.selectRoute("") }
+                    }
+                    ForEach(coordinator.session?.routes ?? []) { route in
+                        choiceRow(route.name, selected: coordinator.selectedRouteID == route.id) {
+                            closePanel(); Task { await coordinator.selectRoute(route.id) }
+                        }.disabled(route.status == "unavailable")
+                    }
+                }
+            }
+            panelSection("播放信息") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(coordinator.sourceFeatures.joined(separator: " · ")).fontWeight(.medium)
+                    Text(coordinator.deliveryDescription)
+                    Text(coordinator.outputRoute)
+                    Text(coordinator.renderingStatus)
+                    if let message = coordinator.progressWarning ?? coordinator.ancillaryWarning ?? coordinator.statusMessage {
+                        Text(appPrompt(message))
+                    }
+                }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
         }
     }
 
-    private func inlinePanel(_ panel: PlayerInlinePanel, size: CGSize) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(panel == .danmaku ? "弹幕设置" : "播放信息").font(.headline)
-                Spacer()
-                Button("关闭", systemImage: "xmark") { closePanel() }
-                    .labelStyle(.iconOnly).frame(width: 44, height: 44)
-            }
+    private func inlinePanel(_ panel: PlayerInlinePanel, size: CGSize, insets: EdgeInsets) -> some View {
+        let geometry = PlayerPanelGeometry(size: size, insets: insets,
+                                           preferredHeight: panel == .speed && !dynamicTypeSize.isAccessibilitySize ? 188 : 420)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(panel.title).font(.headline).lineLimit(1)
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 0)
+                controlButton("关闭", symbol: "xmark") { closePanel() }
+                    .accessibilityIdentifier("player-panel-close")
+            }.frame(height: 44)
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if panel == .danmaku {
-                        Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled)
-                        Text("透明度 \(Int(coordinator.danmakuOpacity * 100))%")
-                        Slider(value: $coordinator.danmakuOpacity, in: 0.2...1)
-                            .accessibilityLabel("弹幕透明度")
-                        Text("字号 \(Int(coordinator.danmakuFontSize))")
-                        Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1)
-                            .accessibilityLabel("弹幕字号")
-                    } else {
-                        Text(coordinator.sourceFeatures.joined(separator: " · ")).fontWeight(.medium)
-                        Text(coordinator.deliveryDescription)
-                        Text(coordinator.outputRoute)
-                        Text(coordinator.renderingStatus)
-                        Text(appPrompt("原档标签描述媒体格式，实际 HDR 与空间音频输出由设备和输出路线决定。"))
-                        Text(appPrompt("独立字幕和弹幕仅显示在 App 画面中；PiP 与 AirPlay 只包含视频中的字幕。"))
-                        if let message = coordinator.progressWarning ?? coordinator.ancillaryWarning ?? coordinator.statusMessage {
-                            Text(appPrompt(message))
-                        }
-                        if let error = coordinator.errorMessage { Text(appPrompt(error)) }
+                Group {
+                    switch panel {
+                    case .speed: speedChoices
+                    case .quality: qualityChoices
+                    case .settings: settingsContent
                     }
-                }.font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
-            }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.scrollBounceBehavior(.basedOnSize)
         }
-        .padding(16)
-        .frame(width: min(340, max(0, size.width - 28)), height: min(300, max(0, size.height - 24)))
-        .background(.regularMaterial, in: .rect(cornerRadius: 18))
-        .environment(\.colorScheme, .dark)
         .padding(12)
+        .frame(width: geometry.panelSize.width, height: geometry.panelSize.height)
+        .background(.regularMaterial, in: .rect(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.1), lineWidth: 1))
+        .foregroundStyle(.white).tint(.cyan).buttonStyle(.plain)
+        .environment(\.colorScheme, .dark)
+        .padding(.leading, geometry.insets.leading).padding(.trailing, geometry.insets.trailing)
+        .padding(.top, geometry.insets.top).padding(.bottom, geometry.insets.bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player-options-panel")
+        .accessibilityAction(.escape) { closePanel() }
     }
 
     private func controlButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
@@ -417,8 +490,10 @@ struct InlineNativePlayer: View {
     private func openPanel(_ value: PlayerInlinePanel) {
         hideTask?.cancel()
         resetScrubbing()
+        holdingSpeed = false
         coordinator.endTemporaryRate()
         panel = value
+        setControlsVisible(true)
     }
     private func closePanel() { panel = nil; revealControls() }
     private func resetScrubbing() { scrubbing.reset() }
@@ -434,20 +509,32 @@ struct InlineNativePlayer: View {
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { controlsVisible = value }
     }
     private func revealControls() { setControlsVisible(true); scheduleHide() }
+    private var permitsAutoHide: Bool {
+        scenePhase == .active && controlsVisible && coordinator.wantsPlayback && coordinator.errorMessage == nil &&
+        !coordinator.isLoading && !coordinator.isBuffering && !coordinator.isSeeking && !voiceOver && !holdingSpeed &&
+        !controlPressed && !routePickerPresented && !scrubbing.isSliderEditing && scrubbing.gestureStartTime == nil && panel == nil
+    }
     private func scheduleHide() {
         hideTask?.cancel()
-        guard scenePhase == .active, coordinator.wantsPlayback, coordinator.errorMessage == nil,
-              !voiceOver, !holdingSpeed, !scrubbing.isSliderEditing, scrubbing.gestureStartTime == nil, panel == nil else { return }
+        guard permitsAutoHide else { return }
         hideTask = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(3.5)) } catch { return }
-            guard scenePhase == .active, coordinator.wantsPlayback, coordinator.errorMessage == nil,
-                  !voiceOver, !holdingSpeed, !scrubbing.isSliderEditing, panel == nil else { return }
+            guard permitsAutoHide else { return }
             setControlsVisible(false)
         }
     }
 }
 
-private enum PlayerInlinePanel { case danmaku, information }
+private enum PlayerInlinePanel {
+    case speed, quality, settings
+    var title: String {
+        switch self {
+        case .speed: "播放速度"
+        case .quality: "画质与音轨"
+        case .settings: "播放设置"
+        }
+    }
+}
 
 /// Preview changes belong to the progress/HUD views, not the video, controls or
 /// open menus. Scrubbing still issues exactly one media seek when released.
@@ -455,13 +542,11 @@ private enum PlayerInlinePanel { case danmaku, information }
 private final class PlayerScrubbingState {
     var seekPreview: Double?
     var gestureStartTime: Double?
-    var dragAxis: PlayerGestureMath.DragAxis?
     var isSliderEditing = false
 
     func reset() {
         seekPreview = nil
         gestureStartTime = nil
-        dragAxis = nil
         isSliderEditing = false
     }
 }
@@ -471,34 +556,26 @@ private struct PlayerProgressSlider: View {
     let scrubbing: PlayerScrubbingState
     let onInteractionBegan: () -> Void
     let onInteractionEnded: () -> Void
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
     private var duration: Double { coordinator.duration.isFinite ? max(0, coordinator.duration) : 0 }
-    private var displayedTime: Double {
-        PlayerGestureMath.clampedTime(scrubbing.seekPreview ?? coordinator.currentTime, duration: duration)
-    }
-
-    var body: some View {
-        Slider(value: Binding(get: { displayedTime }, set: { value in
-            if voiceOver { coordinator.seek(to: value); scrubbing.seekPreview = nil }
-            else { scrubbing.seekPreview = value }
-        }), in: 0...max(0.01, duration)) { editing in
-            scrubbing.isSliderEditing = editing
-            if editing {
-                scrubbing.seekPreview = coordinator.currentTime
-                onInteractionBegan()
-            } else {
-                if let preview = scrubbing.seekPreview { coordinator.seek(to: preview) }
-                scrubbing.seekPreview = nil
-                onInteractionEnded()
-            }
+    private var position: Double {
+        // The native thumb owns its own drag. A picture pan instead previews
+        // through this input, without replacing the slider's cancellation clock.
+        if !scrubbing.isSliderEditing, scrubbing.gestureStartTime != nil {
+            return scrubbing.seekPreview ?? coordinator.currentTime
         }
-        .tint(.cyan)
-        .disabled(duration <= 0)
-        .accessibilityLabel("播放进度")
-        .accessibilityValue("\(PlayerGestureMath.timeLabel(displayedTime))，共 \(PlayerGestureMath.timeLabel(duration))")
-        .accessibilityIdentifier("player-progress")
-        .frame(minHeight: 44)
+        return coordinator.currentTime
+    }
+    var body: some View {
+        PlayerSeekBar(value: position, duration: duration, bufferedTime: coordinator.bufferedTime,
+                      mediaID: coordinator.currentPart?.id ?? coordinator.currentVideo?.id,
+                      onPreview: { scrubbing.seekPreview = $0 },
+                      onEditingChanged: { editing in
+                          scrubbing.isSliderEditing = editing
+                          if editing { onInteractionBegan() }
+                          else { scrubbing.seekPreview = nil; onInteractionEnded() }
+                      }, onCommit: { coordinator.seek(to: $0) })
+            .frame(height: 44)
     }
 }
 
@@ -577,14 +654,14 @@ private struct PlayerInteractionFeedback: View {
 /// Pressing a transport control owns that touch until release. In particular,
 /// the auto-hide timer must not remove a button while the finger is still down.
 private struct PlayerOverlayButtonStyle: ButtonStyle {
-    let onPress: () -> Void
+    let onPressChanged: (Bool) -> Void
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .contentShape(Rectangle())
             .opacity(configuration.isPressed ? 0.6 : 1)
             .onChange(of: configuration.isPressed) { _, pressed in
-                if pressed { onPress() }
+                onPressChanged(pressed)
             }
     }
 }

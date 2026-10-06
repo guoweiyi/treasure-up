@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		020EF17F887D323A5B32BFD6 /* AdminMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4118406527BF647E4B9852 /* AdminMaintenance.swift */; };
+		06433F29A94490BF20778130 /* PlayerGestureSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89F9B4C6129583BA74D2F131 /* PlayerGestureSurface.swift */; };
 		08D76554A40018B28FE491D3 /* VideoPageLifetime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BCF8EE7575A93CA83E2AA67 /* VideoPageLifetime.swift */; };
 		0A250EAB1214726F25D06117 /* SessionCookieVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC36E461E30CEC302566F4E3 /* SessionCookieVault.swift */; };
 		0BFFD73E0595766D7E862CD1 /* PlayerControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A373D29FE2A013920CC377E /* PlayerControls.swift */; };
@@ -29,14 +30,17 @@
 		6FC3BC301B7F27C478366D67 /* VideoPageLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CF691EBAA548DC10B42595 /* VideoPageLifetimeTests.swift */; };
 		7097CFF18E0C17D4EAFB3485 /* FullscreenPlayerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D0490E9F759FD0A8B035B33 /* FullscreenPlayerTests.swift */; };
 		848638D66AB1220B8F6F26CA /* OfflinePlayerUITestFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = F53BBCE1D93D0AFBE8B65173 /* OfflinePlayerUITestFixture.swift */; };
+		8B884E1482E6392B87B5DC53 /* PlayerControlsState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */; };
 		8DFE74BF5FBB3C22C08DCC13 /* VideoCommentsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF15A04D85A795AA725CB043 /* VideoCommentsSection.swift */; };
 		8F8B3263AA8CF02D19006285 /* TreasureUpApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */; };
 		939BA262B351B4E9E7F2769F /* PromptText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C292CB4217994CFB56A14B1 /* PromptText.swift */; };
+		96A4E20FD13E5E767DE9CB4C /* PlayerSeekBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 093E2A40D0F44EEA0508C121 /* PlayerSeekBar.swift */; };
 		9F0123BDAB6AA9D23043F68A /* PromptTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 164DBBD7F5A3D599F9193275 /* PromptTextTests.swift */; };
 		A17A51C283B9FDB2D815C99F /* CoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99D08916B4C68FE268D7A5D /* CoreTests.swift */; };
 		A93AD24D9C20E1D4E2A61A87 /* AdminEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */; };
 		B5ED8B8EC988438F6724AA65 /* AdminSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7D8D33202B91CB285E1E70A /* AdminSettings.swift */; };
 		B9929BBD442B1955C268E2FB /* SavedPlaylistsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */; };
+		BC88967D74F30C2D8FFC5E64 /* PlayerNativeInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F71A0287A1369510ECA005 /* PlayerNativeInteractionTests.swift */; };
 		BE22C0B378D0FA727A5C633E /* PlaybackRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */; };
 		BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */; };
 		C6F2CD5F02BAC5ECC221F94C /* AdminSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55F1B7BE3013F9A938AFA4A /* AdminSupport.swift */; };
@@ -70,6 +74,7 @@
 
 /* Begin PBXFileReference section */
 		062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSmokeTests.swift; sourceTree = "<group>"; };
+		093E2A40D0F44EEA0508C121 /* PlayerSeekBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerSeekBar.swift; sourceTree = "<group>"; };
 		1083D7D0490215656759582E /* AdminLists.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminLists.swift; sourceTree = "<group>"; };
 		12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminEditor.swift; sourceTree = "<group>"; };
 		164DBBD7F5A3D599F9193275 /* PromptTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptTextTests.swift; sourceTree = "<group>"; };
@@ -79,16 +84,19 @@
 		1D4118406527BF647E4B9852 /* AdminMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminMaintenance.swift; sourceTree = "<group>"; };
 		27BBA1DC5334F016CE85D79D /* AdminIntegrations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminIntegrations.swift; sourceTree = "<group>"; };
 		2842D50C134401B327F19407 /* VideoLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoLibraryView.swift; sourceTree = "<group>"; };
+		29F71A0287A1369510ECA005 /* PlayerNativeInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerNativeInteractionTests.swift; sourceTree = "<group>"; };
 		2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreasureUpApp.swift; sourceTree = "<group>"; };
 		3C292CB4217994CFB56A14B1 /* PromptText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptText.swift; sourceTree = "<group>"; };
 		4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueSection.swift; sourceTree = "<group>"; };
 		4C313386880949F2564EBF49 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControlsState.swift; sourceTree = "<group>"; };
 		50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedPlaylistsView.swift; sourceTree = "<group>"; };
 		5B69416559B2B7301A186E06 /* TreasureUpUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TreasureUpUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5D0490E9F759FD0A8B035B33 /* FullscreenPlayerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenPlayerTests.swift; sourceTree = "<group>"; };
 		6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackRecovery.swift; sourceTree = "<group>"; };
 		7149DAC177494013BE160477 /* VideoDetailViewportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDetailViewportTests.swift; sourceTree = "<group>"; };
 		75C82F42FB25F757AB436C02 /* PlaybackCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackCoordinator.swift; sourceTree = "<group>"; };
+		89F9B4C6129583BA74D2F131 /* PlayerGestureSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerGestureSurface.swift; sourceTree = "<group>"; };
 		8A373D29FE2A013920CC377E /* PlayerControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControls.swift; sourceTree = "<group>"; };
 		8AFB945A035F68273F530841 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		8D9C0BB24661158CB314E7CE /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
@@ -161,6 +169,9 @@
 				6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */,
 				DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */,
 				8A373D29FE2A013920CC377E /* PlayerControls.swift */,
+				4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */,
+				89F9B4C6129583BA74D2F131 /* PlayerGestureSurface.swift */,
+				093E2A40D0F44EEA0508C121 /* PlayerSeekBar.swift */,
 				1BCF8EE7575A93CA83E2AA67 /* VideoPageLifetime.swift */,
 			);
 			path = Playback;
@@ -189,6 +200,7 @@
 				B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */,
 				A9DF7300701A329C819838D6 /* PlaybackTests.swift */,
 				D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */,
+				29F71A0287A1369510ECA005 /* PlayerNativeInteractionTests.swift */,
 				164DBBD7F5A3D599F9193275 /* PromptTextTests.swift */,
 				7149DAC177494013BE160477 /* VideoDetailViewportTests.swift */,
 				19CF691EBAA548DC10B42595 /* VideoPageLifetimeTests.swift */,
@@ -392,6 +404,9 @@
 				BE22C0B378D0FA727A5C633E /* PlaybackRecovery.swift in Sources */,
 				20A21A081DFE5596EEB0FC82 /* PlaybackTimeline.swift in Sources */,
 				0BFFD73E0595766D7E862CD1 /* PlayerControls.swift in Sources */,
+				8B884E1482E6392B87B5DC53 /* PlayerControlsState.swift in Sources */,
+				06433F29A94490BF20778130 /* PlayerGestureSurface.swift in Sources */,
+				96A4E20FD13E5E767DE9CB4C /* PlayerSeekBar.swift in Sources */,
 				939BA262B351B4E9E7F2769F /* PromptText.swift in Sources */,
 				B9929BBD442B1955C268E2FB /* SavedPlaylistsView.swift in Sources */,
 				0A250EAB1214726F25D06117 /* SessionCookieVault.swift in Sources */,
@@ -416,6 +431,7 @@
 				BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */,
 				CF038D291F8DB5C416396298 /* PlaybackTests.swift in Sources */,
 				14BA7969250D795FF5E60FF6 /* PlayerControlsTests.swift in Sources */,
+				BC88967D74F30C2D8FFC5E64 /* PlayerNativeInteractionTests.swift in Sources */,
 				9F0123BDAB6AA9D23043F68A /* PromptTextTests.swift in Sources */,
 				2B69DED3044FFE04E3387BB7 /* VideoDetailViewportTests.swift in Sources */,
 				6FC3BC301B7F27C478366D67 /* VideoPageLifetimeTests.swift in Sources */,
@@ -482,7 +498,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -501,7 +517,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.4.1;
+				MARKETING_VERSION = 0.4.2;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -550,7 +566,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -563,7 +579,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.4.1;
+				MARKETING_VERSION = 0.4.2;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
