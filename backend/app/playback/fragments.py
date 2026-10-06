@@ -57,7 +57,13 @@ def segment_mux_options(folder, *, segment_seconds, movie_timescale):
     # One-packet lookahead supplies the exact decode interval. Explicit PTS/DTS
     # expressions are essential: setts' default TS would erase B-frame CTS.
     duration = r"setts=pts=PTS:dts=DTS:duration=if(gt(NEXT_DTS\,DTS)\,NEXT_DTS-DTS\,DURATION)"
-    return ["-bsf:v", duration, "-f", "segment", "-segment_time", str(segment_seconds), "-reference_stream", "v:0",
+    # segment.c rounds its reference-stream start to AV_TIME_BASE (microseconds).
+    # Negative-DTS/audio-priming shifts can leave the next exact GOP boundary a
+    # fraction of a microsecond before that rounded target. With zero tolerance
+    # it skips a whole GOP. This only relaxes keyframe selection, never changes
+    # packet timestamps, packet bytes, or allows cuts on non-keyframes.
+    return ["-bsf:v", duration, "-f", "segment", "-segment_time", str(segment_seconds),
+        "-segment_time_delta", "0.000001", "-reference_stream", "v:0",
         "-reset_timestamps", "0", "-individual_header_trailer", "0", "-segment_format", "mp4",
         "-segment_format_options", "movflags=+frag_keyframe+delay_moov+default_base_moof+write_colr:"
         f"frag_duration=1000000:strict=unofficial:movie_timescale={movie_timescale}",

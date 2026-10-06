@@ -5,6 +5,8 @@ are still needed to test actual JOC and Dolby Vision payloads.
 """
 import shutil
 import subprocess
+import json
+from fractions import Fraction
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,6 +18,20 @@ from app.playback.hls import load_hls_index, package_variant, packet_digest
 from app.playback.tools import probe_media
 from app.storage.base import file_digest
 from app.storage.service import ingest_file, materialize_asset
+
+
+def packet_timeline(path):
+    result = subprocess.run([str(settings.ffprobe_path), "-v", "error", "-show_packets", "-show_streams",
+        "-show_data_hash", "sha256", "-of", "json", str(path)], check=True, capture_output=True, timeout=60)
+    data = json.loads(result.stdout)
+    streams = {stream["index"]: stream for stream in data["streams"]}
+    rows = {}
+    for packet in data["packets"]:
+        stream = streams[packet["stream_index"]]
+        scale = Fraction(stream["time_base"])
+        rows.setdefault(stream["codec_type"], []).append((packet["data_hash"],
+            int(packet["pts"]) * scale, int(packet["dts"]) * scale, packet["flags"]))
+    return rows
 
 
 @pytest.mark.skipif(not shutil.which(str(settings.ffmpeg_path)) or not shutil.which(str(settings.ffprobe_path)),
@@ -57,6 +73,9 @@ def test_real_codec_matrix_preserves_packets_and_reuses_complete_package(tmp_pat
         assert video_stream["color_transfer"] == "smpte2084"
         assert video_stream["color_primaries"] == "bt2020"
     duration = float(source_probe["format"]["duration"])
+    source_timeline = packet_timeline(source)
+    # The actual fixture, not just -g, must contain the two-second split point.
+    assert [packet[1] for packet in source_timeline["video"] if "K" in packet[3]] == [0, 2]
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     try:
@@ -83,6 +102,25 @@ def test_real_codec_matrix_preserves_packets_and_reuses_complete_package(tmp_pat
             playlist.write_text("\n".join([*lines, "#EXT-X-ENDLIST", ""]), encoding="utf-8")
             for kind in (["video", "audio"] if audio else ["video"]):
                 assert packet_digest(source, kind) == packet_digest(playlist, kind)
+            delivered_timeline = packet_timeline(playlist)
+            offsets = []
+            for kind, packets in source_timeline.items():
+                actual = delivered_timeline[kind]
+                assert [packet[0] for packet in packets] == [packet[0] for packet in actual]
+                pts_offsets = {right[1] - left[1] for left, right in zip(packets, actual)}
+                dts_offsets = {right[2] - left[2] for left, right in zip(packets, actual)}
+                assert pts_offsets == dts_offsets and len(pts_offsets) == 1
+                offsets.extend(pts_offsets)
+            # FFmpeg rounds a shared negative-DTS shift to each track clock.
+            # Every packet's PTS/DTS delta stays exact within its track; only
+            # that one-time cross-clock rounding may differ by one track tick.
+            max_tick = max(Fraction(stream["time_base"]) for stream in source_probe["streams"])
+            assert max(offsets) - min(offsets) <= max_tick
+            for position in range(len(index["segments"])):
+                independent = folder / "independent.mp4"
+                independent.write_bytes((folder / "init.mp4").read_bytes() +
+                                        (folder / f"segment_{position}.m4s").read_bytes())
+                assert "K" in packet_timeline(independent)["video"][0][3]
             delivered = probe_media(playlist)
             delivered_video = next(s for s in delivered["streams"] if s["codec_type"] == "video")
             assert delivered_video["codec_name"] == codec
