@@ -229,7 +229,17 @@ final class OfflinePlayerInteractionTests: XCTestCase {
     private func setPlaying(_ playing: Bool, in app: XCUIApplication) {
         let state = app.staticTexts["offline-player-state"]
         let expected = playing ? "playing" : "paused"
-        if state.label != expected { control("player-play-pause", in: app).tap() }
+        if state.label != expected {
+            if !playing && state.label == "playing" {
+                // The last AX check may be near the normal 3.5-second hide
+                // deadline. Let that window finish, then control() reveals
+                // once immediately before this pause tap. No tap retries.
+                wait("Playing controls must finish normal auto-hide before pausing", timeout: 8) {
+                    !app.buttons["player-play-pause"].exists
+                }
+            }
+            control("player-play-pause", in: app).tap()
+        }
         wait("Actual AVPlayer must become \(expected)") { state.label == expected }
         XCTAssertEqual(control("player-play-pause", in: app).label, playing ? "暂停" : "播放")
     }
@@ -240,11 +250,15 @@ final class OfflinePlayerInteractionTests: XCTestCase {
         let fullscreen = app.otherElements["fullscreen-player"].firstMatch
         let player = fullscreen.exists ? fullscreen : app.otherElements["inline-player"].firstMatch
         XCTAssertTrue(player.waitForExistence(timeout: 5))
-        player.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let frame = fullscreen.exists ? fullscreen.frame : pictureFrame(in: app)
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.midX, dy: frame.minY + frame.height * 0.42)).tap()
+        var revealed: XCUIElement?
         wait("Player control \(identifier) must be hittable") {
-            matches.allElementsBoundByIndex.contains(where: { $0.isHittable })
+            revealed = matches.allElementsBoundByIndex.first(where: { $0.isHittable })
+            return revealed != nil
         }
-        return matches.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? matches.firstMatch
+        return revealed ?? matches.firstMatch
     }
 
     private func wait(_ message: String, timeout: TimeInterval = 10, condition: @escaping () -> Bool) {
