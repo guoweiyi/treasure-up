@@ -173,7 +173,6 @@ private struct ArchivedCommentBody: View {
     @State private var photo: CommentPhoto?
     @State private var expandedText = false
     private var content: String { comment["content"]?.stringValue ?? "" }
-    private var targetPart: VideoPart? { ArchivedCommentTimeline.part(content, parts: parts, currentPartID: currentPartID) }
     var body: some View {
         HStack(alignment: .top, spacing: compact ? 8 : 12) {
             Artwork(path: comment["author"]?["avatar_url"]?.stringValue, symbol: "person.fill")
@@ -194,12 +193,12 @@ private struct ArchivedCommentBody: View {
                             .background(.quaternary, in: .rect(cornerRadius: 3))
                     }
                 }
-                Text(ArchivedCommentTimeline.attributed(expandedText ? content : ArchivedCommentTimeline.preview(content), part: targetPart))
+                Text(ArchivedCommentTimeline.attributed(expandedText ? content : ArchivedCommentTimeline.preview(content), parts: parts, currentPartID: currentPartID))
                     .font(compact ? .subheadline : .body)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     .environment(\.openURL, OpenURLAction { url in
-                        guard let part = targetPart, let seconds = ArchivedCommentTimeline.seconds(url, duration: part.duration), let onSeek else { return .discarded }
-                        onSeek(part, seconds)
+                        guard let target = ArchivedCommentTimeline.target(url, parts: parts), let onSeek else { return .discarded }
+                        onSeek(target.part, target.seconds)
                         return .handled
                     })
                 if ArchivedCommentTimeline.preview(content) != content {
@@ -245,20 +244,22 @@ enum ArchivedCommentTimeline {
         return content
     }
 
-    static func part(_ content: String, parts: [VideoPart], currentPartID: String?) -> VideoPart? {
-        let regex = try? NSRegularExpression(pattern: #"^\s*(?:part|p)\s*([1-9]\d{0,3})(?!\d)"#, options: .caseInsensitive)
-        if let match = regex?.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
-           let range = Range(match.range(at: 1), in: content), let position = Int(content[range]) {
-            return parts.first { $0.position == position && !$0.variants.isEmpty }
-        }
-        return parts.first { $0.id == currentPartID && !$0.variants.isEmpty }
-    }
-
-    static func attributed(_ content: String, part: VideoPart?) -> AttributedString {
+    static func attributed(_ content: String, parts: [VideoPart], currentPartID: String?) -> AttributedString {
         var result = AttributedString(content)
-        guard let part, part.duration.isFinite, part.duration > 0,
-              let regex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9_:：/])\d{1,5}(?:[:：]\d{1,2}){1,3}(?![A-Za-z0-9_:：/])"#) else { return result }
-        for match in regex.matches(in: content, range: NSRange(content.startIndex..., in: content)) {
+        guard let regex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9_:：/])\d{1,5}(?:[:：]\d{1,2}){1,3}(?![A-Za-z0-9_:：/])"#),
+              let headingRegex = try? NSRegularExpression(pattern: #"^[^\S\r\n]*(?:part|p)[^\S\r\n]*([1-9]\d{0,3})(?!\d)"#, options: [.caseInsensitive, .anchorsMatchLines]) else { return result }
+        let fullRange = NSRange(content.startIndex..., in: content)
+        let headings = headingRegex.matches(in: content, range: fullRange)
+        var headingIndex = 0
+        var activePart = parts.first { $0.id == currentPartID && !$0.variants.isEmpty }
+        for match in regex.matches(in: content, range: fullRange) {
+            while headingIndex < headings.count && headings[headingIndex].range.location <= match.range.location {
+                if let numberRange = Range(headings[headingIndex].range(at: 1), in: content), let position = Int(content[numberRange]) {
+                    activePart = parts.first { $0.position == position && !$0.variants.isEmpty }
+                }
+                headingIndex += 1
+            }
+            guard let part = activePart, part.duration.isFinite, part.duration > 0 else { continue }
             guard let range = Range(match.range, in: content) else { continue }
             let fields = content[range].replacingOccurrences(of: "：", with: ":").split(separator: ":").compactMap { Int($0) }
             guard (2...3).contains(fields.count), fields.last! < 60, fields.count != 3 || fields[1] < 60 else { continue }
@@ -266,7 +267,10 @@ enum ArchivedCommentTimeline {
             guard Double(seconds) < part.duration,
                   let start = AttributedString.Index(range.lowerBound, within: result),
                   let end = AttributedString.Index(range.upperBound, within: result) else { continue }
-            result[start..<end].link = URL(string: "treasureup-comment://seek?seconds=\(seconds)")
+            var destination = URLComponents()
+            destination.scheme = "treasureup-comment"; destination.host = "seek"
+            destination.queryItems = [URLQueryItem(name: "part", value: part.id), URLQueryItem(name: "seconds", value: String(seconds))]
+            result[start..<end].link = destination.url
         }
         return result
     }
@@ -274,9 +278,18 @@ enum ArchivedCommentTimeline {
     static func seconds(_ url: URL, duration: Double) -> Double? {
         guard url.scheme == "treasureup-comment", url.host == "seek", duration.isFinite, duration > 0,
               let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-              query.count == 1, query[0].name == "seconds", let text = query[0].value,
+              (query.count == 1 || query.count == 2), query.allSatisfy({ ["part", "seconds"].contains($0.name) }),
+              query.filter({ $0.name == "seconds" }).count == 1, let text = query.first(where: { $0.name == "seconds" })?.value,
               let seconds = Double(text), seconds.isFinite, seconds >= 0, seconds < duration else { return nil }
         return seconds
+    }
+
+    static func target(_ url: URL, parts: [VideoPart]) -> (part: VideoPart, seconds: Double)? {
+        guard let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, query.count == 2,
+              query.filter({ $0.name == "part" }).count == 1, let id = query.first(where: { $0.name == "part" })?.value,
+              let part = parts.first(where: { $0.id == id && !$0.variants.isEmpty }),
+              let seconds = seconds(url, duration: part.duration) else { return nil }
+        return (part, seconds)
     }
 }
 

@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { commentContent, type CommentEmote, type ContentPiece } from '../utils/commentContent';
+import type { CommentEmote } from '../utils/commentContent';
 import {
   collapsedComment,
-  commentPart,
-  commentTimestamps,
+  commentDisplay,
   type CommentPlayback,
   type CommentSeek,
 } from '../utils/commentTimeline';
@@ -25,13 +24,10 @@ watch(
   },
 );
 const pieces = computed(() =>
-  commentContent(
+  commentDisplay(
     expanded.value ? props.content : preview.value.text,
     props.emotes?.filter((item) => !failed.value.has(item.asset_url)),
-  ).flatMap<ContentPiece | ReturnType<typeof commentTimestamps>[number]>((piece) =>
-    piece.kind === 'text'
-      ? commentTimestamps(piece.text, commentPart(props.content, props.playback))
-      : [piece],
+    props.playback,
   ),
 );
 function fallback(url: string) {

@@ -4,9 +4,9 @@ import ImageIO
 
 final class CoreTests: XCTestCase {
     func testCommentTimelinePreservesFullwidthTimesAndRejectsMalformedOrOutsidePart() {
-        let part = VideoPart(id: "p2", position: 2, duration: 4000)
+        let part = VideoPart(id: "p2", position: 2, duration: 4000, variants: [MediaVariant(id: "v2")])
         let content = "0：00 开始 4：02 中段 1:02:03 结尾 1:99 无效 1:60:03 无效 66:40 越界"
-        let attributed = ArchivedCommentTimeline.attributed(content, part: part)
+        let attributed = ArchivedCommentTimeline.attributed(content, parts: [part], currentPartID: "p2")
         XCTAssertEqual(String(attributed.characters), content)
         let targets = attributed.runs.compactMap { $0.link }.compactMap { ArchivedCommentTimeline.seconds($0, duration: 4000) }
         XCTAssertEqual(targets, [0, 242, 3723])
@@ -27,10 +27,32 @@ final class CoreTests: XCTestCase {
         let parts = [VideoPart(id: "p1", position: 1, duration: 300, variants: [MediaVariant(id: "v1")]),
                      VideoPart(id: "p2", position: 2, duration: 4000, variants: [MediaVariant(id: "v2")]),
                      VideoPart(id: "p3", position: 3, duration: 4000)]
-        XCTAssertEqual(ArchivedCommentTimeline.part("part2@天阙 总结\n0：00", parts: parts, currentPartID: "p1")?.id, "p2")
-        XCTAssertEqual(ArchivedCommentTimeline.part("4：02 中段", parts: parts, currentPartID: "p1")?.id, "p1")
-        XCTAssertNil(ArchivedCommentTimeline.part("P3 0:00", parts: parts, currentPartID: "p1"))
-        XCTAssertNil(ArchivedCommentTimeline.part("part4 0:00", parts: parts, currentPartID: "p1"))
+        func targets(_ content: String) -> [String] {
+            ArchivedCommentTimeline.attributed(content, parts: parts, currentPartID: "p1").runs
+                .compactMap { $0.link }.compactMap { ArchivedCommentTimeline.target($0, parts: parts)?.part.id }
+        }
+        XCTAssertEqual(targets("part2@天阙 总结\n0：00"), ["p2"])
+        XCTAssertEqual(targets(" P2 0:00"), ["p2"])
+        XCTAssertEqual(targets("4：02 中段"), ["p1"])
+        XCTAssertEqual(targets("P3 0:00"), [])
+        XCTAssertEqual(targets("part4 0:00"), [])
+    }
+
+    func testCommentTimelineMixedPartDirectoriesKeepSectionTargets() {
+        let parts = [VideoPart(id: "p1", position: 1, duration: 300, variants: [MediaVariant(id: "v1")]),
+                     VideoPart(id: "p2", position: 2, duration: 4000, variants: [MediaVariant(id: "v2")]),
+                     VideoPart(id: "p3", position: 3, duration: 4000)]
+        let content = "总结一下其他佬的传送门~\n0:15 前言\npart1@某位\n00:40 开场[笑]\n5:00 超时\npart2@天阙QAQ 总结~\n0：00不需要陪伴的闲暇[笑]4：02冲动是小天使\n40：47离去之原\nP3 0:00未归档\npart9 0:00不存在\n0:12仍无效\nP1 0:25恢复"
+        let attributed = ArchivedCommentTimeline.attributed(content, parts: parts, currentPartID: "p1")
+        XCTAssertEqual(String(attributed.characters), content)
+        let targets = attributed.runs.compactMap { $0.link }.compactMap { ArchivedCommentTimeline.target($0, parts: parts) }
+        XCTAssertEqual(targets.map { $0.part.id }, ["p1", "p1", "p2", "p2", "p2", "p1"])
+        XCTAssertEqual(targets.map { $0.seconds }, [15, 40, 0, 242, 2447, 25])
+        XCTAssertNil(ArchivedCommentTimeline.target(URL(string: "treasureup-comment://seek?part=p3&seconds=5")!, parts: parts))
+        XCTAssertNil(ArchivedCommentTimeline.target(URL(string: "treasureup-comment://seek?part=p1&seconds=300")!, parts: parts))
+        let preview = ArchivedCommentTimeline.attributed(ArchivedCommentTimeline.preview(content), parts: parts, currentPartID: "p1")
+        let previewTargets = preview.runs.compactMap { $0.link }.compactMap { ArchivedCommentTimeline.target($0, parts: parts) }
+        XCTAssertEqual(previewTargets.map { $0.part.id }, ["p1", "p1"])
     }
 
     private func isolatedDefaults() -> UserDefaults {

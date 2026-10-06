@@ -1,14 +1,35 @@
+import { commentContent, type CommentEmote, type ContentPiece } from './commentContent.ts';
+
 export type CommentPart = { id: string; position: number; duration: number; playable: boolean };
 export type CommentPlayback = { currentPartId: string; parts: CommentPart[] };
 export type CommentSeek = { partId: string; seconds: number };
 
-export function commentPart(content: string, playback?: CommentPlayback): CommentPart | undefined {
-  if (!playback) return undefined;
-  const explicit = /^\s*(?:part|p)\s*([1-9]\d{0,3})(?!\d)/i.exec(content);
-  return playback.parts.find(
-    (part) =>
-      part.playable &&
-      (explicit ? part.position === Number(explicit[1]) : part.id === playback.currentPartId),
+export function commentSections(content: string, playback?: CommentPlayback) {
+  const sections: { text: string; part?: CommentPart }[] = [];
+  let position = 0;
+  let part = playback?.parts.find((item) => item.playable && item.id === playback.currentPartId);
+  // Only a heading at a line start changes the target for the following coordinates.
+  const headings = /^[^\S\r\n]*(?:part|p)[^\S\r\n]*([1-9]\d{0,3})(?!\d)/gim;
+  for (const heading of content.matchAll(headings)) {
+    if (heading.index > position)
+      sections.push({ text: content.slice(position, heading.index), part });
+    part = playback?.parts.find((item) => item.playable && item.position === Number(heading[1]));
+    position = heading.index;
+  }
+  sections.push({ text: content.slice(position), part });
+  return sections;
+}
+
+export function commentDisplay(
+  content: string,
+  emotes: CommentEmote[] = [],
+  playback?: CommentPlayback,
+) {
+  // Keep each section's part across inline emotes; splitting text first loses this context.
+  return commentSections(content, playback).flatMap(({ text, part }) =>
+    commentContent(text, emotes).flatMap<
+      ContentPiece | ReturnType<typeof commentTimestamps>[number]
+    >((piece) => (piece.kind === 'text' ? commentTimestamps(piece.text, part) : [piece])),
   );
 }
 
