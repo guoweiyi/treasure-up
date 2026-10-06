@@ -255,12 +255,78 @@ final class CoreTests: XCTestCase {
     }
 
     @MainActor
+    func testResponseDecodingDoesNotBlockUIAndRejectsIdentityChangedDuringDecode() async throws {
+        MockURLProtocol.store.set { _ in .init(body: "{}") }
+        let client = makeClient()
+        let gate = BlockingDecodeProbe.gate
+        defer { gate.release() }
+        let pending = Task { try await client.get("/large-response") as BlockingDecodeProbe }
+        for _ in 0..<100 where !gate.hasStarted {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(gate.hasStarted)
+        XCTAssertFalse(gate.decodedOnMainThread, "A synchronous JSON decode must not occupy the UI thread")
+        // This UI-actor operation must be able to run while decoding is still
+        // suspended on the worker. Its identity change fences that old result.
+        try await client.logout()
+        gate.release()
+        do {
+            _ = try await pending.value
+            XCTFail("A response decoded after logout must not escape the identity fence")
+        } catch APIError.staleSession { }
+    }
+
+    @MainActor
+    func testCancelledDecodeDoesNotPublishACompletedPayload() async throws {
+        let pending = Task {
+            try await APIResponseDecoder.decode(Page<ArchiveVideo>.self, from: Data("{\"items\":[]}".utf8))
+        }
+        pending.cancel()
+        do {
+            _ = try await pending.value
+            XCTFail("Cancelled parsing must not publish a payload")
+        } catch is CancellationError { }
+    }
+
+    @MainActor
     private func makeClient() -> APIClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         return APIClient(baseURL: URL(string: "https://api.example.test")!,
                          defaults: isolatedDefaults(),
                          sessionConfiguration: configuration, persistSession: false)
+    }
+}
+
+private struct BlockingDecodeProbe: Decodable, Sendable {
+    static let gate = DecodeWorkerGate()
+    init(from decoder: Decoder) throws {
+        _ = try decoder.singleValueContainer().decode(JSONValue.self)
+        Self.gate.blockWorker()
+    }
+}
+
+/// A bounded barrier proves the UI actor remains usable while the synchronous
+/// decoder is busy, without depending on CPU speed or a live API response.
+private final class DecodeWorkerGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var started = false
+    private var wasMainThread = false
+    private var released = false
+    var hasStarted: Bool { lock.withLock { started } }
+    var decodedOnMainThread: Bool { lock.withLock { wasMainThread } }
+    func blockWorker() {
+        lock.withLock { started = true; wasMainThread = Thread.isMainThread }
+        _ = semaphore.wait(timeout: .now() + 5)
+    }
+    func release() {
+        let shouldSignal = lock.withLock {
+            guard !released else { return false }
+            released = true
+            return true
+        }
+        if shouldSignal { semaphore.signal() }
     }
 }
 

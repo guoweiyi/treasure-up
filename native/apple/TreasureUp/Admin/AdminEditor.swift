@@ -30,7 +30,7 @@ struct AdminEditorView: View {
     var body: some View {
         Form {
             if !error.isEmpty { Section { AdminNotice(message: error) } }
-            if loading { ProgressView("正在读取…") }
+            if loading { ProgressView(appPrompt("正在读取…")) }
             else if !loaded { Button("重新读取") { Task { await load() } } }
             else {
                 switch area {
@@ -55,7 +55,7 @@ struct AdminEditorView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(saving) }
-            ToolbarItem(placement: .confirmationAction) { Button(saving ? "正在保存…" : "保存") { Task { await save() } }.bold().disabled(saving || loading || !loaded) }
+            ToolbarItem(placement: .confirmationAction) { Button(saving ? appPrompt("正在保存…") : "保存") { Task { await save() } }.bold().disabled(saving || loading || !loaded) }
         }
         .interactiveDismissDisabled(saving)
         .task { await load() }
@@ -103,7 +103,7 @@ struct AdminEditorView: View {
                 if !original.adminText("cooldown_until").isEmpty { LabeledContent("风控冷却至", value: adminDate(original.adminText("cooldown_until"))) }
                 Button("验证已保存的账号") { Task { await action("/admin/accounts/\(id)/verify") } }.disabled(saving)
             }
-        } header: { Text("B 站采集账号") } footer: { Text("Cookie 仅传送给归档服务器用于采集。保存后清空输入，本站登录与 B 站账号相互独立。") }
+        } header: { Text("B 站采集账号") } footer: { Text(appPrompt("Cookie 仅传送给归档服务器用于采集。保存后清空输入，本站登录与 B 站账号相互独立。")) }
     }
     @ViewBuilder private var sourceFields: some View {
         Section("来源") {
@@ -124,7 +124,7 @@ struct AdminEditorView: View {
                 Button("立即增量检查") { Task { await action("/admin/sources/\(id)/scan", body: ["full": .bool(false)]) } }.disabled(saving)
                 Button("立即全量检查") { Task { await action("/admin/sources/\(id)/scan", body: ["full": .bool(true)]) } }.disabled(saving)
                 Button("查看检查历史") { history = true }
-                Text("立即检查使用服务器上已保存的策略；修改配置后请先保存。")
+                Text(appPrompt("立即检查使用服务器上已保存的策略；修改配置后请先保存。"))
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
@@ -143,7 +143,7 @@ struct AdminEditorView: View {
                 if paid.adminInt("detected_count") > 0 {
                     LabeledContent("发现充电视频", value: "\(paid.adminInt("detected_count"))")
                     LabeledContent("等待确认", value: "\(paid.adminInt("pending_count"))")
-                    Text("需要保存时，请在下方首次检查策略中允许保存账号有权观看的充电视频，保存配置后再运行全量检查。")
+                    Text(appPrompt("需要保存时，请在下方首次检查策略中允许保存账号有权观看的充电视频，保存配置后再运行全量检查。"))
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
@@ -177,7 +177,7 @@ struct AdminEditorView: View {
                 SecureField("Access Key ID", text: $accessKey)
                 SecureField("Access Key Secret", text: $secretKey)
                 SecureField("临时安全令牌（可选）", text: $securityToken)
-            } header: { Text("凭据") } footer: { Text(isEditing ? "同一存储类型的凭据留空时保留现有值。修改类型时请重新填写。" : "凭据由服务器加密保存，不会回显。") }
+            } header: { Text("凭据") } footer: { Text(appPrompt(isEditing ? "同一存储类型的凭据留空时保留现有值。修改类型时请重新填写。" : "凭据由服务器加密保存，不会回显。")) }
         }
         if isEditing {
             Section("维护") {
@@ -185,7 +185,7 @@ struct AdminEditorView: View {
                 NavigationLink("迁移到其他存储位置") { AdminMigrationView(source: original) }
             }
         }
-        Section { Text("切换默认写入位置不移动已有文件；迁移会复制并校验资产。修改后请先保存，再进行探测。 ").font(.footnote).foregroundStyle(.secondary) }
+        Section { Text(appPrompt("切换默认写入位置不移动已有文件；迁移会复制并校验资产。修改后请先保存，再进行探测。 ")).font(.footnote).foregroundStyle(.secondary) }
     }
     private var userFields: some View {
         Section {
@@ -195,7 +195,7 @@ struct AdminEditorView: View {
                 Text("只读：浏览与播放").tag("reader"); Text("编辑：浏览与整理").tag("editor"); Text("管理员：全部功能").tag("admin")
             }.disabled(id == api.user?.id)
             if isEditing { Toggle("停用账号", isOn: boolean("disabled")).disabled(id == api.user?.id) }
-        } header: { Text("访问权限") } footer: { Text("修改权限或重置密码会撤销此用户现有登录会话。") }
+        } header: { Text("访问权限") } footer: { Text(appPrompt("修改权限或重置密码会撤销此用户现有登录会话。")) }
     }
     private var jobFields: some View {
         Section("采集任务") {
@@ -203,7 +203,7 @@ struct AdminEditorView: View {
                 ForEach(["archive_video", "refresh_comments", "refresh_stats", "scan_collection", "verify_account"], id: \.self) { Text(adminLabel($0)).tag($0) }
             }.onChange(of: form["kind"]?.stringValue) { _, _ in form["target_id"] = .string(""); Task { await loadTargets() } }
             Picker("选择已有目标", selection: text("target_id")) {
-                Text("选择或在下面输入").tag("")
+                Text(appPrompt("选择或在下面输入")).tag("")
                 ForEach(targets, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) }
             }
             TextField("本站目标 ID / 视频 BV 号", text: text("target_id"), axis: .vertical).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -212,7 +212,7 @@ struct AdminEditorView: View {
     }
     private var accountPicker: some View {
         Picker("采集账号", selection: text("account_id")) {
-            Text("请选择").tag("")
+            Text(appPrompt("请选择")).tag("")
             ForEach(choices, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) }
         }
     }

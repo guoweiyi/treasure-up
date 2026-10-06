@@ -14,12 +14,12 @@ struct AdminDeletionView: View {
     @State private var submittedJobID: String?
     var body: some View {
         Form {
-            if loading { ProgressView("正在核对关联内容…") }
+            if loading { ProgressView(appPrompt("正在核对关联内容…")) }
             if !error.isEmpty { AdminNotice(message: error) }
             if let submittedJobID {
                 Section {
-                    Label("删除任务已提交", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                    Text("服务器会停止相关任务并按已核对范围清理归档。")
+                    Label(appPrompt("删除任务已提交"), systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text(appPrompt("服务器会停止相关任务并按已核对范围清理归档。"))
                     NavigationLink("查看删除进度") { AdminJobDetailView(jobID: submittedJobID) }
                     Button("完成") { completed() }
                 }
@@ -31,13 +31,13 @@ struct AdminDeletionView: View {
                     LabeledContent("关联文件", value: adminBytes(preview.adminInt("asset_bytes")))
                 }
                 Section("影响范围") {
-                    Text(area == .creators ? "将删除此 UP 主的归档资料及其视频、弹幕和评论，并清理不再使用的文件。" : "将删除本站视频、弹幕、评论和关联资料，并清理不再使用的文件。")
-                    if preview.adminInt("source_count") > 0 { Text("停用 \(preview.adminInt("source_count")) 个关联来源，防止再次自动导入。") }
-                    if preview.adminInt("active_job_count") > 0 { Text("停止 \(preview.adminInt("active_job_count")) 个相关任务后开始清理。") }
-                    if preview.adminInt("collaboration_count") > 0 { Text("保留 \(preview.adminInt("collaboration_count")) 条其他 UP 主的联合投稿，仅移除署名关联。") }
-                    if preview.adminInt("shared_asset_count") > 0 { Text("其他内容仍在使用的 \(preview.adminInt("shared_asset_count")) 个文件会保留。") }
-                    if preview.adminInt("backup_protected_asset_count") > 0 { Text("已有备份引用的 \(preview.adminInt("backup_protected_asset_count")) 个文件会保留。") }
-                    Text("此操作无法撤销。仅清理本站归档，不影响 B 站上的内容。").foregroundStyle(.red)
+                    Text(appPrompt(area == .creators ? "将删除此 UP 主的归档资料及其视频、弹幕和评论，并清理不再使用的文件。" : "将删除本站视频、弹幕、评论和关联资料，并清理不再使用的文件。"))
+                    if preview.adminInt("source_count") > 0 { Text(appPrompt("停用 \(preview.adminInt("source_count")) 个关联来源，防止再次自动导入。")) }
+                    if preview.adminInt("active_job_count") > 0 { Text(appPrompt("停止 \(preview.adminInt("active_job_count")) 个相关任务后开始清理。")) }
+                    if preview.adminInt("collaboration_count") > 0 { Text(appPrompt("保留 \(preview.adminInt("collaboration_count")) 条其他 UP 主的联合投稿，仅移除署名关联。")) }
+                    if preview.adminInt("shared_asset_count") > 0 { Text(appPrompt("其他内容仍在使用的 \(preview.adminInt("shared_asset_count")) 个文件会保留。")) }
+                    if preview.adminInt("backup_protected_asset_count") > 0 { Text(appPrompt("已有备份引用的 \(preview.adminInt("backup_protected_asset_count")) 个文件会保留。")) }
+                    Text(appPrompt("此操作无法撤销。仅清理本站归档，不影响 B 站上的内容。")).foregroundStyle(.red)
                 }
                 Section { Button("删除归档", role: .destructive) { confirmation = true }.disabled(saving || loading) }
             } else if !loading { Button("重新核对") { Task { await load() } } }
@@ -45,7 +45,7 @@ struct AdminDeletionView: View {
         .navigationTitle("核对删除范围")
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button(submittedJobID == nil ? "保留" : "完成") { if submittedJobID != nil { completed() } else { dismiss() } }.disabled(saving) } }
         .interactiveDismissDisabled(saving || submittedJobID != nil)
-        .confirmationDialog("永久删除上述归档？", isPresented: $confirmation, titleVisibility: .visible) { Button("确认删除", role: .destructive) { Task { await remove() } } }
+        .confirmationDialog(appPrompt("永久删除上述归档？"), isPresented: $confirmation, titleVisibility: .visible) { Button("确认删除", role: .destructive) { Task { await remove() } } }
         .task { await load() }
     }
     private func load() async {
@@ -82,14 +82,14 @@ struct AdminMigrationView: View {
         Form {
             Section("迁移") {
                 LabeledContent("来源", value: source.adminTitle)
-                Picker("目标位置", selection: $targetID) { Text("请选择").tag(""); ForEach(profiles, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
+                Picker("目标位置", selection: $targetID) { Text(appPrompt("请选择")).tag(""); ForEach(profiles, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
                 TextField("资产 ID，用逗号或换行分隔；留空迁移全部", text: $assetIDs, axis: .vertical).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Text("迁移会复制并校验资产，原存储文件保留。").font(.footnote).foregroundStyle(.secondary)
+                Text(appPrompt("迁移会复制并校验资产，原存储文件保留。")).font(.footnote).foregroundStyle(.secondary)
                 Button("开始迁移") { confirm = true }.disabled(targetID.isEmpty || busy)
             }
             if !error.isEmpty { AdminNotice(message: error) }
         }.navigationTitle("迁移存储")
-        .confirmationDialog("开始复制并校验这些资产？", isPresented: $confirm, titleVisibility: .visible) { Button("开始迁移") { Task { await migrate() } } }
+        .confirmationDialog(appPrompt("开始复制并校验这些资产？"), isPresented: $confirm, titleVisibility: .visible) { Button("开始迁移") { Task { await migrate() } } }
         .sheet(item: $operation) { job in NavigationStack { AdminJobDetailView(jobID: job.id).toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { operation = nil } } } }.presentationSizing(.form) }
         .task { do { let data: JSONValue = try await api.get("/admin/storage", query: ["page_size": "100"]); profiles = data.adminItems().filter { $0.adminID != source.adminID && $0.adminBool("enabled") } } catch { self.error = error.localizedDescription } }
     }
@@ -125,11 +125,11 @@ struct AdminReplicaView: View {
             if !error.isEmpty { Section { AdminNotice(message: error) } }
             Section("视频") {
                 TextField("搜索视频", text: $query).onSubmit { Task { await search() } }
-                Picker("选择视频", selection: $videoID) { Text("请选择").tag(""); ForEach(videos, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
+                Picker("选择视频", selection: $videoID) { Text(appPrompt("请选择")).tag(""); ForEach(videos, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
             }
             if !videoID.isEmpty {
                 Section("同步全部关联资产") {
-                    Picker("目标存储", selection: $targetID) { Text("请选择").tag(""); ForEach(profiles, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
+                    Picker("目标存储", selection: $targetID) { Text(appPrompt("请选择")).tag(""); ForEach(profiles, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
                     Button("同步到此位置") { Task { await run("/admin/videos/\(videoID)/sync", body: ["target_profile_id": .string(targetID)]) } }.disabled(targetID.isEmpty || busy)
                 }
                 if !variants.isEmpty {
@@ -172,12 +172,12 @@ struct AdminReplicaView: View {
         }
         .task(id: videoID) { await load() }
         .refreshable { await load() }
-        .confirmationDialog("停用此副本？", isPresented: $retireConfirmation, titleVisibility: .visible) { Button("停用副本", role: .destructive) { if let id = selectedLocation?.adminID { Task { await run("/admin/storage/locations/\(id)", method: "DELETE") } } } } message: { Text("文件仍会保留，不释放磁盘空间，可在这里恢复。") }
-        .alert("永久删除副本", isPresented: $purgeConfirmation) {
+        .confirmationDialog(appPrompt("停用此副本？"), isPresented: $retireConfirmation, titleVisibility: .visible) { Button("停用副本", role: .destructive) { if let id = selectedLocation?.adminID { Task { await run("/admin/storage/locations/\(id)", method: "DELETE") } } } } message: { Text(appPrompt("文件仍会保留，不释放磁盘空间，可在这里恢复。")) }
+        .alert(appPrompt("永久删除副本"), isPresented: $purgeConfirmation) {
             TextField("输入 DELETE", text: $purgeText).textInputAutocapitalization(.characters).autocorrectionDisabled()
             Button("取消", role: .cancel) { selectedLocation = nil }
             Button("永久删除", role: .destructive) { if purgeText == "DELETE", let id = selectedLocation?.adminID { Task { await run("/admin/storage/locations/\(id)/purge", body: ["confirm": .string("DELETE")]) } } }.disabled(purgeText != "DELETE")
-        } message: { Text("服务器会先验证另一完整副本。此操作无法从本站恢复，请输入 DELETE 确认。") }
+        } message: { Text(appPrompt("服务器会先验证另一完整副本。此操作无法从本站恢复，请输入 DELETE 确认。")) }
         .sheet(item: $operation, onDismiss: { Task { await load() } }) { job in NavigationStack { AdminJobDetailView(jobID: job.id).toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { operation = nil } } } }.presentationSizing(.form) }
     }
     private func search() async {
@@ -214,11 +214,11 @@ struct AccountSecurityView: View {
             Section("当前账户") {
                 LabeledContent("用户名", value: api.user?.username ?? "")
                 LabeledContent("权限", value: adminLabel(api.user?.role ?? ""))
-                Text("登录会话保存在系统钥匙串，媒体请求使用受保护的会话。").font(.footnote).foregroundStyle(.secondary)
+                Text(appPrompt("登录会话保存在系统钥匙串，媒体请求使用受保护的会话。")).font(.footnote).foregroundStyle(.secondary)
             }
             if !error.isEmpty { Section { AdminNotice(message: error) } }
             Section {
-                if loading { ProgressView("读取通行密钥…") }
+                if loading { ProgressView(appPrompt("读取通行密钥…")) }
                 ForEach(keys, id: \.adminID) { key in
                     VStack(alignment: .leading, spacing: 8) {
                         Label(key.adminTitle, systemImage: "person.badge.key.fill").font(.headline)
@@ -227,26 +227,26 @@ struct AccountSecurityView: View {
                         Button("移除此通行密钥", role: .destructive) { selected = key; password = ""; confirm = true }.disabled(saving)
                     }.padding(.vertical, 5)
                 }
-                if !loading && keys.isEmpty { Text("尚未添加通行密钥。").foregroundStyle(.secondary) }
+                if !loading && keys.isEmpty { Text(appPrompt("尚未添加通行密钥。")).foregroundStyle(.secondary) }
             } header: { Text("通行密钥") } footer: {
-                Text(capabilities.adminBool("available") ? "已注册的通行密钥可在此管理。原生新增与登录需要服务器发布关联域名配置，并为 App 启用对应签名能力。" : capabilities.adminText("reason", fallback: "服务器尚未启用通行密钥。"))
+                Text(appPrompt(capabilities.adminBool("available") ? "已注册的通行密钥可在此管理。原生新增与登录需要服务器发布关联域名配置，并为 App 启用对应签名能力。" : capabilities.adminText("reason", fallback: "服务器尚未启用通行密钥。")))
             }
             if api.user?.role == "admin", let id = api.user?.id {
                 Section {
                     NavigationLink("管理账户权限与重置密码") { AdminEditorView(area: .users, initial: .object(["id": .string(id), "username": .string(api.user?.username ?? ""), "role": .string("admin"), "disabled": .bool(false)])) }
-                } footer: { Text("服务器目前未提供普通用户自助修改密码与会话列表接口。需要重置密码时请联系管理员。") }
+                } footer: { Text(appPrompt("服务器目前未提供普通用户自助修改密码与会话列表接口。需要重置密码时请联系管理员。")) }
             } else {
-                Section { Text("需要修改密码时请联系管理员。当前服务器未提供自助修改密码或会话列表接口。").font(.footnote).foregroundStyle(.secondary) }
+                Section { Text(appPrompt("需要修改密码时请联系管理员。当前服务器未提供自助修改密码或会话列表接口。")).font(.footnote).foregroundStyle(.secondary) }
             }
         }
         .navigationTitle("账户安全")
         .task { await load() }
         .refreshable { await load() }
-        .alert("移除通行密钥", isPresented: $confirm) {
+        .alert(appPrompt("移除通行密钥"), isPresented: $confirm) {
             SecureField("当前账户密码", text: $password)
             Button("取消", role: .cancel) { password = ""; selected = nil }
             Button("确认移除", role: .destructive) { Task { await revoke() } }.disabled(password.isEmpty)
-        } message: { Text("移除“\(selected?.adminTitle ?? "")”后，使用该密钥的登录会话也会撤销。请输入当前密码确认。") }
+        } message: { Text(appPrompt("移除“\(selected?.adminTitle ?? "")”后，使用该密钥的登录会话也会撤销。请输入当前密码确认。")) }
     }
     private func load() async {
         defer { loading = false }

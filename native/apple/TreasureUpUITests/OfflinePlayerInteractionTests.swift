@@ -1,0 +1,178 @@
+import XCTest
+
+/// Run directly with -only-testing:TreasureUpUITests/OfflinePlayerInteractionTests.
+/// These tests opt into the DEBUG simulator fixture, never the live smoke path.
+@MainActor
+final class OfflinePlayerInteractionTests: XCTestCase {
+    private var launchedApp: XCUIApplication?
+
+    func testRepeatedTransportAndFullscreenUseActualPlayer() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch()
+        let isPhone = app.staticTexts["offline-device-kind"].label == "iPhone"
+        if isPhone { XCTAssertGreaterThan(self.mainWindowFrame(in: app).height, self.mainWindowFrame(in: app).width) }
+        setPlaying(true, in: app)
+        control("player-play-pause", in: app).press(forDuration: 4)
+        wait("Holding the pause button beyond auto-hide must still pause on release") {
+            app.staticTexts["offline-player-state"].label == "paused"
+        }
+        for _ in 0..<4 {
+            setPlaying(false, in: app)
+            setPlaying(true, in: app)
+        }
+        setPlaying(false, in: app)
+        for _ in 0..<2 {
+            control("player-fullscreen", in: app).tap()
+            let fullscreen = app.otherElements["fullscreen-player"].firstMatch
+            wait("Fullscreen must cover the actual app window") {
+                guard fullscreen.exists else { return false }
+                let frame = fullscreen.frame
+                let window = self.mainWindowFrame(in: app)
+                return abs(frame.minX - window.minX) < 3 && abs(frame.minY - window.minY) < 3 &&
+                    abs(frame.width - window.width) < 3 && abs(frame.height - window.height) < 3
+            }
+            if isPhone {
+                wait("Entering landscape-video fullscreen must rotate the portrait phone window") {
+                    self.mainWindowFrame(in: app).width > self.mainWindowFrame(in: app).height
+                }
+            }
+            let transport = control("player-play-pause", in: app)
+            XCTAssertTrue(fullscreen.frame.insetBy(dx: -1, dy: -1).contains(transport.frame))
+            control("player-fullscreen", in: app).tap()
+            wait("Fullscreen must dismiss") { !fullscreen.exists }
+            if isPhone {
+                wait("Leaving fullscreen must restore the portrait phone window") {
+                    self.mainWindowFrame(in: app).height > self.mainWindowFrame(in: app).width
+                }
+            }
+            // Actual AVPlayer/KVO state, rather than only the button's requested
+            // intent, must still respond after the shared layer transfers back.
+            setPlaying(true, in: app)
+            setPlaying(false, in: app)
+        }
+    }
+
+    func testIPadSidebarResizeKeepsTransportAndFullscreenHittable() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch(landscapeWindow: true)
+        guard app.staticTexts["offline-device-kind"].label == "iPad" else {
+            throw XCTSkip("The sidebar scenario requires an iPad simulator")
+        }
+        setPlaying(false, in: app)
+        let detail = app.otherElements["offline-detail-viewport"].firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        let sidebarWidth = detail.frame.width
+        let toggle = app.buttons["offline-sidebar-toggle"]
+        toggle.tap()
+        wait("Hiding the sidebar must enlarge the actual detail viewport") { detail.frame.width > sidebarWidth + 30 }
+        let expandedWidth = detail.frame.width
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+        toggle.tap()
+        wait("Showing the sidebar must shrink the actual detail viewport") { detail.frame.width < expandedWidth - 30 }
+        let player = app.otherElements["inline-player"].firstMatch
+        let button = control("player-play-pause", in: app)
+        XCTAssertTrue(player.frame.insetBy(dx: -1, dy: -1).contains(button.frame))
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+        control("player-fullscreen", in: app).tap()
+        let fullscreen = app.otherElements["fullscreen-player"].firstMatch
+        XCTAssertTrue(fullscreen.waitForExistence(timeout: 10))
+        wait("Fullscreen must include the sidebar area") { fullscreen.frame.width >= self.mainWindowFrame(in: app).width - 3 }
+        control("player-fullscreen", in: app).tap()
+        wait("Exit fullscreen must restore inline controls") { !fullscreen.exists }
+        setPlaying(true, in: app)
+    }
+
+    func testPortraitVideoRetainsFullSizeTopAndTransportTargets() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch(portrait: true)
+        setPlaying(false, in: app)
+        XCTAssertEqual(app.staticTexts["offline-media-orientation"].label, "portrait")
+        let player = app.otherElements["inline-player"].firstMatch
+        let transport = control("player-play-pause", in: app)
+        let more = control("更多播放选项", in: app)
+        for button in [transport, more] {
+            XCTAssertGreaterThanOrEqual(button.frame.width, 43)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 43)
+            XCTAssertTrue(player.frame.insetBy(dx: -1, dy: -1).contains(button.frame),
+                          "Portrait media must not crop the real 44pt control targets")
+        }
+        more.tap()
+        let information = app.buttons["播放信息"].firstMatch
+        XCTAssertTrue(information.waitForExistence(timeout: 5))
+        information.tap()
+        let close = app.buttons["关闭"].firstMatch
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        close.tap()
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+        control("player-fullscreen", in: app).tap()
+        let fullscreen = app.otherElements["fullscreen-player"].firstMatch
+        XCTAssertTrue(fullscreen.waitForExistence(timeout: 10))
+        wait("Portrait fullscreen must stay portrait and cover the entire window") {
+            let frame = fullscreen.frame
+            let window = self.mainWindowFrame(in: app)
+            return window.height > window.width &&
+                abs(frame.minX - window.minX) < 3 && abs(frame.minY - window.minY) < 3 &&
+                abs(frame.width - window.width) < 3 && abs(frame.height - window.height) < 3
+        }
+        control("player-fullscreen", in: app).tap()
+        wait("Portrait fullscreen must dismiss") { !fullscreen.exists }
+        setPlaying(true, in: app)
+    }
+
+    private func launch(portrait: Bool = false, landscapeWindow: Bool = false) -> XCUIApplication {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = landscapeWindow ? .landscapeLeft : .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--offline-player-ui"]
+        if portrait { app.launchArguments.append("--offline-player-portrait") }
+        app.launch()
+        launchedApp = app
+        let status = app.staticTexts["offline-player-ready"]
+        let statusExists = status.waitForExistence(timeout: 10)
+        if !statusExists { print(app.debugDescription) }
+        XCTAssertTrue(statusExists, "DEBUG offline fixture must be wired into the app entry point")
+        wait("Local AVPlayer item must become ready after a real start/pause cycle", timeout: 40) {
+            status.label == "ready"
+        }
+        XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
+        return app
+    }
+
+    private func mainWindowFrame(in app: XCUIApplication) -> CGRect {
+        // Dismissing an iPad menu can leave a zero-sized transient AX window.
+        // Compare against the actual app window, never that first-match shell.
+        app.windows.allElementsBoundByIndex.map(\.frame)
+            .max { $0.width * $0.height < $1.width * $1.height } ?? .zero
+    }
+
+    private func setPlaying(_ playing: Bool, in app: XCUIApplication) {
+        let state = app.staticTexts["offline-player-state"]
+        let expected = playing ? "playing" : "paused"
+        if state.label != expected { control("player-play-pause", in: app).tap() }
+        wait("Actual AVPlayer must become \(expected)") { state.label == expected }
+        XCTAssertEqual(control("player-play-pause", in: app).label, playing ? "暂停" : "播放")
+    }
+
+    private func control(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        let matches = app.buttons.matching(identifier: identifier)
+        if let visible = matches.allElementsBoundByIndex.first(where: { $0.isHittable }) { return visible }
+        let fullscreen = app.otherElements["fullscreen-player"].firstMatch
+        let player = fullscreen.exists ? fullscreen : app.otherElements["inline-player"].firstMatch
+        XCTAssertTrue(player.waitForExistence(timeout: 5))
+        player.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        wait("Player control \(identifier) must be hittable") {
+            matches.allElementsBoundByIndex.contains(where: { $0.isHittable })
+        }
+        return matches.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? matches.firstMatch
+    }
+
+    private func wait(_ message: String, timeout: TimeInterval = 10, condition: @escaping () -> Bool) {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        if result != .completed, let launchedApp { print(launchedApp.debugDescription) }
+        XCTAssertEqual(result, .completed, message)
+    }
+}

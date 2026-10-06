@@ -2,6 +2,9 @@ import SwiftUI
 
 struct PlaybackQueueSection: View {
     @Environment(PlaybackCoordinator.self) private var playback
+    @State private var playbackTask: Task<Void, Never>?
+    @State private var retryTask: Task<Void, Never>?
+    var shouldCancelPlaybackOnDisappear: () -> Bool = { true }
     var onStartPlayback: () -> Void = {}
     var body: some View {
         @Bindable var playback = playback
@@ -13,7 +16,7 @@ struct PlaybackQueueSection: View {
                 }
                 Spacer()
                 Menu {
-                    Button("清空并停止播放", systemImage: "trash", role: .destructive) { playback.clearQueue() }
+                    Button("清空并停止播放", systemImage: "trash", role: .destructive) { cancelPageTasks(); playback.clearQueue() }
                 } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
                     .accessibilityLabel("队列操作").disabled(playback.queue.isEmpty)
             }
@@ -21,22 +24,22 @@ struct PlaybackQueueSection: View {
                 ForEach(PlaybackQueueMode.allCases) { mode in Label(mode.title, systemImage: mode.systemImage).tag(mode) }
             }.pickerStyle(.menu)
             Toggle("自动衔接分 P", isOn: $playback.autoAdvance).font(.subheadline)
-            Text(playback.autoAdvance ? "全部分 P 播完后，按所选模式暂停、循环或播放下一项。" : "每个分 P 结束时暂停。可随时手动切换。")
+            Text(appPrompt(playback.autoAdvance ? "全部分 P 播完后，按所选模式暂停、循环或播放下一项。" : "每个分 P 结束时暂停。可随时手动切换。"))
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
-                Button("上一项", systemImage: "backward.end") { onStartPlayback(); Task { await playback.previousPart() } }
+                Button("上一项", systemImage: "backward.end") { startPlayback { await playback.previousPart() } }
                     .disabled(!playback.hasPrevious || playback.isLoading || playback.queueTransitioning)
                 Spacer()
-                Button("下一项", systemImage: "forward.end") { onStartPlayback(); Task { await playback.nextPart() } }
+                Button("下一项", systemImage: "forward.end") { startPlayback { await playback.nextPart() } }
                     .disabled(!playback.hasNext || playback.isLoading || playback.queueTransitioning)
             }.buttonStyle(.bordered).font(.subheadline)
-            if playback.queueLoading { ProgressView("正在读取完整队列…").font(.caption) }
+            if playback.queueLoading { ProgressView(appPrompt("正在读取完整队列…")).font(.caption) }
             if let error = playback.queueError {
-                Text(error).font(.caption).foregroundStyle(.red)
-                Button("重试加载队列") { Task { await playback.retryQueueLoading() } }
+                Text(appPrompt(error)).font(.caption).foregroundStyle(.red)
+                Button("重试加载队列") { retryLoading() }
             }
             if playback.queue.isEmpty {
-                ContentUnavailableView("队列为空", systemImage: "text.line.first.and.arrowtriangle.forward", description: Text("播放视频会带入当前列表，也可以从视频菜单添加。"))
+                ContentUnavailableView(appPrompt("队列为空"), systemImage: "text.line.first.and.arrowtriangle.forward", description: Text(appPrompt("播放视频会带入当前列表，也可以从视频菜单添加。")))
             }
             ForEach(Array(playback.queue.enumerated()), id: \.element.id) { index, video in
                 queueRow(video, index: index)
@@ -47,15 +50,14 @@ struct PlaybackQueueSection: View {
                         return true
                     }
             }
-            if playback.queue.count > 1 { Text("长按拖动可调整顺序，更多菜单中也可移动或移除。").font(.caption).foregroundStyle(.secondary) }
-        }
+            if playback.queue.count > 1 { Text(appPrompt("长按拖动可调整顺序，更多菜单中也可移动或移除。")).font(.caption).foregroundStyle(.secondary) }
+        }.onDisappear { if shouldCancelPlaybackOnDisappear() { cancelPageTasks() } }
     }
     private func queueRow(_ video: ArchiveVideo, index: Int) -> some View {
         let active = video.id == playback.currentVideo?.id
         return HStack(spacing: 10) {
             Button {
-                onStartPlayback()
-                Task { await playback.playQueueItem(id: video.id) }
+                startPlayback { await playback.playQueueItem(id: video.id) }
             } label: {
                 HStack(spacing: 10) {
                     Artwork(path: video.coverUrl).frame(width: 84, height: 52).clipShape(.rect(cornerRadius: 8))
@@ -86,5 +88,28 @@ struct PlaybackQueueSection: View {
         if playback.errorMessage != nil { return "播放失败" }
         if playback.isLoading || playback.isBuffering { return "缓冲中" }
         return playback.isPlaying ? "正在播放" : "已暂停"
+    }
+
+    private func startPlayback(_ action: @escaping @MainActor () async -> Void) {
+        playbackTask?.cancel()
+        retryTask?.cancel()
+        playbackTask = Task {
+            guard !Task.isCancelled else { return }
+            onStartPlayback()
+            await action()
+        }
+    }
+
+    private func retryLoading() {
+        retryTask?.cancel()
+        retryTask = Task {
+            guard !Task.isCancelled else { return }
+            await playback.retryQueueLoading()
+        }
+    }
+
+    private func cancelPageTasks() {
+        playbackTask?.cancel(); playbackTask = nil
+        retryTask?.cancel(); retryTask = nil
     }
 }

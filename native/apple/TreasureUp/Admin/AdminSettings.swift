@@ -22,7 +22,7 @@ struct AdminPolicyFields: View {
             Toggle("优先保存杜比全景声原档", isOn: flag("prefer_dolby_atmos", true))
             Toggle("优先 H.264", isOn: flag("prefer_h264", false))
             Toggle("按需生成兼容副本", isOn: flag("create_compatible_copy", true))
-            Text("原档画质与音轨取决于采集账号权限和来源。兼容副本保留原档；实际 HDR 与 Atmos 播放能力由设备、输出链路及媒体版本共同决定。")
+            Text(appPrompt("原档画质与音轨取决于采集账号权限和来源。兼容副本保留原档；实际 HDR 与 Atmos 播放能力由设备、输出链路及媒体版本共同决定。"))
                 .font(.footnote).foregroundStyle(.secondary)
         }
         Section("保存内容") {
@@ -76,7 +76,7 @@ struct AdminSettingsView: View {
     @State private var message = ""
     var body: some View {
         Form {
-            if loading { ProgressView("读取配置…") }
+            if loading { ProgressView(appPrompt("读取配置…")) }
             if !error.isEmpty { Section { AdminNotice(message: error) } }
             if !message.isEmpty { Section { AdminNotice(message: message, isError: false) } }
             if !loading && !groups.isEmpty {
@@ -87,7 +87,7 @@ struct AdminSettingsView: View {
                 AdminPolicyFields(values: $ingest)
                 Section("统计与弹幕更新") {
                     Toggle("自动更新 B 站统计", isOn: flag("statistics", "enabled"))
-                    Picker("采集账号", selection: text("statistics", "account_id")) { Text("请选择").tag(""); ForEach(accounts, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
+                    Picker("采集账号", selection: text("statistics", "account_id")) { Text(appPrompt("请选择")).tag(""); ForEach(accounts, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
                     numeric("更新间隔（小时）", "statistics", "interval_hours", 1...720)
                     Toggle("同时刷新弹幕", isOn: flag("statistics", "refresh_danmaku"))
                     Button("立即刷新统计") { Task { await refreshStatistics() } }.disabled(saving)
@@ -105,11 +105,11 @@ struct AdminSettingsView: View {
                     TextField("加密密钥标识", text: text("backup", "key_id")).textInputAutocapitalization(.never).autocorrectionDisabled()
                     numeric("备份间隔（小时）", "backup", "interval_hours", 1...720)
                     numeric("保留天数", "backup", "retention_days", 1...3650)
-                } header: { Text("独立备份") } footer: { Text("备份目录位于服务器；密钥标识对应服务器已配置的加密密钥。") }
+                } header: { Text("独立备份") } footer: { Text(appPrompt("备份目录位于服务器；密钥标识对应服务器已配置的加密密钥。")) }
             }
         }
         .navigationTitle("系统配置")
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(saving ? "保存中…" : "保存") { Task { await save() } }.disabled(loading || saving || groups.isEmpty) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(saving ? appPrompt("保存中…") : "保存") { Task { await save() } }.disabled(loading || saving || groups.isEmpty) } }
         .task { await load() }
     }
     private func group(_ name: String) -> [String: JSONValue] { groups[name]?.objectValue ?? [:] }
@@ -161,7 +161,7 @@ struct AdminSourceDiscoveryView: View {
             }
             if loading { ProgressView() }
             if more { Button("加载更多") { page += 1; Task { await load(append: true) } }.disabled(loading) }
-            if !loading && items.isEmpty && error.isEmpty { ContentUnavailableView("未发现来源", systemImage: "antenna.radiowaves.left.and.right", description: Text("可返回手动输入来源链接或 ID。")) }
+            if !loading && items.isEmpty && error.isEmpty { ContentUnavailableView(appPrompt("未发现来源"), systemImage: "antenna.radiowaves.left.and.right", description: Text(appPrompt("可返回手动输入来源链接或 ID。"))) }
         }.navigationTitle("发现备份来源")
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
         .task(id: category) { page = 1; await load() }
@@ -190,7 +190,7 @@ struct AdminSourceHistoryView: View {
                     Text(adminLabel(row.adminText("end_reason"))).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            if rows.isEmpty && error.isEmpty { ContentUnavailableView("暂无检查记录", systemImage: "clock.arrow.circlepath") }
+            if rows.isEmpty && error.isEmpty { ContentUnavailableView(appPrompt("暂无检查记录"), systemImage: "clock.arrow.circlepath") }
         }.navigationTitle("最近检查历史")
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
         .task { do { let response: JSONValue = try await api.get("/admin/sources/\(sourceID)/history", query: ["page_size": "100"]); rows = response.adminItems() } catch { self.error = error.localizedDescription } }

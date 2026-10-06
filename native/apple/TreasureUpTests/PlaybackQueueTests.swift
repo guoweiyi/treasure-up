@@ -464,6 +464,257 @@ final class PlaybackQueueTests: XCTestCase {
         XCTAssertFalse(player.pendingTimes.isEmpty, "Replay should issue an awaited seek")
     }
 
+    func testTogglePausesDuringStartupBeforeActualPlaybackBegins() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}", delay: 0.15) }
+        await withCoordinator { coordinator in
+            XCTAssertFalse(coordinator.wantsPlayback)
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            let starting = Task { await coordinator.start(video: source) }
+            await self.waitForRequest("/api/v1/playback-sessions")
+            XCTAssertTrue(coordinator.wantsPlayback)
+            XCTAssertFalse(coordinator.isPlaying)
+            coordinator.togglePlayback()
+            XCTAssertFalse(coordinator.wantsPlayback, "A loading video must be pausable before its first playing callback")
+            await starting.value
+            XCTAssertFalse(coordinator.wantsPlayback)
+        }
+    }
+
+    func testBufferedPlaybackAndRapidTapsUseIntentRatherThanDelayedPlayerStatus() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        await withCoordinator(player: player) { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            await coordinator.start(video: source)
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.resume()
+            player.reportTimeControlStatus(.waitingToPlayAtSpecifiedRate)
+            await self.waitForTransport("Buffering callback should be observed") { coordinator.isBuffering }
+            XCTAssertTrue(coordinator.wantsPlayback)
+            XCTAssertFalse(coordinator.isPlaying)
+            let played = player.playedRates.count
+            coordinator.togglePlayback()
+            XCTAssertFalse(coordinator.wantsPlayback)
+            coordinator.togglePlayback()
+            XCTAssertTrue(coordinator.wantsPlayback)
+            coordinator.togglePlayback()
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertEqual(player.playedRates.count, played + 1, "Only the middle tap requests playback")
+
+            // Deliver an old 'playing' status while the latest pause still waits
+            // for acknowledgement; it must not flip the user's pause back on.
+            player.reportTimeControlStatus(.playing)
+            await self.waitForTransport("Delayed AVPlayer status should arrive") { coordinator.isPlaying }
+            XCTAssertFalse(coordinator.wantsPlayback)
+            player.reportTimeControlStatus(.paused)
+            await self.waitForTransport("Pause acknowledgement should arrive") { !coordinator.isPlaying }
+            XCTAssertFalse(coordinator.wantsPlayback)
+        }
+    }
+
+    func testStopAndFailedSessionResetPlaybackIntent() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            await coordinator.start(video: source)
+            XCTAssertNotNil(coordinator.errorMessage)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            coordinator.errorMessage = nil
+            coordinator.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.resume()
+            XCTAssertTrue(coordinator.wantsPlayback)
+            coordinator.stop()
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertFalse(coordinator.isPlaying)
+            coordinator.resume()
+            XCTAssertFalse(coordinator.wantsPlayback, "A stopped player has no item to resume")
+        }
+    }
+
+    func testInterruptionRestoresBufferingIntentButManualPauseCancelsAutomaticResume() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        await withCoordinator(player: player) { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            await coordinator.start(video: source)
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+            coordinator.resume()
+            XCTAssertFalse(coordinator.isPlaying)
+            self.postInterruption(.began)
+            await self.waitForTransport("Interruption should pause pending playback") { !coordinator.wantsPlayback }
+            self.postInterruption(.ended)
+            await self.waitForTransport("Buffering intent should resume after interruption") { coordinator.wantsPlayback }
+
+            self.postInterruption(.began)
+            await self.waitForTransport("Second interruption should pause") { !coordinator.wantsPlayback }
+            coordinator.pause()
+            let requests = player.playedRates.count
+            let events = coordinator.diagnosticsText.components(separatedBy: "interruption:0:").count
+            self.postInterruption(.ended)
+            await self.waitForTransport("Second end notification should be processed") {
+                coordinator.diagnosticsText.components(separatedBy: "interruption:0:").count > events
+            }
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertEqual(player.playedRates.count, requests)
+        }
+    }
+
+    private func postInterruption(_ type: AVAudioSession.InterruptionType) {
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+                                        object: AVAudioSession.sharedInstance(), userInfo: [
+            AVAudioSessionInterruptionTypeKey: type.rawValue,
+            AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
+        ])
+    }
+
+    private func waitForTransport(_ message: String, condition: @MainActor () -> Bool) async {
+        for _ in 0..<100 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(condition(), message)
+    }
+
+    func testStopWhileDetailIsLoadingCannotCreatePlaybackSession() async {
+        QueueTestURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/videos/a" {
+                return .init(body: #"{"id":"a","parts":[{"id":"a1","variants":[{"id":"a1-source"}]}]}"#, delay: 0.15)
+            }
+            return .init(status: 503, body: "{}")
+        }
+        await withCoordinator { coordinator in
+            let starting = Task { await coordinator.play(video: self.video("a")) }
+            await self.waitForRequest("/api/v1/videos/a")
+            coordinator.requestsPresentation = true
+            coordinator.stop()
+            await starting.value
+            XCTAssertNil(coordinator.currentVideo)
+            XCTAssertNil(coordinator.currentPart)
+            XCTAssertNil(coordinator.player.currentItem)
+            XCTAssertNil(coordinator.session)
+            XCTAssertFalse(coordinator.requestsPresentation)
+            XCTAssertFalse(coordinator.isLoading)
+            XCTAssertFalse(QueueTestURLProtocol.store.paths.contains("/api/v1/playback-sessions"))
+        }
+    }
+
+    func testStopWhileSuccessfulSessionIsLoadingCannotAttachItsPlayerItem() async {
+        QueueTestURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/playback-sessions" {
+                return .init(body: #"{"variant_id":"a1-source","url":"https://queue.example.test/media.mp4","protocol":"file"}"#, delay: 0.15)
+            }
+            return .init(status: 503, body: "{}")
+        }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            let starting = Task { await coordinator.start(video: source) }
+            await self.waitForRequest("/api/v1/playback-sessions")
+            coordinator.stop()
+            await starting.value
+            XCTAssertNil(coordinator.currentVideo)
+            XCTAssertNil(coordinator.player.currentItem)
+            XCTAssertNil(coordinator.session)
+            XCTAssertFalse(coordinator.isLoading)
+            XCTAssertFalse(coordinator.isPlaying)
+            XCTAssertEqual(coordinator.queue.map(\.id), ["a"])
+        }
+    }
+
+    func testStopDuringQueueSelectionPreservesQueueWithoutPlayingLateVideo() async {
+        QueueTestURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/videos/b" {
+                return .init(body: #"{"id":"b","parts":[{"id":"b1","variants":[{"id":"b1-source"}]}]}"#, delay: 0.15)
+            }
+            return .init(status: 503, body: "{}")
+        }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            coordinator.configureQueue(videos: [source, self.video("b")], currentVideoId: "a")
+            await coordinator.play(video: source)
+            let switching = Task { await coordinator.playQueueItem(id: "b") }
+            await self.waitForRequest("/api/v1/videos/b")
+            coordinator.stop()
+            await switching.value
+            XCTAssertNil(coordinator.currentVideo)
+            XCTAssertNil(coordinator.player.currentItem)
+            XCTAssertFalse(coordinator.queueTransitioning)
+            XCTAssertEqual(coordinator.queue.map(\.id), ["a", "b"])
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.filter { $0 == "/api/v1/playback-sessions" }.count, 1)
+        }
+    }
+
+    func testStopCancelsRemainingQueuePagesAndExplicitRetryKeepsLoadedEntries() async {
+        QueueTestURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/videos" {
+                let page = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "page" }?.value
+                if page == "1" { return .init(body: #"{"items":[{"id":"a"}],"total":2,"page":1,"page_size":1}"#) }
+                return .init(body: #"{"items":[{"id":"b"}],"total":2,"page":2,"page_size":1}"#, delay: 0.5)
+            }
+            return .init(status: 503, body: "{}")
+        }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            await coordinator.start(video: source, context: PlaybackQueueContext(title: "保留的队列"))
+            await self.waitForRequest("/api/v1/videos", count: 2)
+            coordinator.stop()
+            // Retry immediately, while cancellation of the old loader may still
+            // be unwinding, to exercise the loading-state handoff.
+            QueueTestURLProtocol.store.set { _ in
+                .init(body: #"{"items":[{"id":"b"}],"total":2,"page":2,"page_size":1}"#)
+            }
+            await coordinator.retryQueueLoading()
+            XCTAssertEqual(coordinator.queue.map(\.id), ["a", "b"])
+            XCTAssertFalse(coordinator.queueLoading)
+            XCTAssertNil(coordinator.currentVideo)
+            XCTAssertNil(coordinator.player.currentItem)
+        }
+    }
+
+    func testSelectingCurrentQualityOrRouteKeepsItemWithoutRequestAndStillAllowsErrorRetry() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        await withCoordinator { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            await coordinator.start(video: source)
+            coordinator.errorMessage = nil
+            let item = AVPlayerItem(asset: AVMutableComposition())
+            coordinator.player.replaceCurrentItem(with: item)
+            let requests = QueueTestURLProtocol.store.paths
+            await coordinator.selectVariant(source.parts[0].variants[0])
+            await coordinator.selectRoute("")
+            XCTAssertTrue(coordinator.player.currentItem === item)
+            XCTAssertEqual(QueueTestURLProtocol.store.paths, requests)
+            coordinator.errorMessage = "临时错误"
+            await coordinator.selectVariant(source.parts[0].variants[0])
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.count, requests.count + 1)
+            XCTAssertEqual(coordinator.currentPart?.id, "a1")
+        }
+    }
+
+    func testBackgroundSidecarDecodingPreservesFormatsAndHonorsCancellation() async throws {
+        let cues = try await PlaybackSidecarDecoder.danmaku(Data(##"[{"text":"测试","time":2,"color":"#abc","mode":0}]"##.utf8))
+        XCTAssertEqual(cues.count, 1)
+        XCTAssertEqual(cues.first?.cue.color, 0xAABBCC)
+        XCTAssertEqual(cues.first?.cue.text, "测试")
+        let subtitles = try await PlaybackSidecarDecoder.subtitles(Data("WEBVTT\n\n00:01.000 --> 00:03.000\n字幕 &amp; text".utf8))
+        XCTAssertEqual(subtitles.first?.text, "字幕 & text")
+        let canceled = Task { try await PlaybackSidecarDecoder.danmaku(Data("not-json".utf8)) }
+        canceled.cancel()
+        do {
+            _ = try await canceled.value
+            XCTFail("Canceled work must not parse or publish sidecars")
+        } catch is CancellationError { }
+        catch { XCTFail("Expected cancellation, got \(error)") }
+    }
+
+    private func waitForRequest(_ path: String, count: Int = 1) async {
+        for _ in 0..<100 where QueueTestURLProtocol.store.paths.filter({ $0 == path }).count < count {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertGreaterThanOrEqual(QueueTestURLProtocol.store.paths.filter { $0 == path }.count, count)
+    }
+
     func testDiagnosticsAreBoundedAndExcludeCredentialsURLsAndTitles() async {
         QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
         await withCoordinator { coordinator in
@@ -483,6 +734,100 @@ final class PlaybackQueueTests: XCTestCase {
                 XCTAssertFalse(text.contains(excluded))
             }
         }
+    }
+
+    func testNowPlayingPublicationSkipsNormalClockTicksAndIdenticalPausedState() {
+        var publication = PlaybackNowPlayingPublication()
+        let base = Date(timeIntervalSinceReferenceDate: 100)
+        var state = nowPlayingState()
+        var writes = 0
+        // A minute of the coordinator's two-second metadata checks requires one
+        // system write: the lock screen advances its own elapsed-time clock.
+        for second in stride(from: 0, through: 60, by: 2) {
+            if publication.shouldPublish(state: state, position: 10 + Double(second),
+                                         at: base.addingTimeInterval(Double(second))) { writes += 1 }
+        }
+        XCTAssertEqual(writes, 1)
+        state.rate = 0
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 70, at: base.addingTimeInterval(60)))
+        for second in stride(from: 62, through: 120, by: 2) {
+            XCTAssertFalse(publication.shouldPublish(state: state, position: 70, at: base.addingTimeInterval(Double(second))))
+        }
+    }
+
+    func testNowPlayingPublicationImmediatelyReportsSeekDriftAndMetadataChanges() {
+        var publication = PlaybackNowPlayingPublication()
+        let base = Date(timeIntervalSinceReferenceDate: 100)
+        var state = nowPlayingState()
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 10, at: base))
+        XCTAssertFalse(publication.shouldPublish(state: state, position: 12.2, at: base.addingTimeInterval(2)))
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 12.3, at: base.addingTimeInterval(2), forcePosition: true),
+                      "An explicit subsecond seek still updates the system timeline")
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 30, at: base.addingTimeInterval(4)),
+                      "Unexpected playback drift must resynchronize the system clock")
+        state.title = "Changed title"
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 30, at: base.addingTimeInterval(4)))
+        state.hasNext = false
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 30, at: base.addingTimeInterval(4)))
+        state.rate = 1.5
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 30, at: base.addingTimeInterval(4)))
+        XCTAssertFalse(publication.shouldPublish(state: state, position: 33, at: base.addingTimeInterval(6)))
+        let artwork = NSObject()
+        state.artwork = ObjectIdentifier(artwork)
+        XCTAssertTrue(publication.shouldPublish(state: state, position: 33, at: base.addingTimeInterval(6)))
+        XCTAssertFalse(publication.shouldPublish(state: state, position: .nan, at: base))
+    }
+
+    func testRepeatedRateCommandsAndKVOOnlyPersistActualPreferenceChanges() async {
+        let name = "TreasurePlaybackWriteTests.\(UUID().uuidString)"
+        let defaults = CountingPlaybackDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [QueueTestURLProtocol.self]
+        let api = APIClient(baseURL: URL(string: "https://queue.example.test")!, defaults: defaults,
+                            sessionConfiguration: configuration, persistSession: false)
+        let player = ReplayTestPlayer()
+        let coordinator = PlaybackCoordinator(api: api, defaults: defaults, player: player)
+        defer { coordinator.stop(clearQueue: true, saveProgress: false) }
+        let rateKey = "treasure.native.playback.rate"
+        let baseline = defaults.writeCount(forKey: rateKey)
+        for _ in 0..<100 { coordinator.setRate(1.25) }
+        XCTAssertEqual(defaults.writeCount(forKey: rateKey) - baseline, 1)
+        for _ in 0..<100 { player.reportRate(1.25) }
+        // Enqueue a different final value after repeated callbacks. Once it has
+        // been consumed, every earlier callback has also observed that value.
+        player.reportRate(1.5)
+        await waitForTransport("External rate should update the preference") { coordinator.preferredRate == 1.5 }
+        XCTAssertEqual(defaults.writeCount(forKey: rateKey) - baseline, 2)
+        XCTAssertEqual(defaults.float(forKey: rateKey), 1.5)
+        let fitKey = "treasure.native.playback.fitToFill"
+        let fitBaseline = defaults.writeCount(forKey: fitKey)
+        for _ in 0..<100 { coordinator.fitToFill = true }
+        XCTAssertEqual(defaults.writeCount(forKey: fitKey) - fitBaseline, 1)
+    }
+
+    func testAdjacentAvailabilityPreservesManualQueueTargetSemantics() {
+        let parts = [part("p3", position: 3), part("missing", position: 2, playable: false), part("p1", position: 1)]
+        // Include a video with no known playable parts: availability must still
+        // allow the existing navigation path to hydrate and skip it as needed.
+        let videos = [video("a", parts: parts), video("unhydrated"), video("z")]
+        let partIDs: [String?] = [nil, "p1", "p3", "missing", "unknown"]
+        let videoIDs: [String?] = [nil, "a", "unhydrated", "z", "outside"]
+        for partID in partIDs {
+            for videoID in videoIDs {
+                for direction in [-1, 1] {
+                    let target = PlaybackQueue.target(parts: parts, partId: partID, videos: videos.map(\.id),
+                                                      videoId: videoID, direction: direction)
+                    XCTAssertEqual(PlaybackCoordinator.hasAdjacentItem(parts: parts, partID: partID, videos: videos,
+                                                                       videoID: videoID, direction: direction), target != .stop)
+                }
+            }
+        }
+    }
+
+    private func nowPlayingState() -> PlaybackNowPlayingState {
+        PlaybackNowPlayingState(videoID: "v", partID: "p", title: "Title", artist: "Creator", album: "P1",
+                                duration: 120, rate: 1, preferredRate: 1, artwork: nil, hasNext: true, hasPrevious: false)
     }
 
     private nonisolated static func emitRateKVO(_ player: AVPlayer) {
@@ -512,29 +857,68 @@ final class PlaybackQueueTests: XCTestCase {
 /// Holds seek completions without loading media, so KVO and gestures can be
 /// delivered during the actual coordinator's asynchronous replay transition.
 private final class ReplayTestPlayer: AVPlayer, @unchecked Sendable {
-    private struct Seek {
-        let time: CMTime
-        let completion: @Sendable (Bool) -> Void
+    // AVPlayer's Objective-C callbacks are nonisolated. Only this immutable,
+    // Sendable reference crosses that boundary; all mutable state owns its lock.
+    private nonisolated let testState = ReplayTestPlayerState()
+    var pendingTimes: [Double] { testState.pendingTimes }
+    var playedRates: [Float] { testState.playedRates }
+    override var timeControlStatus: AVPlayer.TimeControlStatus { testState.timeControlStatus }
+    override var rate: Float {
+        get { testState.rate }
+        set { testState.setRate(newValue) }
     }
-    private let stateLock = NSLock()
-    private var seeks: [Seek] = []
-    private var position = CMTime.zero
-    private var rates: [Float] = []
-    var pendingTimes: [Double] { stateLock.withLock { seeks.map { $0.time.seconds } } }
-    var playedRates: [Float] { stateLock.withLock { rates } }
-    override var timeControlStatus: AVPlayer.TimeControlStatus { .paused }
-    override func currentTime() -> CMTime { stateLock.withLock { position } }
+    func reportRate(_ rate: Float) {
+        willChangeValue(forKey: "rate")
+        testState.setRate(rate)
+        didChangeValue(forKey: "rate")
+    }
+    func reportTimeControlStatus(_ status: AVPlayer.TimeControlStatus) {
+        willChangeValue(forKey: "timeControlStatus")
+        testState.setTimeControlStatus(status)
+        didChangeValue(forKey: "timeControlStatus")
+    }
+    override func currentTime() -> CMTime { testState.currentTime }
     override func pause() { }
-    override func playImmediately(atRate rate: Float) { stateLock.withLock { rates.append(rate) } }
+    override func playImmediately(atRate rate: Float) { testState.recordPlayback(rate: rate) }
     override func seek(to time: CMTime, toleranceBefore: CMTime, toleranceAfter: CMTime) {
-        stateLock.withLock { position = time }
+        testState.setPosition(time)
     }
     override func seek(to time: CMTime, toleranceBefore: CMTime, toleranceAfter: CMTime,
                        completionHandler: @escaping @Sendable (Bool) -> Void) {
-        stateLock.withLock { seeks.append(Seek(time: time, completion: completionHandler)) }
+        testState.appendSeek(time: time, completion: completionHandler)
+    }
+    func finishNextSeek() { testState.finishNextSeek() }
+    func finishRemainingSeeks() { testState.finishRemainingSeeks() }
+}
+
+/// Independent of AVPlayer's inherited actor isolation. Every read and write is
+/// synchronized; callbacks are removed under the lock and invoked after release.
+private final class ReplayTestPlayerState: @unchecked Sendable {
+    private struct Seek: Sendable {
+        let time: CMTime
+        let completion: @Sendable (Bool) -> Void
+    }
+    private let lock = NSLock()
+    private var seeks: [Seek] = []
+    private var position = CMTime.zero
+    private var rates: [Float] = []
+    private var reportedStatus: AVPlayer.TimeControlStatus = .paused
+    private var reportedRate: Float = 0
+
+    var pendingTimes: [Double] { lock.withLock { seeks.map { $0.time.seconds } } }
+    var playedRates: [Float] { lock.withLock { rates } }
+    var timeControlStatus: AVPlayer.TimeControlStatus { lock.withLock { reportedStatus } }
+    var rate: Float { lock.withLock { reportedRate } }
+    func setRate(_ rate: Float) { lock.withLock { reportedRate = rate } }
+    var currentTime: CMTime { lock.withLock { position } }
+    func setTimeControlStatus(_ status: AVPlayer.TimeControlStatus) { lock.withLock { reportedStatus = status } }
+    func recordPlayback(rate: Float) { lock.withLock { rates.append(rate) } }
+    func setPosition(_ time: CMTime) { lock.withLock { position = time } }
+    func appendSeek(time: CMTime, completion: @escaping @Sendable (Bool) -> Void) {
+        lock.withLock { seeks.append(Seek(time: time, completion: completion)) }
     }
     func finishNextSeek() {
-        let seek: Seek? = stateLock.withLock {
+        let seek: Seek? = lock.withLock {
             guard !seeks.isEmpty else { return nil }
             let seek = seeks.removeFirst()
             position = seek.time
@@ -543,7 +927,7 @@ private final class ReplayTestPlayer: AVPlayer, @unchecked Sendable {
         seek?.completion(true)
     }
     func finishRemainingSeeks() {
-        let pending = stateLock.withLock { let pending = seeks; seeks.removeAll(); return pending }
+        let pending = lock.withLock { let pending = seeks; seeks.removeAll(); return pending }
         for seek in pending { seek.completion(false) }
     }
 }
@@ -588,4 +972,26 @@ private final class QueueTestURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() { lock.withLock { stopped = true } }
+}
+
+/// Count real coordinator preference writes without relying on notification
+/// coalescing or touching any server. The override's mutable state owns a lock.
+private final class CountingPlaybackDefaults: UserDefaults, @unchecked Sendable {
+    private let writes = PlaybackPreferenceWriteCounts()
+    override func set(_ value: Float, forKey defaultName: String) {
+        writes.record(defaultName)
+        super.set(value, forKey: defaultName)
+    }
+    override func set(_ value: Bool, forKey defaultName: String) {
+        writes.record(defaultName)
+        super.set(value, forKey: defaultName)
+    }
+    func writeCount(forKey key: String) -> Int { writes.count(key) }
+}
+
+private final class PlaybackPreferenceWriteCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Int] = [:]
+    func record(_ key: String) { lock.withLock { values[key, default: 0] += 1 } }
+    func count(_ key: String) -> Int { lock.withLock { values[key, default: 0] } }
 }

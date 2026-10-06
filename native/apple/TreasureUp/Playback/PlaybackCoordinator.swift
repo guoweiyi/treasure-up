@@ -27,6 +27,9 @@ final class PlaybackCoordinator {
     private(set) var queueTransitioning = false
     private(set) var isLoading = false
     private(set) var isPlaying = false
+    /// Requested transport state, updated synchronously even while AVPlayer is
+    /// loading or buffering. Controls must not infer this from delayed KVO.
+    private(set) var wantsPlayback = false
     private(set) var isBuffering = false
     private(set) var currentTime: Double = 0
     private(set) var duration: Double = 0
@@ -47,21 +50,25 @@ final class PlaybackCoordinator {
     var statusMessage: String?
     var requestsPresentation = false
     var isPictureInPictureActive = false
-    var autoAdvance = true { didSet { saveQueuePreferences() } }
-    var queueMode = PlaybackQueueMode.pause { didSet { saveQueuePreferences() } }
-    var danmakuEnabled = true { didSet { defaults.set(danmakuEnabled, forKey: "treasure.native.playback.danmaku") } }
-    var danmakuOpacity = 0.85 { didSet { defaults.set(danmakuOpacity, forKey: "treasure.native.playback.danmakuOpacity") } }
-    var danmakuFontSize = 18.0 { didSet { defaults.set(danmakuFontSize, forKey: "treasure.native.playback.danmakuFontSize") } }
+    var autoAdvance = true { didSet { if oldValue != autoAdvance { saveQueuePreferences() } } }
+    var queueMode = PlaybackQueueMode.pause { didSet { if oldValue != queueMode { saveQueuePreferences() } } }
+    var danmakuEnabled = true { didSet { if oldValue != danmakuEnabled { defaults.set(danmakuEnabled, forKey: "treasure.native.playback.danmaku") } } }
+    var danmakuOpacity = 0.85 { didSet { if oldValue != danmakuOpacity { defaults.set(danmakuOpacity, forKey: "treasure.native.playback.danmakuOpacity") } } }
+    var danmakuFontSize = 18.0 { didSet { if oldValue != danmakuFontSize { defaults.set(danmakuFontSize, forKey: "treasure.native.playback.danmakuFontSize") } } }
     var loudnessBalance = false {
-        didSet { defaults.set(loudnessBalance, forKey: "treasure.native.playback.loudnessBalance"); applyLoudness() }
+        didSet {
+            guard oldValue != loudnessBalance else { return }
+            defaults.set(loudnessBalance, forKey: "treasure.native.playback.loudnessBalance"); applyLoudness()
+        }
     }
     var selectedRouteID = ""
     var preferredRate: Float = 1
     private(set) var temporaryRate: Float?
     var effectiveRate: Float { temporaryRate ?? preferredRate }
-    var fitToFill = false { didSet { defaults.set(fitToFill, forKey: "treasure.native.playback.fitToFill") } }
+    var fitToFill = false { didSet { if oldValue != fitToFill { defaults.set(fitToFill, forKey: "treasure.native.playback.fitToFill") } } }
     var backgroundPlayback = true {
         didSet {
+            guard oldValue != backgroundPlayback else { return }
             player.audiovisualBackgroundPlaybackPolicy = backgroundPlayback ? .continuesIfPossible : .pauses
             defaults.set(backgroundPlayback, forKey: "treasure.native.playback.background")
         }
@@ -97,17 +104,20 @@ final class PlaybackCoordinator {
     @ObservationIgnored private var historyReadPending = false
     @ObservationIgnored private var requestedPartID: String?
     @ObservationIgnored private var replayTask: Task<Void, Never>?
-    @ObservationIgnored private var wantsPlayback = true
     @ObservationIgnored private var initialResumeApplied = false
     @ObservationIgnored private var lastProgressSave = Date.distantPast
     @ObservationIgnored private var recovery = NativePlaybackRecovery()
     @ObservationIgnored private var selectedTransport = "auto"
     @ObservationIgnored private var wasPlayingBeforeInterruption = false
+    @ObservationIgnored private var expectedTransportState: Bool?
     @ObservationIgnored private var playbackAnchor = Date()
     @ObservationIgnored private var anchorTime = 0.0
     @ObservationIgnored private var anchorRate: Float = 0
     @ObservationIgnored private var currentArtwork: MPMediaItemArtwork?
+    @ObservationIgnored private var artworkTask: Task<Void, Never>?
     @ObservationIgnored private var lastNowPlayingUpdate = Date.distantPast
+    @ObservationIgnored private var lastMediaRangeRead = Date.distantPast
+    @ObservationIgnored private var nowPlayingPublication = PlaybackNowPlayingPublication()
 
     init(api: APIClient, defaults: UserDefaults = .standard, player: AVPlayer = AVPlayer()) {
         self.api = api
@@ -132,10 +142,22 @@ final class PlaybackCoordinator {
 
     var playableParts: [VideoPart] { PlaybackQueue.playableParts(currentVideo?.parts ?? []) }
     var variants: [MediaVariant] { currentPart?.variants.filter { $0.kind != "hls" } ?? [] }
-    var hasNext: Bool {
-        queueTarget(direction: 1) != .stop || playbackQueue.hasUnloadedItems
+    var hasNext: Bool { hasAdjacentItem(direction: 1) || playbackQueue.hasUnloadedItems }
+    var hasPrevious: Bool { hasAdjacentItem(direction: -1) }
+
+    private func hasAdjacentItem(direction: Int) -> Bool {
+        Self.hasAdjacentItem(parts: currentVideo?.parts ?? [], partID: currentPart?.id,
+                             videos: queue, videoID: currentVideo?.id, direction: direction)
     }
-    var hasPrevious: Bool { queueTarget(direction: -1) != .stop }
+
+    nonisolated static func hasAdjacentItem(parts: [VideoPart], partID: String?, videos: [ArchiveVideo], videoID: String?, direction: Int) -> Bool {
+        let parts = PlaybackQueue.playableParts(parts)
+        if let index = parts.firstIndex(where: { $0.id == partID }), parts.indices.contains(index + direction) { return true }
+        // Identical to the manual queue target rule, without allocating an ID
+        // array for the whole queue just to locate the current video.
+        guard let id = videoID, let index = videos.firstIndex(where: { $0.id == id }) else { return false }
+        return videos.indices.contains(index + direction)
+    }
     var availableSubtitles: [SubtitleTrack] { session?.subtitles ?? [] }
     var sourceFeatures: [String] {
         guard let media = session?.media else { return [] }
@@ -159,6 +181,7 @@ final class PlaybackCoordinator {
     }
 
     func play(video: ArchiveVideo, part: VideoPart? = nil, variant: MediaVariant? = nil) async {
+        guard !Task.isCancelled else { return }
         ensureQueueIdentity()
         if await resumeCurrentSelection(videoID: video.id, partID: part?.id, variantID: variant?.id) { return }
         navigationGeneration = UUID()
@@ -197,6 +220,7 @@ final class PlaybackCoordinator {
         currentTime = 0
         duration = 0
         bufferedTime = 0
+        lastMediaRangeRead = .distantPast
         isBuffering = false
         if defaults.object(forKey: "treasure.native.playback.danmaku") == nil { danmakuEnabled = api.defaultDanmaku }
         selectedRouteID = ""
@@ -206,6 +230,7 @@ final class PlaybackCoordinator {
         recovery = NativePlaybackRecovery()
         initialResumeApplied = false
         wantsPlayback = true
+        expectedTransportState = true
         isLoading = true
         recordDiagnostic("play-request")
         updateNowPlaying()
@@ -240,10 +265,13 @@ final class PlaybackCoordinator {
             }
             try configureAudioSession()
             await createSession(key: key)
+            guard generation == key, !Task.isCancelled else { return }
             loadArtwork(video: full, key: key)
         } catch {
             guard generation == key else { return }
             isLoading = false
+            wantsPlayback = false
+            expectedTransportState = nil
             errorMessage = error.localizedDescription
         }
     }
@@ -253,8 +281,12 @@ final class PlaybackCoordinator {
         if saveProgress { persistProgress() }
         navigationGeneration = UUID()
         queueTransitioning = false
+        wantsPlayback = false
+        expectedTransportState = nil
+        wasPlayingBeforeInterruption = false
+        requestsPresentation = false
+        queueLoadTask?.cancel()
         if clearQueue {
-            queueLoadTask?.cancel()
             queueLoadTask = nil
             playbackQueue.clear()
             queueActionError = nil
@@ -269,6 +301,7 @@ final class PlaybackCoordinator {
         itemObservation = nil
         player.replaceCurrentItem(with: nil)
         currentVideo = nil
+        presentation?.stopPlaybackPresentation()
         requestedPartID = nil
         historyReadPending = false
         currentPart = nil
@@ -282,6 +315,7 @@ final class PlaybackCoordinator {
         danmaku = []
         subtitleCues = []
         currentArtwork = nil
+        nowPlayingPublication = PlaybackNowPlayingPublication()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -293,10 +327,13 @@ final class PlaybackCoordinator {
         loadQueuePreferences()
     }
 
-    func togglePlayback() { isPlaying ? pause() : resume() }
+    func togglePlayback() { wantsPlayback ? pause() : resume() }
 
     func pause() {
         wantsPlayback = false
+        expectedTransportState = false
+        wasPlayingBeforeInterruption = false
+        isBuffering = false
         player.pause()
         endTemporaryRate()
         recordDiagnostic("pause")
@@ -309,6 +346,7 @@ final class PlaybackCoordinator {
         do {
             try configureAudioSession()
             wantsPlayback = true
+            expectedTransportState = true
             // A pending history/gesture seek must finish before audio starts.
             guard !isLoading, replayTask == nil else { return }
             if PlaybackStartupPosition.shouldReplay(position: currentTime, duration: duration), player.currentItem != nil {
@@ -338,7 +376,7 @@ final class PlaybackCoordinator {
                 player.playImmediately(atRate: effectiveRate)
                 recordDiagnostic("resume-request")
             }
-        } catch { errorMessage = error.localizedDescription }
+        } catch { wantsPlayback = false; expectedTransportState = nil; errorMessage = error.localizedDescription }
         updateNowPlaying()
     }
 
@@ -353,14 +391,16 @@ final class PlaybackCoordinator {
         currentTime = bounded
         recordDiagnostic("seek-request")
         updateTimeAnchor()
-        updateNowPlaying()
+        updateNowPlaying(forcePosition: true)
     }
 
     func skip(_ seconds: Double) { seek(to: currentTime + seconds) }
 
     func setRate(_ rate: Float) {
         guard rate.isFinite else { return }
-        preferredRate = min(2, max(0.5, rate))
+        let bounded = min(2, max(0.5, rate))
+        guard bounded != preferredRate else { return }
+        preferredRate = bounded
         player.defaultRate = preferredRate
         defaults.set(preferredRate, forKey: "treasure.native.playback.rate")
         if player.rate > 0 { player.rate = effectiveRate }
@@ -396,6 +436,7 @@ final class PlaybackCoordinator {
     /// The catalog supplies its exact search/filter/sort query. Loading starts at
     /// page 1, independent of the screen's currently loaded page or card count.
     func start(video: ArchiveVideo, part: VideoPart? = nil, context: PlaybackQueueContext? = nil) async {
+        guard !Task.isCancelled else { return }
         ensureQueueIdentity()
         if let context {
             if playbackQueue.context != context || !queue.contains(where: { $0.id == video.id }) {
@@ -406,6 +447,7 @@ final class PlaybackCoordinator {
         } else if !queue.contains(where: { $0.id == video.id }) {
             configureQueue(videos: [video], currentVideoId: video.id)
         }
+        if playbackQueue.hasUnloadedItems, queueLoadTask?.isCancelled == true { beginLoadingQueue() }
         await play(video: video, part: part)
     }
 
@@ -437,6 +479,7 @@ final class PlaybackCoordinator {
     }
 
     func playQueueItem(id: String) async {
+        guard !Task.isCancelled else { return }
         ensureQueueIdentity()
         guard queue.contains(where: { $0.id == id }) else { return }
         if await resumeCurrentSelection(videoID: id) { return }
@@ -451,7 +494,7 @@ final class PlaybackCoordinator {
               partID == nil || partID == (currentPart?.id ?? requestedPartID),
               variantID == nil || variantID == currentVariant?.id else { return false }
         cancelQueueNavigation()
-        if isLoading { wantsPlayback = true; return true }
+        if isLoading { wantsPlayback = true; expectedTransportState = true; return true }
         if errorMessage != nil {
             if currentPart == nil {
                 // Detail hydration previously failed; let play() retry it.
@@ -462,7 +505,7 @@ final class PlaybackCoordinator {
             return true
         }
         guard player.currentItem != nil else { return false }
-        if !isPlaying { resume() }
+        if !wantsPlayback { resume() }
         return true
     }
 
@@ -471,10 +514,12 @@ final class PlaybackCoordinator {
     func playNext() async { await nextPart() }
 
     func retryQueueLoading() async {
+        guard !Task.isCancelled else { return }
         if playbackQueue.hasUnloadedItems {
-            if queueLoadTask == nil || !playbackQueue.isLoading { beginLoadingQueue() }
+            if queueLoadTask == nil || queueLoadTask?.isCancelled == true || !playbackQueue.isLoading { beginLoadingQueue() }
             await queueLoadTask?.value
         }
+        guard !Task.isCancelled else { return }
         if let pending = pendingQueueRetry {
             await navigateQueue(direction: pending.direction, startingAt: pending.id, automatic: pending.automatic)
         }
@@ -482,8 +527,12 @@ final class PlaybackCoordinator {
 
     private func beginLoadingQueue() {
         let revision = api.sessionRevision
+        let previousLoad = queueLoadTask
         queueLoadTask = Task { [weak self] in
-            guard let self else { return }
+            // Let a canceled loader release its loading state before resuming
+            // the same preserved queue; it must not suppress the replacement.
+            if previousLoad?.isCancelled == true { await previousLoad?.value }
+            guard let self, !Task.isCancelled else { return }
             await self.playbackQueue.loadAll { context, page in
                 guard self.api.sessionRevision == revision else { throw APIError.staleSession }
                 let response: Page<ArchiveVideo> = try await self.api.get(context.path, query: context.parameters(page: page))
@@ -501,6 +550,7 @@ final class PlaybackCoordinator {
     }
 
     private func advance(direction: Int, automatic: Bool = false) async {
+        guard !Task.isCancelled else { return }
         ensureQueueIdentity()
         guard !queueTransitioning else { return }
         var target = queueTarget(direction: direction, ended: automatic)
@@ -565,6 +615,7 @@ final class PlaybackCoordinator {
                 // is unplayable: stop here and preserve the exact retry target.
                 pendingQueueRetry = (summary.id, direction, automatic)
                 queueActionError = "无法读取“\(summary.title)”：\(error.localizedDescription)"
+                if automatic { pause() }
                 return
             }
         }
@@ -602,6 +653,8 @@ final class PlaybackCoordinator {
 
     func selectVariant(_ variant: MediaVariant) async {
         guard currentPart?.variants.contains(where: { $0.id == variant.id }) == true else { return }
+        guard currentVariant?.id != variant.id || errorMessage != nil else { return }
+        if errorMessage != nil { wantsPlayback = true }
         currentVariant = variant
         selectedTransport = "auto"
         recovery = NativePlaybackRecovery()
@@ -609,12 +662,16 @@ final class PlaybackCoordinator {
     }
 
     func selectRoute(_ id: String) async {
+        guard selectedRouteID != id || errorMessage != nil else { return }
+        if errorMessage != nil { wantsPlayback = true }
         selectedRouteID = id
         recovery.resetNetworkBudget()
         await renew()
     }
 
     func retry() async {
+        guard currentVideo != nil else { return }
+        wantsPlayback = true
         if currentPart == nil, let video = currentVideo {
             await play(video: video)
             return
@@ -631,6 +688,8 @@ final class PlaybackCoordinator {
         generation = UUID()
         activeItemGeneration = nil
         let key = generation
+        artworkTask?.cancel()
+        artworkTask = nil
         replayTask?.cancel()
         replayTask = nil
         renewalTask?.cancel()
@@ -642,7 +701,11 @@ final class PlaybackCoordinator {
         historyReadPending = false
         initialResumeApplied = false
         wantsPlayback = shouldPlay
+        expectedTransportState = shouldPlay
         await createSession(key: key)
+        if generation == key, !Task.isCancelled, currentArtwork == nil, let video = currentVideo {
+            loadArtwork(video: video, key: key)
+        }
     }
 
     func flushProgress() { persistProgress() }
@@ -675,11 +738,12 @@ final class PlaybackCoordinator {
         do {
             let data = try await api.data(track.url)
             guard generation == key, selectedSubtitle == id else { return }
-            guard data.count <= 8_000_000, let text = String(data: data, encoding: .utf8) else { throw NativePlaybackError.invalidSubtitles }
-            subtitleCues = PlaybackTimeline.subtitles(text)
+            let cues = try await PlaybackSidecarDecoder.subtitles(data)
+            guard generation == key, selectedSubtitle == id, !Task.isCancelled else { return }
+            subtitleCues = cues
             if subtitleCues.isEmpty { ancillaryWarning = "这条字幕没有可显示的时间轴。" }
         } catch {
-            guard generation == key, selectedSubtitle == id else { return }
+            guard generation == key, selectedSubtitle == id, !Task.isCancelled else { return }
             ancillaryWarning = "字幕加载失败：\(error.localizedDescription)"
         }
     }
@@ -744,6 +808,8 @@ final class PlaybackCoordinator {
         } catch {
             guard generation == key else { return }
             isLoading = false
+            wantsPlayback = false
+            expectedTransportState = nil
             errorMessage = error.localizedDescription
         }
     }
@@ -813,6 +879,7 @@ final class PlaybackCoordinator {
             statusMessage = "连接中断，正在重新获取播放地址。"
             await renew()
         case .stop:
+            pause()
             isLoading = false
             isBuffering = false
             errorMessage = "无法播放此归档：\(error?.localizedDescription ?? "系统解码器未能加载媒体")。可重试、切换节点或手动选择已保存的兼容版本。"
@@ -825,9 +892,11 @@ final class PlaybackCoordinator {
         ancillaryTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let rows: [NativeDanmakuCue] = try await self.api.get(path)
-                guard self.generation == key else { return }
-                self.danmaku = PlaybackTimeline.scheduleDanmaku(rows)
+                let data = try await self.api.data(path)
+                guard self.generation == key, !Task.isCancelled else { return }
+                let scheduled = try await PlaybackSidecarDecoder.danmaku(data)
+                guard self.generation == key, !Task.isCancelled else { return }
+                self.danmaku = scheduled
             } catch {
                 guard self.generation == key, !Task.isCancelled else { return }
                 self.ancillaryWarning = "弹幕暂不可用；视频播放不受影响。"
@@ -910,37 +979,58 @@ final class PlaybackCoordinator {
 
     private func installObservers() {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { @Sendable [weak self] _ in
-            Task { @MainActor in
+            // AVPlayer delivers this observer on the explicitly supplied main
+            // queue; avoid creating and scheduling another task on every tick.
+            MainActor.assumeIsolated {
                 guard let self, self.player.currentItem != nil else { return }
+                let now = Date()
                 let value = self.player.currentTime().seconds
-                if value.isFinite, self.replayTask == nil, !self.isLoading || !self.startupPosition.hasExplicitSeek { self.currentTime = max(0, value) }
-                if let item = self.player.currentItem {
-                    let total = item.duration.seconds
-                    if total.isFinite, total > 0 { self.duration = total }
-                    self.bufferedTime = item.loadedTimeRanges.compactMap { value in
-                        let range = value.timeRangeValue
-                        let end = CMTimeRangeGetEnd(range).seconds
-                        return end.isFinite ? end : nil
-                    }.max() ?? 0
+                if value.isFinite, self.replayTask == nil, !self.isLoading || !self.startupPosition.hasExplicitSeek {
+                    let position = max(0, value)
+                    if self.currentTime != position { self.currentTime = position }
                 }
-                self.updateTimeAnchor()
-                if self.isPlaying, Date().timeIntervalSince(self.lastProgressSave) >= 10 { self.persistProgress() }
+                // Elapsed time remains responsive at 4 Hz. Buffer ranges and
+                // duration need no more than one check per second between events.
+                if now.timeIntervalSince(self.lastMediaRangeRead) >= 1, let item = self.player.currentItem {
+                    self.lastMediaRangeRead = now
+                    let total = item.duration.seconds
+                    if total.isFinite, total > 0, self.duration != total { self.duration = total }
+                    var buffered = 0.0
+                    for value in item.loadedTimeRanges {
+                        let end = CMTimeRangeGetEnd(value.timeRangeValue).seconds
+                        if end.isFinite { buffered = max(buffered, end) }
+                    }
+                    if self.bufferedTime != buffered { self.bufferedTime = buffered }
+                }
+                self.updateTimeAnchor(at: now)
+                if self.isPlaying, now.timeIntervalSince(self.lastProgressSave) >= 10 { self.persistProgress() }
                 if self.player.rate > 0, self.currentTime < self.duration - 0.5 { self.endGuard.rearm(self.generation) }
-                if Date().timeIntervalSince(self.lastNowPlayingUpdate) >= 2 { self.updateNowPlaying() }
+                if now.timeIntervalSince(self.lastNowPlayingUpdate) >= 2 { self.updateNowPlaying(at: now) }
             }
         }
         controlObservation = player.observe(\.timeControlStatus, options: [.new]) { @Sendable [weak self] _, _ in
             Task { @MainActor in
                 guard let self else { return }
                 let wasPlaying = self.isPlaying
-                self.isPlaying = self.player.timeControlStatus == .playing
-                self.isBuffering = self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate && !self.isLoading
-                if self.isPlaying { self.wantsPlayback = true }
-                else if self.player.timeControlStatus == .paused, !self.isLoading, self.replayTask == nil {
+                let status = self.player.timeControlStatus
+                self.isPlaying = self.currentVideo != nil && status == .playing
+                self.isBuffering = self.currentVideo != nil && self.wantsPlayback && status == .waitingToPlayAtSpecifiedRate && !self.isLoading
+                if self.currentVideo == nil {
                     self.wantsPlayback = false
-                    if wasPlaying { self.persistProgress() }
+                    self.expectedTransportState = nil
+                } else if let expected = self.expectedTransportState {
+                    // A delayed status from the previous command cannot reverse
+                    // a newer tap. Waiting acknowledges a play request too.
+                    if (expected && status != .paused) || (!expected && status == .paused) {
+                        self.expectedTransportState = nil
+                    }
+                } else if self.isPlaying {
+                    // Native PiP/system transport can change AVPlayer directly.
+                    self.wantsPlayback = true
+                } else if status == .paused, !self.isLoading, self.replayTask == nil {
+                    self.wantsPlayback = false
                 }
-                if self.player.rate > 0, self.temporaryRate == nil { self.preferredRate = self.player.rate }
+                if wasPlaying && !self.isPlaying && status == .paused && !self.isLoading { self.persistProgress() }
                 if self.isPlaying != wasPlaying { self.recordDiagnostic(self.isPlaying ? "playing" : "not-playing") }
                 self.updateTimeAnchor()
                 self.updateNowPlaying()
@@ -950,7 +1040,7 @@ final class PlaybackCoordinator {
             Task { @MainActor in
                 guard let self else { return }
                 let rate = self.player.rate
-                if rate > 0, self.temporaryRate == nil {
+                if rate.isFinite, rate > 0, self.temporaryRate == nil, self.preferredRate != rate {
                     self.preferredRate = rate
                     self.defaults.set(rate, forKey: "treasure.native.playback.rate")
                 }
@@ -1001,8 +1091,11 @@ final class PlaybackCoordinator {
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
             coordinator.recordDiagnostic("interruption:\(raw):options:\(notification.interruptionOptions ?? 0)")
             if type == .began {
-                coordinator.wasPlayingBeforeInterruption = coordinator.isPlaying
+                let shouldResume = coordinator.wantsPlayback
                 coordinator.pause()
+                // Remember playback intent even if an interruption arrives
+                // before AVPlayer has progressed from buffering to playing.
+                coordinator.wasPlayingBeforeInterruption = shouldResume
             } else {
                 let options = notification.interruptionOptions.map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
                 if coordinator.wasPlayingBeforeInterruption && options.contains(.shouldResume) { coordinator.resume() }
@@ -1087,37 +1180,49 @@ final class PlaybackCoordinator {
         }
     }
 
-    private func updateTimeAnchor() {
+    private func updateTimeAnchor(at date: Date = Date()) {
         anchorTime = currentTime
         anchorRate = player.rate
-        playbackAnchor = Date()
+        playbackAnchor = date
     }
 
-    private func updateNowPlaying() {
-        lastNowPlayingUpdate = Date()
+    private func updateNowPlaying(at date: Date = Date(), forcePosition: Bool = false) {
+        lastNowPlayingUpdate = date
         guard let video = currentVideo else { return }
+        let rate = isPlaying && player.rate.isFinite ? player.rate : 0
+        let state = PlaybackNowPlayingState(videoID: video.id, partID: currentPart?.id,
+                                           title: video.title, artist: video.creators.map(\.name).joined(separator: "、"),
+                                           album: currentPart?.title ?? "", duration: duration, rate: rate,
+                                           preferredRate: preferredRate, artwork: currentArtwork.map(ObjectIdentifier.init),
+                                           hasNext: hasNext, hasPrevious: hasPrevious)
+        // The system advances elapsed time from rate. Repeated KVO or normal
+        // clock ticks need no dictionary allocation or Now Playing publication.
+        guard nowPlayingPublication.shouldPublish(state: state, position: currentTime, at: date, forcePosition: forcePosition) else { return }
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: video.title,
-            MPMediaItemPropertyArtist: video.creators.map(\.name).joined(separator: "、"),
-            MPMediaItemPropertyAlbumTitle: currentPart?.title ?? "",
-            MPMediaItemPropertyPlaybackDuration: duration,
+            MPMediaItemPropertyTitle: state.title,
+            MPMediaItemPropertyArtist: state.artist,
+            MPMediaItemPropertyAlbumTitle: state.album,
+            MPMediaItemPropertyPlaybackDuration: state.duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? player.rate : 0,
-            MPNowPlayingInfoPropertyDefaultPlaybackRate: preferredRate,
+            MPNowPlayingInfoPropertyPlaybackRate: state.rate,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: state.preferredRate,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
-            MPNowPlayingInfoPropertyExternalContentIdentifier: video.id,
+            MPNowPlayingInfoPropertyExternalContentIdentifier: state.videoID,
             MPNowPlayingInfoPropertyIsLiveStream: false
         ]
         if let currentArtwork { info[MPMediaItemPropertyArtwork] = currentArtwork }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        MPRemoteCommandCenter.shared().nextTrackCommand.isEnabled = hasNext
-        MPRemoteCommandCenter.shared().previousTrackCommand.isEnabled = hasPrevious
+        let commands = MPRemoteCommandCenter.shared()
+        if commands.nextTrackCommand.isEnabled != state.hasNext { commands.nextTrackCommand.isEnabled = state.hasNext }
+        if commands.previousTrackCommand.isEnabled != state.hasPrevious { commands.previousTrackCommand.isEnabled = state.hasPrevious }
     }
 
     private func loadArtwork(video: ArchiveVideo, key: UUID) {
-        guard let path = video.coverUrl else { return }
-        Task { [weak self] in
-            guard let self, let data = try? await self.api.data(path), self.generation == key,
+        artworkTask?.cancel()
+        guard generation == key, let path = video.coverUrl else { return }
+        artworkTask = Task { [weak self] in
+            guard let self, !Task.isCancelled,
+                  let data = try? await self.api.data(path), self.generation == key, !Task.isCancelled,
                   let image = UIImage(data: data) else { return }
             self.currentArtwork = MPMediaItemArtwork(boundsSize: image.size) { @Sendable _ in image }
             self.updateNowPlaying()
@@ -1125,6 +1230,8 @@ final class PlaybackCoordinator {
     }
 
     private func cancelMediaTasks() {
+        artworkTask?.cancel()
+        artworkTask = nil
         replayTask?.cancel()
         replayTask = nil
         ancillaryTask?.cancel()
@@ -1173,7 +1280,7 @@ struct NativeMediaOption: Identifiable {
     let title: String
 }
 
-private struct NativeWatchProgress: Decodable {
+private struct NativeWatchProgress: Decodable, Sendable {
     let position: Double
     let duration: Double
 }
@@ -1258,5 +1365,78 @@ struct PlaybackStartupPosition {
 
     static func shouldReplay(position: Double, duration: Double) -> Bool {
         position.isFinite && duration.isFinite && duration > 0 && position >= duration - 0.1
+    }
+}
+
+/// Decode and prepare large sidecars off the UI actor. Only immutable Data and
+/// Sendable cue values cross the boundary; no player or session is captured.
+enum PlaybackSidecarDecoder {
+    nonisolated static func danmaku(_ data: Data) async throws -> [ScheduledDanmaku] {
+        try Task.checkCancellation()
+        let worker = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let rows: [NativeDanmakuCue]
+            do { rows = try decoder.decode([NativeDanmakuCue].self, from: data) }
+            catch { throw APIError.decoding }
+            try Task.checkCancellation()
+            let scheduled = PlaybackTimeline.scheduleDanmaku(rows)
+            try Task.checkCancellation()
+            return scheduled
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+
+    nonisolated static func subtitles(_ data: Data) async throws -> [NativeSubtitleCue] {
+        try Task.checkCancellation()
+        let worker = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            guard data.count <= 8_000_000, let text = String(data: data, encoding: .utf8) else {
+                throw NativePlaybackError.invalidSubtitles
+            }
+            let cues = PlaybackTimeline.subtitles(text)
+            try Task.checkCancellation()
+            return cues
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+}
+
+/// Lock-screen metadata changes are distinct from the system's advancing clock.
+struct PlaybackNowPlayingState: Equatable {
+    var videoID: String
+    var partID: String?
+    var title: String
+    var artist: String
+    var album: String
+    var duration: Double
+    var rate: Float
+    var preferredRate: Float
+    var artwork: ObjectIdentifier?
+    var hasNext: Bool
+    var hasPrevious: Bool
+}
+
+struct PlaybackNowPlayingPublication {
+    private var previous: (state: PlaybackNowPlayingState, position: Double, date: Date)?
+
+    mutating func shouldPublish(state: PlaybackNowPlayingState, position: Double, at date: Date, forcePosition: Bool = false) -> Bool {
+        guard position.isFinite else { return false }
+        if !forcePosition, let previous, previous.state == state {
+            let elapsed = max(0, date.timeIntervalSince(previous.date))
+            let expected = min(state.duration, previous.position + elapsed * Double(state.rate))
+            if abs(position - expected) < 0.75 { return false }
+        }
+        previous = (state, position, date)
+        return true
     }
 }

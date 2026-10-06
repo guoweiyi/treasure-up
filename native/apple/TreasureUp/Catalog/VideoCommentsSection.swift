@@ -38,18 +38,18 @@ struct VideoCommentsSection: View {
                     .focused($searchFocused)
                 if !query.isEmpty { Button("清除", systemImage: "xmark.circle.fill") { query = "" }.labelStyle(.iconOnly) }
             }.padding(12).background(.quaternary.opacity(0.6), in: .rect(cornerRadius: 12))
-            Text("展示归档时的评论、点赞与回复。").font(.caption).foregroundStyle(.secondary)
+            Text(appPrompt("展示归档时的评论、点赞与回复。")).font(.caption).foregroundStyle(.secondary)
             ForEach(Array(comments.enumerated()), id: \.element.commentIdentity) { _, comment in
                 ArchivedCommentRow(videoId: videoId, comment: comment)
                 Divider().padding(.leading, 48)
             }
             if loading { ProgressView().frame(maxWidth: .infinity) }
             if let error {
-                Text(error).font(.callout).foregroundStyle(.red)
+                Text(appPrompt(error)).font(.callout).foregroundStyle(.red)
                 Button("重试") { Task { await load(more: loadingMore) } }.disabled(loading)
             }
             if !loading && comments.isEmpty && error == nil {
-                ContentUnavailableView(query.isEmpty ? "暂无归档评论" : "没有匹配的评论", systemImage: "bubble.left.and.bubble.right")
+                ContentUnavailableView(appPrompt(query.isEmpty ? "暂无归档评论" : "没有匹配的评论"), systemImage: "bubble.left.and.bubble.right")
             }
             if hasMore && comments.count < total {
                 Button("载入更多评论") { Task { await load(more: true) } }
@@ -119,9 +119,9 @@ private struct ArchivedCommentRow: View {
                         }
                         if loading { ProgressView() }
                         if let error {
-                            Text(error).font(.caption).foregroundStyle(.red)
+                            Text(appPrompt(error)).font(.caption).foregroundStyle(.red)
                             Button("重试") { Task { await loadReplies() } }
-                        } else if page > 0 && replies.isEmpty { Text("这层回复尚未归档。").font(.caption).foregroundStyle(.secondary) }
+                        } else if page > 0 && replies.isEmpty { Text(appPrompt("这层回复尚未归档。")).font(.caption).foregroundStyle(.secondary) }
                         if hasMore && replies.count < total { Button("更多回复（已归档 \(total) 条）") { Task { await loadReplies() } }.font(.caption).disabled(loading) }
                     }
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -210,14 +210,14 @@ struct CommentImageView: View {
                             .onTapGesture(count: 2) { scale = scale > 1 ? 1 : 2 }
                     case .failure:
                         ContentUnavailableView {
-                            Label("附图未能加载", systemImage: "photo")
+                            Label(appPrompt("附图未能加载"), systemImage: "photo")
                         } description: {
-                            Text("请检查网络连接后重试。")
+                            Text(appPrompt("请检查网络连接后重试。"))
                         } actions: {
                             Button("重新加载") { retryID += 1 }.buttonStyle(.borderedProminent)
                         }.frame(width: geometry.size.width, height: geometry.size.height)
                     case .empty:
-                        ProgressView("正在加载附图…").frame(width: geometry.size.width, height: geometry.size.height)
+                        ProgressView(appPrompt("正在加载附图…")).frame(width: geometry.size.width, height: geometry.size.height)
                     @unknown default:
                         EmptyView()
                     }

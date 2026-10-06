@@ -4,6 +4,67 @@ import AVFoundation
 
 final class PlaybackTests: XCTestCase {
     @MainActor
+    func testVideoLayersClipAndFollowSidebarDrivenResizes() {
+        let suite = "TreasureVideoLayoutTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let client = APIClient(baseURL: URL(string: "https://playback.example.test")!, defaults: defaults, persistSession: false)
+        let coordinator = PlaybackCoordinator(api: client, defaults: defaults)
+        coordinator.fitToFill = true
+        let presentation = NativePlaybackPresentation(coordinator: coordinator)
+        presentation.configure(coordinator: coordinator)
+        let container = NativePlayerContainerViewController(presentation: presentation)
+        container.loadViewIfNeeded()
+        container.beginAppearanceTransition(true, animated: false)
+        container.endAppearanceTransition()
+        defer { container.detachPlayerIfOwned(); coordinator.stop() }
+
+        for size in [CGSize(width: 960, height: 540), CGSize(width: 540, height: 304),
+                     CGSize(width: 320, height: 180), CGSize(width: 700, height: 394)] {
+            container.view.frame = CGRect(origin: .zero, size: size)
+            container.view.setNeedsLayout()
+            container.view.layoutIfNeeded()
+            XCTAssertEqual(presentation.controller.view.bounds.size, size)
+            XCTAssertEqual(presentation.videoView.bounds.size, size)
+            XCTAssertTrue(container.view.clipsToBounds)
+            XCTAssertTrue(presentation.controller.view.clipsToBounds)
+            XCTAssertTrue(presentation.videoView.playerLayer.masksToBounds)
+            for layerView in presentation.controller.view.subviews {
+                XCTAssertTrue(layerView.clipsToBounds)
+                XCTAssertEqual(layerView.bounds.size, size)
+            }
+        }
+    }
+
+    @MainActor
+    func testOldInlineContainerCannotResizeBorrowedFullscreenLayer() {
+        let suite = "TreasureVideoLayoutTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let client = APIClient(baseURL: URL(string: "https://playback.example.test")!, defaults: defaults, persistSession: false)
+        let coordinator = PlaybackCoordinator(api: client, defaults: defaults)
+        let presentation = NativePlaybackPresentation(coordinator: coordinator)
+        let inline = NativePlayerContainerViewController(presentation: presentation)
+        let fullscreen = NativePlayerContainerViewController(presentation: presentation)
+        for (container, size) in [(inline, CGSize(width: 320, height: 180)),
+                                  (fullscreen, CGSize(width: 1280, height: 720))] {
+            container.loadViewIfNeeded()
+            container.view.frame = CGRect(origin: .zero, size: size)
+            container.beginAppearanceTransition(true, animated: false)
+            container.endAppearanceTransition()
+            container.view.setNeedsLayout()
+            container.view.layoutIfNeeded()
+        }
+        defer { fullscreen.detachPlayerIfOwned(); coordinator.stop() }
+        inline.view.frame.size = CGSize(width: 240, height: 135)
+        inline.view.setNeedsLayout()
+        inline.view.layoutIfNeeded()
+        XCTAssertTrue(presentation.controller.parent === fullscreen)
+        XCTAssertEqual(presentation.videoView.bounds.size, CGSize(width: 1280, height: 720))
+        XCTAssertTrue(inline.view.subviews.isEmpty)
+    }
+
+    @MainActor
     func testPlayerKVOCallbacksCanArriveFromBackgroundThreads() async {
         let client = APIClient(baseURL: URL(string: "https://playback.example.test")!, persistSession: false)
         let coordinator = PlaybackCoordinator(api: client)

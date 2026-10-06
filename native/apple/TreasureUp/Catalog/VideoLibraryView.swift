@@ -46,7 +46,7 @@ struct VideoLibraryView: View {
                 headerLayout {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(query.isEmpty ? (creatorProfile == nil ? "你的珍藏" : "已归档作品") : "搜索结果").font(.title3.bold())
-                        Text(loading && videos.isEmpty ? "正在加载…" : "\(total) 个已保存视频")
+                        Text(loading && videos.isEmpty ? appPrompt("正在加载…") : "\(total) 个已保存视频")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     if !typeSize.isAccessibilitySize { Spacer() }
@@ -67,7 +67,7 @@ struct VideoLibraryView: View {
                 if let error, videos.isEmpty { FailureView(message: error) { await load() } }
                 if loading && videos.isEmpty { ProgressView().frame(maxWidth: .infinity).padding(60) }
                 else if videos.isEmpty && error == nil {
-                    ContentUnavailableView(query.isEmpty ? "还没有视频" : "没有匹配的视频", systemImage: "rectangle.stack", description: Text("调整搜索或筛选条件，或在管理中心添加归档来源。"))
+                    ContentUnavailableView(appPrompt(query.isEmpty ? "还没有视频" : "没有匹配的视频"), systemImage: "rectangle.stack", description: Text(appPrompt("调整搜索或筛选条件，或在管理中心添加归档来源。")))
                 }
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
                     ForEach(videos) { video in
@@ -83,7 +83,7 @@ struct VideoLibraryView: View {
                 }
                 if !videos.isEmpty {
                     if let error {
-                        Label(error, systemImage: "wifi.exclamationmark").font(.callout).foregroundStyle(.secondary)
+                        Label(appPrompt(error), systemImage: "wifi.exclamationmark").font(.callout).foregroundStyle(.secondary)
                         Button("重试") { Task { await load(more: loadingMore) } }.buttonStyle(.bordered)
                     }
                     PaginationFooter(count: videos.count, total: total, busy: loading, hasMore: hasMore) { await load(more: true) }
@@ -95,11 +95,11 @@ struct VideoLibraryView: View {
         .scrollDismissesKeyboard(.interactively)
         .refreshable { await load() }
         .task(id: searchKey) { await load(debounce: !query.isEmpty) }
-        .alert("筛选标签", isPresented: $filters) {
+        .alert(appPrompt("筛选标签"), isPresented: $filters) {
             TextField("标签", text: $draftTag)
             Button("完成") { tag = draftTag.trimmingCharacters(in: .whitespacesAndNewlines) }
             Button("取消", role: .cancel) { }
-        } message: { Text("输入归档视频的标签名称。") }
+        } message: { Text(appPrompt("输入归档视频的标签名称。")) }
     }
 
     private func load(more: Bool = false, debounce: Bool = false) async {
@@ -165,12 +165,12 @@ struct CollectionsView: View {
                         }.padding(.vertical, 6)
                     }
                 }
-            } header: { Text("\(total) 个来源") } footer: { Text("归档的收藏夹、合集和 UP 主订阅，集中整理于此。") }
+            } header: { Text("\(total) 个来源") } footer: { Text(appPrompt("归档的收藏夹、合集和 UP 主订阅，集中整理于此。")) }
             if let error { FailureView(message: error) { await load(more: loadingMore) } }
             if loading { ProgressView().frame(maxWidth: .infinity) }
             if hasMore && items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
         }
-        .overlay { if !loading && error == nil && items.isEmpty { ContentUnavailableView("暂无收藏与订阅", systemImage: "square.stack") } }
+        .overlay { if !loading && error == nil && items.isEmpty { ContentUnavailableView(appPrompt("暂无收藏与订阅"), systemImage: "square.stack") } }
         .navigationTitle("收藏与订阅")
         .task { await load() }.refreshable { await load() }
     }
@@ -224,7 +224,7 @@ struct CreatorsView: View {
             if loading { ProgressView().frame(maxWidth: .infinity) }
             if hasMore && items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
         }
-        .overlay { if items.isEmpty && !loading && error == nil { ContentUnavailableView.search(text: query) } }
+        .overlay { if items.isEmpty && !loading && error == nil { ContentUnavailableView(appPrompt(query.isEmpty ? "暂无 UP 主" : "没有匹配的 UP 主"), systemImage: "person.crop.circle.badge.questionmark", description: Text(appPrompt("可以尝试调整搜索关键词。"))) } }
         .navigationTitle("UP 主")
         .searchable(text: $query, prompt: "搜索 UP 主")
         .scrollDismissesKeyboard(.interactively)

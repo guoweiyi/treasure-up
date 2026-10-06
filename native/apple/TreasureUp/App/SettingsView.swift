@@ -12,8 +12,8 @@ struct ServerConnectionView: View {
             Section {
                 VStack(alignment: .leading, spacing: 14) {
                     Image(systemName: "play.rectangle.on.rectangle.fill").font(.system(size: 46)).foregroundStyle(.indigo)
-                    Text("你的收藏，原生呈现。").font(.title.bold())
-                    Text("连接 Treasure Up，浏览已归档的视频、片单与创作者。").foregroundStyle(.secondary)
+                    Text(appPrompt("你的收藏，原生呈现。")).font(.title.bold())
+                    Text(appPrompt("连接 Treasure Up，浏览已归档的视频、片单与创作者。")).foregroundStyle(.secondary)
                 }.padding(.vertical, 16)
             }
             Section {
@@ -30,8 +30,8 @@ struct ServerConnectionView: View {
                 } label: { HStack { Text("连接服务器"); Spacer(); if busy { ProgressView() } else { Image(systemName: "arrow.right") } } }
                     .disabled(busy || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .accessibilityIdentifier("connectServer")
-            } header: { Text("服务器") } footer: { Text("使用 HTTPS 站点根地址。每台服务器的登录状态独立保存，切换时会停止当前播放。") }
-            if let message = error ?? initialError { Section { Text(message).foregroundStyle(.red).accessibilityLabel("连接失败：\(message)") } }
+            } header: { Text("服务器") } footer: { Text(appPrompt("使用 HTTPS 站点根地址。每台服务器的登录状态独立保存，切换时会停止当前播放。")) }
+            if let message = error ?? initialError { Section { Text(appPrompt(message)).foregroundStyle(.red).accessibilityLabel(appPrompt("连接失败：\(message)")) } }
         }
         .navigationTitle("连接资料库")
         .onAppear { address = api.baseURL.absoluteString }
@@ -50,7 +50,7 @@ struct LoginView: View {
     var body: some View {
         Form {
             Section {
-                Label("登录后同步你的片单和播放进度", systemImage: "person.crop.circle.badge.checkmark")
+                Label(appPrompt("登录后同步你的片单和播放进度"), systemImage: "person.crop.circle.badge.checkmark")
                     .font(.headline).padding(.vertical, 12)
                 TextField("用户名", text: $username).textContentType(.username)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.next)
@@ -61,7 +61,7 @@ struct LoginView: View {
                     HStack { Text("登录"); Spacer(); if busy { ProgressView() } }
                 }.disabled(busy || username.isEmpty || password.isEmpty).accessibilityIdentifier("loginSubmit")
             } footer: { Text(api.baseURL.host() ?? "") }
-            if let error { Text(error).foregroundStyle(.red) }
+            if let error { Text(appPrompt(error)).foregroundStyle(.red) }
         }
         .navigationTitle("登录")
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
@@ -103,7 +103,7 @@ struct SettingsView: View {
                 ShareLink(item: playback.diagnosticsText) {
                     Label("导出播放诊断", systemImage: "waveform.path.ecg")
                 }
-                Text("遇到异常声音后导出最近的播放与音频路由事件，便于定位问题。")
+                Text(appPrompt("遇到异常声音后导出最近的播放与音频路由事件，便于定位问题。"))
                     .font(.caption).foregroundStyle(.secondary)
             }
             if ["admin", "editor"].contains(api.user?.role ?? "") {
@@ -115,14 +115,14 @@ struct SettingsView: View {
             }
             Section("关于") {
                 LabeledContent("Treasure Up", value: "0.4.0")
-                Text("为 iPhone 和 iPad 设计").foregroundStyle(.secondary)
+                Text(appPrompt("为 iPhone 和 iPad 设计")).foregroundStyle(.secondary)
                 Link(destination: URL(string: "https://github.com/guoweiyi/treasure-up")!) { Label("开源项目 · GitHub", systemImage: "chevron.left.forwardslash.chevron.right") }
-                Text("HDR、杜比视界及杜比全景声的实际呈现取决于片源、设备与当前播放输出。")
+                Text(appPrompt("HDR、杜比视界及杜比全景声的实际呈现取决于片源、设备与当前播放输出。"))
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if api.user != nil { Section { Button("退出登录", role: .destructive) { logoutConfirmation = true } } }
-            if let error { Text(error).foregroundStyle(.red) }
-            if let warning = api.persistenceWarning { Text(warning).font(.footnote).foregroundStyle(.orange) }
+            if let error { Text(appPrompt(error)).foregroundStyle(.red) }
+            if let warning = api.persistenceWarning { Text(appPrompt(warning)).font(.footnote).foregroundStyle(.orange) }
         }
         .navigationTitle("设置")
         .sheet(isPresented: $loginPresented) { NavigationStack { LoginView() } }
@@ -130,7 +130,7 @@ struct SettingsView: View {
         .sheet(isPresented: $serverPresented) {
             NavigationStack { ServerConnectionView().toolbar { Button("取消") { serverPresented = false } } }
         }
-        .confirmationDialog("退出当前账户？", isPresented: $logoutConfirmation, titleVisibility: .visible) {
+        .confirmationDialog(appPrompt("退出当前账户？"), isPresented: $logoutConfirmation, titleVisibility: .visible) {
             Button("退出登录", role: .destructive) { Task { do { try await api.logout(); playback.stop() } catch { self.error = error.localizedDescription } } }
         }
     }

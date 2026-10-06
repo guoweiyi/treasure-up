@@ -13,8 +13,8 @@ struct SavedPlaylistsView: View {
         Group {
             if api.user == nil {
                 ContentUnavailableView {
-                    Label("收藏属于你的好视频", systemImage: "bookmark")
-                } description: { Text("登录后创建片单，记录观看状态与收藏笔记。") } actions: {
+                    Label(appPrompt("收藏属于你的好视频"), systemImage: "bookmark")
+                } description: { Text(appPrompt("登录后创建片单，记录观看状态与收藏笔记。")) } actions: {
                     Button("登录") { loginPresented = true }.buttonStyle(.borderedProminent)
                 }
             } else {
@@ -49,7 +49,7 @@ struct SavedPlaylistsView: View {
                 Form {
                     TextField("片单名称", text: $name)
                     TextField("描述", text: $description, axis: .vertical).lineLimit(3...6)
-                    if let error { Text(error).foregroundStyle(.red) }
+                    if let error { Text(appPrompt(error)).foregroundStyle(.red) }
                 }.navigationTitle("新建片单")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) { Button("取消") { createPresented = false } }
@@ -75,7 +75,7 @@ struct SavedPlaylistsView: View {
     }
 }
 
-private struct PlaylistListResponse: Decodable { let items: [PersonalPlaylist] }
+private struct PlaylistListResponse: Decodable, Sendable { let items: [PersonalPlaylist] }
 
 struct SaveToPlaylistView: View {
     @Environment(APIClient.self) private var api
@@ -99,7 +99,7 @@ struct SaveToPlaylistView: View {
                 }
             }
             if busy { ProgressView() }
-            if let error { Text(error).foregroundStyle(.red) }
+            if let error { Text(appPrompt(error)).foregroundStyle(.red) }
         }.navigationTitle("存入片单").toolbar { Button("完成") { dismiss() } }
             .task {
                 busy = true; defer { busy = false }
@@ -195,10 +195,10 @@ struct PlaylistDetailView: View {
         }.refreshable { await load() }
         .sheet(isPresented: $editing) { playlistEditor }
         .sheet(item: $selected) { video in itemEditor(video) }
-        .confirmationDialog("删除片单？已归档的视频仍会保留。", isPresented: $deleteConfirmation, titleVisibility: .visible) {
+        .confirmationDialog(appPrompt("删除片单？已归档的视频仍会保留。"), isPresented: $deleteConfirmation, titleVisibility: .visible) {
             Button("删除片单", role: .destructive) { Task { await deletePlaylist() } }
         }
-        .confirmationDialog("从片单移除此视频？", isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }), titleVisibility: .visible) {
+        .confirmationDialog(appPrompt("从片单移除此视频？"), isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }), titleVisibility: .visible) {
             if let video = removal { Button("移出片单", role: .destructive) { Task { await update(video, method: "DELETE") }; removal = nil } }
         }
     }
@@ -214,7 +214,7 @@ struct PlaylistDetailView: View {
                 TextField("名称", text: $name)
                 TextField("描述", text: $description, axis: .vertical).lineLimit(3...6)
                 Button("删除片单", role: .destructive) { editing = false; deleteConfirmation = true }
-                if let error { Text(error).foregroundStyle(.red) }
+                if let error { Text(appPrompt(error)).foregroundStyle(.red) }
             }.navigationTitle("编辑片单").toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { editing = false } }
                 ToolbarItem(placement: .confirmationAction) { Button("保存") { Task { await savePlaylist() } }.disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
@@ -231,7 +231,7 @@ struct PlaylistDetailView: View {
                         ForEach(destinations.filter { $0.id != playlist.id }) { Text($0.name).tag($0.id) }
                     }
                 }
-                if let error { Text(error).foregroundStyle(.red) }
+                if let error { Text(appPrompt(error)).foregroundStyle(.red) }
             }.navigationTitle("编辑收藏").toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { selected = nil } }
                 ToolbarItem(placement: .confirmationAction) { Button("保存") { Task { await saveItem(video) } }.disabled(busy) }

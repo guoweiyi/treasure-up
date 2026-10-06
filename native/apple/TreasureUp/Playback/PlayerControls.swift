@@ -1,8 +1,9 @@
 import SwiftUI
 import AVKit
+import Observation
 
 /// A single native video surface with controls that stay in the detail page.
-/// The caller owns the frame and expanded layout; no modal player is presented.
+/// The caller owns the viewport and the transition to a full-screen controller.
 struct InlineNativePlayer: View {
     @Bindable var coordinator: PlaybackCoordinator
     var isExpanded = false
@@ -17,54 +18,40 @@ struct InlineNativePlayer: View {
     @State private var presentation: NativePlaybackPresentation?
     @State private var hideTask: Task<Void, Never>?
     @State private var noticeTask: Task<Void, Never>?
-    @State private var seekPreview: Double?
-    @State private var gestureStartTime: Double?
-    @State private var dragAxis: PlayerGestureMath.DragAxis?
-    @State private var isSliderEditing = false
+    @State private var scrubbing = PlayerScrubbingState()
     @State private var feedback: String?
     @State private var panel: PlayerInlinePanel?
     @GestureState private var holdingSpeed = false
 
     private var seekableDuration: Double { coordinator.duration.isFinite ? max(0, coordinator.duration) : 0 }
-    private var displayedTime: Double {
-        PlayerGestureMath.clampedTime(seekPreview ?? coordinator.currentTime, duration: seekableDuration)
-    }
 
     var body: some View {
         GeometryReader { geometry in
+            let controlInsets = PlayerGestureMath.controlInsets(isExpanded: isExpanded, reported: geometry.safeAreaInsets)
+            let gestureBounds = PlayerGestureMath.gestureBounds(size: geometry.size, insets: controlInsets,
+                controlsVisible: controlsVisible || voiceOver, largeText: dynamicTypeSize.isAccessibilitySize)
             ZStack {
                 NativePlayerView(coordinator: coordinator)
+                    .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                    .allowsHitTesting(false)
                 gestureSurface(width: geometry.size.width)
+                    .frame(width: gestureBounds.width, height: gestureBounds.height)
+                    .position(x: gestureBounds.midX, y: gestureBounds.midY)
                     .allowsHitTesting(panel == nil)
                 if coordinator.isPictureInPictureActive {
                     VStack(spacing: 10) {
                         Image(systemName: "pip.fill").font(.largeTitle)
-                        Text("正在画中画中播放").font(.subheadline)
+                        Text(appPrompt("正在画中画中播放")).font(.subheadline)
                     }.foregroundStyle(.white.opacity(0.8)).allowsHitTesting(false)
                 }
                 if controlsVisible || voiceOver {
-                    controls(size: geometry.size, insets: geometry.safeAreaInsets)
+                    controls(size: geometry.size, insets: controlInsets)
                         .allowsHitTesting(panel == nil)
                         .accessibilityHidden(panel != nil)
                         .transition(.opacity)
                 }
-                if holdingSpeed {
-                    feedbackPill("2× 快进中", symbol: "forward.fill")
-                        .frame(maxHeight: .infinity, alignment: .top)
-                        .padding(.top, max(12, geometry.safeAreaInsets.top + 8))
-                } else if let preview = seekPreview, !isSliderEditing {
-                    VStack(spacing: 8) {
-                        Image(systemName: preview >= (gestureStartTime ?? 0) ? "goforward" : "gobackward")
-                            .font(.title2)
-                        Text(PlayerGestureMath.timeLabel(preview)).font(.title2.monospacedDigit().bold())
-                        Text("松手跳转 · 共 \(PlayerGestureMath.timeLabel(coordinator.duration))")
-                            .font(.caption)
-                    }.foregroundStyle(.white).padding(20)
-                        .background(.black.opacity(0.7), in: .rect(cornerRadius: 16))
-                        .allowsHitTesting(false)
-                } else if let feedback {
-                    feedbackPill(feedback, symbol: "play.fill").allowsHitTesting(false)
-                }
+                PlayerInteractionFeedback(coordinator: coordinator, scrubbing: scrubbing,
+                    holdingSpeed: holdingSpeed, feedback: feedback, topInset: controlInsets.top)
                 if coordinator.isLoading || coordinator.isBuffering {
                     ProgressView().tint(.white).controlSize(.large)
                         .padding(18).background(.black.opacity(0.35), in: .circle)
@@ -72,9 +59,9 @@ struct InlineNativePlayer: View {
                 }
                 if let error = coordinator.errorMessage {
                     VStack(spacing: 10) {
-                        Label("播放遇到问题", systemImage: "exclamationmark.triangle")
+                        Label(appPrompt("播放遇到问题"), systemImage: "exclamationmark.triangle")
                             .font(.subheadline.bold())
-                        Text(error).font(.caption).lineLimit(isExpanded ? 4 : 2)
+                        Text(appPrompt(error)).font(.caption).lineLimit(isExpanded ? 4 : 2)
                         Button("重新尝试") { Task { await coordinator.retry() } }
                             .buttonStyle(.borderedProminent).tint(.white.opacity(0.25))
                     }.foregroundStyle(.white).multilineTextAlignment(.center)
@@ -99,9 +86,10 @@ struct InlineNativePlayer: View {
                 scheduleHide()
             }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inline-player")
-        .onChange(of: coordinator.isPlaying) { _, playing in
-            if !playing { revealControls() }
+        .onChange(of: coordinator.wantsPlayback) { _, requested in
+            if !requested { revealControls() }
             else { scheduleHide() }
         }
         .onChange(of: controlsVisible) { _, visible in presentation?.setControlsVisible(visible || voiceOver) }
@@ -142,14 +130,21 @@ struct InlineNativePlayer: View {
     }
 
     private func gestureSurface(width: CGFloat) -> some View {
-        Color.clear
+        let supportsSkipping = controlsVisible || voiceOver
+        return Color.clear
             .contentShape(Rectangle())
             .gesture(
-                SpatialTapGesture(count: 2)
+                // When hidden, reveal immediately instead of waiting for the
+                // double-tap timeout before the transport buttons can be hit.
+                SpatialTapGesture(count: supportsSkipping ? 2 : 1)
                     .exclusively(before: SpatialTapGesture(count: 1))
                     .onEnded { result in
                         switch result {
                         case .first(let value):
+                            guard supportsSkipping else {
+                                revealControls()
+                                return
+                            }
                             let delta = value.location.x < width / 2 ? -15.0 : 15.0
                             coordinator.skip(delta)
                             showFeedback(delta < 0 ? "后退 15 秒" : "前进 15 秒")
@@ -164,16 +159,16 @@ struct InlineNativePlayer: View {
                 DragGesture(minimumDistance: 18)
                     .onChanged { value in
                         guard !holdingSpeed, seekableDuration > 0, scenePhase == .active else { return }
-                        if dragAxis == nil {
-                            dragAxis = PlayerGestureMath.dragAxis(horizontal: value.translation.width, vertical: value.translation.height)
+                        if scrubbing.dragAxis == nil {
+                            scrubbing.dragAxis = PlayerGestureMath.dragAxis(horizontal: value.translation.width, vertical: value.translation.height)
                         }
-                        guard dragAxis == .horizontal else { return }
-                        if gestureStartTime == nil { gestureStartTime = coordinator.currentTime; hideTask?.cancel() }
-                        seekPreview = PlayerGestureMath.scrubPosition(start: gestureStartTime ?? coordinator.currentTime,
+                        guard scrubbing.dragAxis == .horizontal else { return }
+                        if scrubbing.gestureStartTime == nil { scrubbing.gestureStartTime = coordinator.currentTime; hideTask?.cancel() }
+                        scrubbing.seekPreview = PlayerGestureMath.scrubPosition(start: scrubbing.gestureStartTime ?? coordinator.currentTime,
                             translation: value.translation.width, width: width, duration: coordinator.duration)
                     }
                     .onEnded { _ in
-                        if let preview = seekPreview, gestureStartTime != nil { coordinator.seek(to: preview) }
+                        if let preview = scrubbing.seekPreview, scrubbing.gestureStartTime != nil { coordinator.seek(to: preview) }
                         resetScrubbing()
                         scheduleHide()
                     }
@@ -183,7 +178,7 @@ struct InlineNativePlayer: View {
                     .sequenced(before: DragGesture(minimumDistance: 0))
                     .updating($holdingSpeed) { value, state, _ in
                         if case .second(true, _) = value, coordinator.isPlaying,
-                           scenePhase == .active, dragAxis == nil { state = true }
+                           scenePhase == .active, scrubbing.dragAxis == nil { state = true }
                     }
             )
             .accessibilityHidden(true)
@@ -194,6 +189,7 @@ struct InlineNativePlayer: View {
             HStack(spacing: 4) {
                 if isExpanded {
                     controlButton("收起播放器", symbol: "chevron.down", action: onToggleExpanded)
+                        .accessibilityIdentifier("player-collapse")
                 } else if let onBack {
                     controlButton("返回", symbol: "chevron.left", action: onBack)
                 }
@@ -210,6 +206,7 @@ struct InlineNativePlayer: View {
                           ? AVPictureInPictureController.pictureInPictureButtonStopImage
                           : AVPictureInPictureController.pictureInPictureButtonStartImage)
                         .renderingMode(.template).frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .disabled(presentation?.canStartPictureInPicture != true && !coordinator.isPictureInPictureActive)
                 .opacity(presentation?.canStartPictureInPicture == true || coordinator.isPictureInPictureActive ? 1 : 0.4)
@@ -225,34 +222,15 @@ struct InlineNativePlayer: View {
             }
             Spacer(minLength: 0)
             VStack(spacing: 0) {
-                Slider(value: Binding(get: { displayedTime }, set: { value in
-                    if voiceOver { coordinator.seek(to: value); seekPreview = nil }
-                    else { seekPreview = value }
-                }),
-                       in: 0...max(0.01, seekableDuration)) { editing in
-                    isSliderEditing = editing
-                    if editing { seekPreview = coordinator.currentTime; hideTask?.cancel() }
-                    else {
-                        if let preview = seekPreview { coordinator.seek(to: preview) }
-                        seekPreview = nil
-                        scheduleHide()
-                    }
-                }
-                .tint(.cyan)
-                .disabled(seekableDuration <= 0)
-                .accessibilityLabel("播放进度")
-                .accessibilityValue("\(PlayerGestureMath.timeLabel(displayedTime))，共 \(PlayerGestureMath.timeLabel(coordinator.duration))")
-                .accessibilityIdentifier("player-progress")
-                .frame(minHeight: 44)
+                PlayerProgressSlider(coordinator: coordinator, scrubbing: scrubbing,
+                    onInteractionBegan: { hideTask?.cancel() }, onInteractionEnded: { scheduleHide() })
                 HStack(spacing: 4) {
-                    controlButton(coordinator.isPlaying ? "暂停" : "播放", symbol: coordinator.isPlaying ? "pause.fill" : "play.fill") {
+                    controlButton(coordinator.wantsPlayback ? "暂停" : "播放", symbol: coordinator.wantsPlayback ? "pause.fill" : "play.fill") {
                         coordinator.togglePlayback()
                         revealControls()
                     }
-                    Text("\(PlayerGestureMath.timeLabel(displayedTime)) / \(PlayerGestureMath.timeLabel(coordinator.duration))")
-                        .font(.system(size: isExpanded ? 14 : 11, weight: .medium, design: .monospaced))
-                        .lineLimit(1).minimumScaleFactor(0.75)
-                        .accessibilityIdentifier("player-time")
+                    .accessibilityIdentifier("player-play-pause")
+                    PlayerPlaybackClock(coordinator: coordinator, scrubbing: scrubbing, isExpanded: isExpanded)
                     Spacer(minLength: 2)
                     if isExpanded && size.width >= 500 && !dynamicTypeSize.isAccessibilitySize {
                         controlButton(coordinator.danmakuEnabled ? "关闭弹幕" : "显示弹幕", symbol: coordinator.danmakuEnabled ? "text.bubble.fill" : "text.bubble") {
@@ -267,7 +245,7 @@ struct InlineNativePlayer: View {
                     controlButton(isExpanded ? "退出全屏" : "展开播放器", symbol: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
                         coordinator.endTemporaryRate()
                         onToggleExpanded()
-                    }
+                    }.accessibilityIdentifier("player-fullscreen")
                 }
             }
             .padding(.horizontal, max(isExpanded ? 18 : 10, max(insets.leading, insets.trailing)))
@@ -278,7 +256,7 @@ struct InlineNativePlayer: View {
             }
         }
         .foregroundStyle(.white)
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerOverlayButtonStyle { hideTask?.cancel() })
         .font(.system(size: 17, weight: .medium))
     }
 
@@ -288,6 +266,7 @@ struct InlineNativePlayer: View {
         } label: {
             Text("\(Double(coordinator.preferredRate).formatted())×")
                 .font(.subheadline.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
         }.accessibilityLabel("播放速度")
             .simultaneousGesture(TapGesture().onEnded { hideTask?.cancel() })
     }
@@ -306,6 +285,7 @@ struct InlineNativePlayer: View {
         } label: {
             Text(coordinator.currentVariant?.height.map { "\($0)p" } ?? "原画")
                 .font(.caption.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
         }.accessibilityLabel("分辨率与音轨")
             .simultaneousGesture(TapGesture().onEnded { hideTask?.cancel() })
     }
@@ -368,6 +348,7 @@ struct InlineNativePlayer: View {
             Button("播放信息", systemImage: "info.circle") { openPanel(.information) }
         } label: {
             Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }.accessibilityLabel("更多播放选项")
             .simultaneousGesture(TapGesture().onEnded { hideTask?.cancel() })
     }
@@ -409,12 +390,12 @@ struct InlineNativePlayer: View {
                         Text(coordinator.deliveryDescription)
                         Text(coordinator.outputRoute)
                         Text(coordinator.renderingStatus)
-                        Text("原档标签描述媒体格式，实际 HDR 与空间音频输出由设备和输出路线决定。")
-                        Text("独立字幕和弹幕仅显示在 App 画面中；PiP 与 AirPlay 只包含视频中的字幕。")
+                        Text(appPrompt("原档标签描述媒体格式，实际 HDR 与空间音频输出由设备和输出路线决定。"))
+                        Text(appPrompt("独立字幕和弹幕仅显示在 App 画面中；PiP 与 AirPlay 只包含视频中的字幕。"))
                         if let message = coordinator.progressWarning ?? coordinator.ancillaryWarning ?? coordinator.statusMessage {
-                            Text(message)
+                            Text(appPrompt(message))
                         }
-                        if let error = coordinator.errorMessage { Text(error) }
+                        if let error = coordinator.errorMessage { Text(appPrompt(error)) }
                     }
                 }.font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -429,13 +410,8 @@ struct InlineNativePlayer: View {
     private func controlButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol).frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }.accessibilityLabel(title)
-    }
-
-    private func feedbackPill(_ text: String, symbol: String) -> some View {
-        Label(text, systemImage: symbol).font(.subheadline.weight(.semibold))
-            .foregroundStyle(.white).padding(.horizontal, 16).padding(.vertical, 10)
-            .background(.black.opacity(0.65), in: .capsule)
     }
 
     private func openPanel(_ value: PlayerInlinePanel) {
@@ -445,12 +421,7 @@ struct InlineNativePlayer: View {
         panel = value
     }
     private func closePanel() { panel = nil; revealControls() }
-    private func resetScrubbing() {
-        seekPreview = nil
-        gestureStartTime = nil
-        dragAxis = nil
-        isSliderEditing = false
-    }
+    private func resetScrubbing() { scrubbing.reset() }
     private func showFeedback(_ text: String) {
         feedback = text
         noticeTask?.cancel()
@@ -465,10 +436,12 @@ struct InlineNativePlayer: View {
     private func revealControls() { setControlsVisible(true); scheduleHide() }
     private func scheduleHide() {
         hideTask?.cancel()
-        guard scenePhase == .active, coordinator.isPlaying, !voiceOver, !holdingSpeed, !isSliderEditing, gestureStartTime == nil, panel == nil else { return }
+        guard scenePhase == .active, coordinator.wantsPlayback, coordinator.errorMessage == nil,
+              !voiceOver, !holdingSpeed, !scrubbing.isSliderEditing, scrubbing.gestureStartTime == nil, panel == nil else { return }
         hideTask = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(3.5)) } catch { return }
-            guard scenePhase == .active, coordinator.isPlaying, !voiceOver, !holdingSpeed, !isSliderEditing, panel == nil else { return }
+            guard scenePhase == .active, coordinator.wantsPlayback, coordinator.errorMessage == nil,
+                  !voiceOver, !holdingSpeed, !scrubbing.isSliderEditing, panel == nil else { return }
             setControlsVisible(false)
         }
     }
@@ -476,10 +449,169 @@ struct InlineNativePlayer: View {
 
 private enum PlayerInlinePanel { case danmaku, information }
 
+/// Preview changes belong to the progress/HUD views, not the video, controls or
+/// open menus. Scrubbing still issues exactly one media seek when released.
+@MainActor @Observable
+private final class PlayerScrubbingState {
+    var seekPreview: Double?
+    var gestureStartTime: Double?
+    var dragAxis: PlayerGestureMath.DragAxis?
+    var isSliderEditing = false
+
+    func reset() {
+        seekPreview = nil
+        gestureStartTime = nil
+        dragAxis = nil
+        isSliderEditing = false
+    }
+}
+
+private struct PlayerProgressSlider: View {
+    let coordinator: PlaybackCoordinator
+    let scrubbing: PlayerScrubbingState
+    let onInteractionBegan: () -> Void
+    let onInteractionEnded: () -> Void
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+
+    private var duration: Double { coordinator.duration.isFinite ? max(0, coordinator.duration) : 0 }
+    private var displayedTime: Double {
+        PlayerGestureMath.clampedTime(scrubbing.seekPreview ?? coordinator.currentTime, duration: duration)
+    }
+
+    var body: some View {
+        Slider(value: Binding(get: { displayedTime }, set: { value in
+            if voiceOver { coordinator.seek(to: value); scrubbing.seekPreview = nil }
+            else { scrubbing.seekPreview = value }
+        }), in: 0...max(0.01, duration)) { editing in
+            scrubbing.isSliderEditing = editing
+            if editing {
+                scrubbing.seekPreview = coordinator.currentTime
+                onInteractionBegan()
+            } else {
+                if let preview = scrubbing.seekPreview { coordinator.seek(to: preview) }
+                scrubbing.seekPreview = nil
+                onInteractionEnded()
+            }
+        }
+        .tint(.cyan)
+        .disabled(duration <= 0)
+        .accessibilityLabel("播放进度")
+        .accessibilityValue("\(PlayerGestureMath.timeLabel(displayedTime))，共 \(PlayerGestureMath.timeLabel(duration))")
+        .accessibilityIdentifier("player-progress")
+        .frame(minHeight: 44)
+    }
+}
+
+private struct PlayerPlaybackClock: View {
+    let coordinator: PlaybackCoordinator
+    let scrubbing: PlayerScrubbingState
+    let isExpanded: Bool
+
+    var body: some View {
+        PlayerClockLabel(snapshot: PlayerClockSnapshot(position: scrubbing.seekPreview ?? coordinator.currentTime,
+                                                       duration: coordinator.duration), isExpanded: isExpanded)
+            .equatable()
+    }
+}
+
+/// The small observer above receives progress ticks; string formatting and Text
+/// construction below only change when the displayed whole-second value changes.
+private struct PlayerClockLabel: View, Equatable {
+    let snapshot: PlayerClockSnapshot
+    let isExpanded: Bool
+
+    var body: some View {
+        Text("\(PlayerGestureMath.timeLabel(snapshot.position)) / \(PlayerGestureMath.timeLabel(snapshot.duration))")
+            .font(.system(size: isExpanded ? 14 : 11, weight: .medium, design: .monospaced))
+            .lineLimit(1).minimumScaleFactor(0.75)
+            .accessibilityIdentifier("player-time")
+    }
+}
+
+struct PlayerClockSnapshot: Equatable {
+    let position: Double
+    let duration: Double
+
+    init(position: Double, duration: Double) {
+        let duration = duration.isFinite ? min(359_999, max(0, duration)) : 0
+        self.position = PlayerGestureMath.clampedTime(position, duration: duration).rounded(.down)
+        self.duration = duration.rounded(.down)
+    }
+}
+
+private struct PlayerInteractionFeedback: View {
+    let coordinator: PlaybackCoordinator
+    let scrubbing: PlayerScrubbingState
+    let holdingSpeed: Bool
+    let feedback: String?
+    let topInset: CGFloat
+
+    var body: some View {
+        if holdingSpeed {
+            pill("2× 快进中", symbol: "forward.fill")
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, max(12, topInset + 8))
+                .allowsHitTesting(false)
+        } else if let preview = scrubbing.seekPreview, !scrubbing.isSliderEditing {
+            VStack(spacing: 8) {
+                Image(systemName: preview >= (scrubbing.gestureStartTime ?? 0) ? "goforward" : "gobackward")
+                    .font(.title2)
+                Text(PlayerGestureMath.timeLabel(preview)).font(.title2.monospacedDigit().bold())
+                Text(appPrompt("松手跳转 · 共 \(PlayerGestureMath.timeLabel(coordinator.duration))"))
+                    .font(.caption)
+            }.foregroundStyle(.white).padding(20)
+                .background(.black.opacity(0.7), in: .rect(cornerRadius: 16))
+                .allowsHitTesting(false)
+        } else if let feedback {
+            pill(feedback, symbol: "play.fill").allowsHitTesting(false)
+        }
+    }
+
+    private func pill(_ text: String, symbol: String) -> some View {
+        Label(appPrompt(text), systemImage: symbol).font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white).padding(.horizontal, 16).padding(.vertical, 10)
+            .background(.black.opacity(0.65), in: .capsule)
+    }
+}
+
+/// Pressing a transport control owns that touch until release. In particular,
+/// the auto-hide timer must not remove a button while the finger is still down.
+private struct PlayerOverlayButtonStyle: ButtonStyle {
+    let onPress: () -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .onChange(of: configuration.isPressed) { _, pressed in
+                if pressed { onPress() }
+            }
+    }
+}
+
 /// A full-width drag covers a bounded time window, so long recordings remain
 /// controllable and very short clips never seek past their actual duration.
 enum PlayerGestureMath {
     enum DragAxis: Equatable { case horizontal, vertical }
+
+    /// The detail viewport already sits inside its navigation safe area. Its
+    /// offset GeometryReader can still report the ancestor's obscured region;
+    /// applying that inset again pushes the header into the transport controls.
+    /// Only the edge-to-edge fullscreen host needs device safe-area padding.
+    static func controlInsets(isExpanded: Bool, reported: EdgeInsets) -> EdgeInsets {
+        isExpanded ? reported : EdgeInsets()
+    }
+
+    /// Visible controls own their full-width bands, including the transparent
+    /// spaces between buttons. The video gestures never extend under a slider
+    /// or transport target, regardless of native view hit-test ordering.
+    static func gestureBounds(size: CGSize, insets: EdgeInsets, controlsVisible: Bool, largeText: Bool) -> CGRect {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return .zero }
+        guard controlsVisible else { return CGRect(origin: .zero, size: size) }
+        let top = min(size.height, max(0, insets.top) + (largeText ? 88 : 44))
+        let bottom = max(top, size.height - 88 - max(3, insets.bottom))
+        return CGRect(x: 0, y: top, width: size.width, height: bottom - top)
+    }
 
     /// Lock the initial direction, so a vertical page gesture cannot become an
     /// accidental seek when the finger drifts sideways later in the gesture.

@@ -20,6 +20,15 @@ struct NativePlayerView: UIViewControllerRepresentable {
         container.presentation.configure(coordinator: coordinator)
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: NativePlayerContainerViewController,
+                     context: Context) -> CGSize? {
+        // The detail column owns the viewport. Do not let the retained UIKit
+        // controller's previous size influence SwiftUI after a sidebar resize.
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: max(0, width), height: max(0, height))
+    }
+
     static func dismantleUIViewController(_ container: NativePlayerContainerViewController, coordinator: ()) {
         container.detachPlayerIfOwned()
     }
@@ -42,11 +51,29 @@ final class NativePlayerContainerViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .black
         view.clipsToBounds = true
+        view.layer.masksToBounds = true
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         attachPlayerIfNeeded()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard presentation.controller.parent === self else { return }
+        // Split-view sidebar and fullscreen transitions can resize the host
+        // without remounting this shared video layer. Match the current bounds
+        // in the same layout pass, with no stale-frame layer animation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let content = presentation.controller.view!
+        if content.frame != view.bounds {
+            content.frame = view.bounds
+            content.setNeedsLayout()
+        }
+        content.layoutIfNeeded()
+        CATransaction.commit()
     }
 
     private func attachPlayerIfNeeded() {
@@ -60,6 +87,7 @@ final class NativePlayerContainerViewController: UIViewController {
             controller.removeFromParent()
         }
         addChild(controller)
+        controller.view.frame = view.bounds
         controller.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(controller.view)
         playerConstraints = [
@@ -101,6 +129,21 @@ final class NativePlayerContainerViewController: UIViewController {
 final class NativeVideoLayerView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        layer.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
+}
+
+@MainActor @Observable
+private final class NativeOverlayPresentationState {
+    var controlsVisible = false
+    var isVisible = false
 }
 
 /// Public AVKit custom-player PiP API. AVPlayerLayer preserves the native decoder,
@@ -108,21 +151,25 @@ final class NativeVideoLayerView: UIView {
 @MainActor @Observable
 final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPictureControllerDelegate {
     @ObservationIgnored let controller = UIViewController()
-    @ObservationIgnored let videoView = NativeVideoLayerView()
+    @ObservationIgnored let videoView = NativeVideoLayerView(frame: .zero)
     @ObservationIgnored private let overlay: UIHostingController<NativePlaybackOverlay>
+    @ObservationIgnored private let overlayState: NativeOverlayPresentationState
     @ObservationIgnored private weak var coordinator: PlaybackCoordinator?
     @ObservationIgnored private var pipController: AVPictureInPictureController?
     @ObservationIgnored private var pipObservation: NSKeyValueObservation?
     @ObservationIgnored private var restoreCompletion: ((Bool) -> Void)?
     @ObservationIgnored private weak var visibleContainer: NativePlayerContainerViewController?
-    @ObservationIgnored private var controlsVisible = false
     private(set) var canStartPictureInPicture = false
 
     init(coordinator: PlaybackCoordinator) {
         self.coordinator = coordinator
-        overlay = UIHostingController(rootView: NativePlaybackOverlay(coordinator: coordinator))
+        let state = NativeOverlayPresentationState()
+        overlayState = state
+        overlay = UIHostingController(rootView: NativePlaybackOverlay(coordinator: coordinator, presentation: state))
         super.init()
         controller.view.backgroundColor = .black
+        controller.view.clipsToBounds = true
+        controller.view.layer.masksToBounds = true
         videoView.backgroundColor = .black
         videoView.isUserInteractionEnabled = false
         videoView.playerLayer.player = coordinator.player
@@ -137,9 +184,15 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
         ])
         controller.addChild(overlay)
         overlay.view.backgroundColor = .clear
+        overlay.view.clipsToBounds = true
+        overlay.view.layer.masksToBounds = true
         overlay.view.isUserInteractionEnabled = false
         overlay.view.accessibilityElementsHidden = true
         overlay.view.translatesAutoresizingMaskIntoConstraints = false
+        overlay.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        overlay.view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        overlay.view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        overlay.view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         controller.view.addSubview(overlay.view)
         NSLayoutConstraint.activate([
             overlay.view.leadingAnchor.constraint(equalTo: controller.view.leadingAnchor),
@@ -151,7 +204,8 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
         if AVPictureInPictureController.isPictureInPictureSupported() {
             pipController = AVPictureInPictureController(playerLayer: videoView.playerLayer)
             pipController?.delegate = self
-            // Enable automatic PiP only while this is the visible primary video.
+            // PiP is always an explicit action; leaving the video page must not
+            // turn into an unexpected floating player.
             pipController?.canStartPictureInPictureAutomaticallyFromInline = false
             pipObservation = pipController?.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { @Sendable [weak self] _, _ in
                 Task { @MainActor in
@@ -163,37 +217,46 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
     }
 
     func configure(coordinator: PlaybackCoordinator) {
-        // iOS 15+ continuesIfPossible on the AVPlayer supplies background video
-        // playback policy. Keep this layer connected so automatic PiP can start;
-        // disconnecting it at didEnterBackground races AVKit's PiP transition.
+        // AVPlayer owns the background playback policy. Keep its single render
+        // layer connected for explicitly requested PiP and fullscreen transfers.
         if videoView.playerLayer.player !== coordinator.player { videoView.playerLayer.player = coordinator.player }
-        videoView.playerLayer.videoGravity = coordinator.fitToFill ? .resizeAspectFill : .resizeAspect
-        refreshBackgroundConfiguration()
+        let gravity: AVLayerVideoGravity = coordinator.fitToFill ? .resizeAspectFill : .resizeAspect
+        if videoView.playerLayer.videoGravity != gravity { videoView.playerLayer.videoGravity = gravity }
     }
 
     func refreshBackgroundConfiguration() {
-        pipController?.canStartPictureInPictureAutomaticallyFromInline =
-            coordinator?.backgroundPlayback == true && visibleContainer != nil
+        // Background audio is managed by AVPlayer. It does not opt into PiP.
+        if pipController?.canStartPictureInPictureAutomaticallyFromInline == true {
+            pipController?.canStartPictureInPictureAutomaticallyFromInline = false
+        }
     }
 
     func setControlsVisible(_ visible: Bool) {
-        controlsVisible = visible
-        refreshOverlayVisibility()
+        if overlayState.controlsVisible != visible { overlayState.controlsVisible = visible }
     }
 
     private func refreshOverlayVisibility() {
         guard let coordinator else { return }
         // The hosting controller is retained with playback even after leaving
         // the video page. Stop its animation clock while no overlay is visible.
-        overlay.rootView = NativePlaybackOverlay(coordinator: coordinator,
-                                                  controlsVisible: controlsVisible,
-                                                  isVisible: visibleContainer != nil && !coordinator.isPictureInPictureActive)
+        let visible = visibleContainer != nil && !coordinator.isPictureInPictureActive && coordinator.currentVideo != nil
+        if overlayState.isVisible != visible { overlayState.isVisible = visible }
     }
 
     func togglePictureInPicture() {
-        guard let pipController else { return }
+        guard let pipController, coordinator?.currentVideo != nil else { return }
         if pipController.isPictureInPictureActive { pipController.stopPictureInPicture() }
         else if pipController.isPictureInPicturePossible { pipController.startPictureInPicture() }
+    }
+
+    func stopPlaybackPresentation() {
+        let completion = restoreCompletion
+        restoreCompletion = nil
+        completion?(false)
+        if pipController?.isPictureInPictureActive == true { pipController?.stopPictureInPicture() }
+        coordinator?.isPictureInPictureActive = false
+        coordinator?.requestsPresentation = false
+        overlayState.isVisible = false
     }
 
     func containerDidAppear(_ container: NativePlayerContainerViewController) {
@@ -213,6 +276,10 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
     }
 
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard coordinator?.currentVideo != nil else {
+            pictureInPictureController.stopPictureInPicture()
+            return
+        }
         coordinator?.isPictureInPictureActive = true
         refreshOverlayVisibility()
     }
@@ -223,10 +290,11 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         coordinator?.isPictureInPictureActive = false
         refreshOverlayVisibility()
-        coordinator?.statusMessage = "画中画暂不可用：\(error.localizedDescription)"
+        coordinator?.statusMessage = appPrompt("画中画暂不可用：\(error.localizedDescription)")
     }
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
                                     restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        guard coordinator?.currentVideo != nil else { completionHandler(false); return }
         if let visibleContainer, controller.parent === visibleContainer,
            visibleContainer.view.window != nil {
             completionHandler(true)
@@ -240,71 +308,210 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
 
 private struct NativePlaybackOverlay: View {
     let coordinator: PlaybackCoordinator
-    var controlsVisible = false
-    var isVisible = false
+    let presentation: NativeOverlayPresentationState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
 
+    private var hasDanmaku: Bool { coordinator.danmakuEnabled && !coordinator.danmaku.isEmpty }
+
     var body: some View {
-        if isVisible {
-            TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : 1.0 / 30,
-                                    paused: !coordinator.isPlaying || scenePhase != .active)) { context in
-                let time = coordinator.presentationTime(at: context.date)
-                ZStack(alignment: .bottom) {
-                    if coordinator.danmakuEnabled {
-                        let activeRows = PlaybackTimeline.activeDanmaku(coordinator.danmaku, at: time)
-                        let fontSize = coordinator.danmakuFontSize
-                        let opacity = coordinator.danmakuOpacity
-                        let reduceMotion = reduceMotion
-                        Canvas { @Sendable canvas, size in
-                            guard size.height > 120 else { return }
-                            let laneHeight = min(29, max(17, (size.height - 100) / 8))
-                            for row in activeRows {
-                                let elapsed = time - row.cue.time
-                                guard elapsed >= 0, elapsed <= row.duration else { continue }
-                                let color = Color(red: Double((row.cue.color >> 16) & 255) / 255,
-                                                  green: Double((row.cue.color >> 8) & 255) / 255,
-                                                  blue: Double(row.cue.color & 255) / 255)
-                                let text = Text(row.cue.text)
-                                    .font(.system(size: min(fontSize, laneHeight - 2), weight: .medium))
-                                    .foregroundStyle(color.opacity(opacity))
-                                let resolved = canvas.resolve(text)
-                                let textSize = resolved.measure(in: CGSize(width: .greatestFiniteMagnitude, height: laneHeight))
-                                let x: CGFloat
-                                let y: CGFloat
-                                if row.cue.mode == 0 && !reduceMotion {
-                                    x = size.width - (size.width + textSize.width) * (elapsed / row.duration)
-                                    y = 46 + CGFloat(row.lane) * laneHeight
-                                } else if row.cue.mode == 2 {
-                                    x = (size.width - textSize.width) / 2
-                                    y = size.height - 105 - CGFloat(row.lane) * laneHeight
-                                } else {
-                                    x = (size.width - textSize.width) / 2
-                                    y = 46 + CGFloat(row.lane) * laneHeight
-                                }
-                                var cueCanvas = canvas
-                                cueCanvas.addFilter(.shadow(color: .black.opacity(0.95), radius: 1, x: 1, y: 1))
-                                cueCanvas.draw(resolved, at: CGPoint(x: x, y: y), anchor: .topLeading)
-                            }
-                        }
+        if presentation.isVisible && (hasDanmaku || !coordinator.subtitleCues.isEmpty) {
+            ZStack(alignment: .bottom) {
+                if hasDanmaku {
+                    TimelineView(.animation(minimumInterval: reduceMotion ? 0.1 : 1.0 / 30,
+                                            paused: !coordinator.isPlaying || scenePhase != .active)) { context in
+                        let time = coordinator.presentationTime(at: context.date)
+                        NativeDanmakuOverlay(rows: PlaybackTimeline.activeDanmaku(coordinator.danmaku, at: time),
+                                             time: time, fontSize: coordinator.danmakuFontSize,
+                                             opacity: coordinator.danmakuOpacity, reduceMotion: reduceMotion)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    let text = PlaybackTimeline.subtitleText(coordinator.subtitleCues, at: time)
-                    if !text.isEmpty {
-                        Text(text)
-                            .font(.callout.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(.black.opacity(0.72), in: .rect(cornerRadius: 6))
-                            .padding(.horizontal, 24)
-                            .padding(.bottom, controlsVisible ? 88 : 22)
+                }
+                if !coordinator.subtitleCues.isEmpty {
+                    // Subtitle changes do not need to reconstruct their string
+                    // and SwiftUI text at every moving-danmaku frame.
+                    TimelineView(.animation(minimumInterval: 0.1,
+                                            paused: !coordinator.isPlaying || scenePhase != .active)) { context in
+                        let text = PlaybackTimeline.subtitleText(coordinator.subtitleCues,
+                                                                  at: coordinator.presentationTime(at: context.date))
+                        if !text.isEmpty {
+                            Text(text)
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.72), in: .rect(cornerRadius: 6))
+                                .padding(.horizontal, 24)
+                                .padding(.bottom, presentation.controlsVisible ? 88 : 22)
+                        }
                     }
                 }
             }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+            .clipped()
         }
+    }
+}
+
+private struct NativeDanmakuOverlay: UIViewRepresentable {
+    let rows: ArraySlice<ScheduledDanmaku>
+    let time: Double
+    let fontSize: Double
+    let opacity: Double
+    let reduceMotion: Bool
+
+    func makeUIView(context: Context) -> NativeDanmakuOverlayView { NativeDanmakuOverlayView(frame: .zero) }
+
+    func updateUIView(_ view: NativeDanmakuOverlayView, context: Context) {
+        view.update(rows: rows, time: time, fontSize: fontSize, opacity: opacity, reduceMotion: reduceMotion)
+    }
+
+    static func dismantleUIView(_ view: NativeDanmakuOverlayView, coordinator: ()) {
+        view.update(rows: [], time: 0, fontSize: 18, opacity: 0.85, reduceMotion: false)
+    }
+}
+
+/// Only the small visible cue set has layers. Text layout and its rasterized
+/// shadow survive frame ticks; scrolling changes layer positions, never the
+/// AVPlayerLayer or a snapshot of the video underneath it.
+@MainActor
+final class NativeDanmakuOverlayView: UIView {
+    private struct GlyphStyle: Equatable {
+        let text: String
+        let color: UInt32
+        let fontSize: CGFloat
+        let scale: CGFloat
+    }
+
+    private final class Glyph {
+        let layer = CATextLayer()
+        var style: GlyphStyle
+        var generation: UInt64 = 0
+
+        init(style: GlyphStyle) { self.style = style }
+    }
+
+    private var glyphs: [Int: Glyph] = [:]
+    private var generation: UInt64 = 0
+    private var rows: ArraySlice<ScheduledDanmaku> = []
+    private var time = 0.0
+    private var fontSize = 18.0
+    private var opacity = 0.85
+    private var reduceMotion = false
+    private(set) var textPreparationCount = 0
+    var cachedCueCount: Int { glyphs.count }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        accessibilityElementsHidden = true
+        clipsToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
+
+    func update(rows: ArraySlice<ScheduledDanmaku>, time: Double, fontSize: Double,
+                opacity: Double, reduceMotion: Bool) {
+        self.rows = rows
+        self.time = time
+        self.fontSize = fontSize
+        self.opacity = opacity
+        self.reduceMotion = reduceMotion
+        renderFrame()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        renderFrame()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        renderFrame()
+    }
+
+    private func renderFrame() {
+        generation &+= 1
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        if bounds.height > 120, time.isFinite {
+            let laneHeight = min(29, max(17, (bounds.height - 100) / 8))
+            let effectiveFont = min(fontSize.isFinite ? max(1, fontSize) : 18, laneHeight - 2)
+            let scale = max(1, traitCollection.displayScale)
+            let effectiveOpacity = Float(opacity.isFinite ? min(1, max(0, opacity)) : 0.85)
+            for row in rows {
+                let elapsed = time - row.cue.time
+                guard row.duration.isFinite, row.duration > 0, elapsed >= 0, elapsed <= row.duration else { continue }
+                let style = GlyphStyle(text: row.cue.text, color: row.cue.color,
+                                       fontSize: effectiveFont, scale: scale)
+                let glyph: Glyph
+                if let existing = glyphs[row.id] {
+                    glyph = existing
+                    if glyph.style != style { prepare(glyph, style: style) }
+                } else {
+                    glyph = Glyph(style: style)
+                    prepare(glyph, style: style)
+                    layer.addSublayer(glyph.layer)
+                    glyphs[row.id] = glyph
+                }
+                glyph.generation = generation
+                if glyph.layer.opacity != effectiveOpacity { glyph.layer.opacity = effectiveOpacity }
+                let width = glyph.layer.bounds.width
+                let x: CGFloat
+                let y: CGFloat
+                if row.cue.mode == 0 && !reduceMotion {
+                    x = bounds.width - (bounds.width + width) * (elapsed / row.duration)
+                    y = 46 + CGFloat(row.lane) * laneHeight
+                } else if row.cue.mode == 2 {
+                    x = (bounds.width - width) / 2
+                    y = bounds.height - 105 - CGFloat(row.lane) * laneHeight
+                } else {
+                    x = (bounds.width - width) / 2
+                    y = 46 + CGFloat(row.lane) * laneHeight
+                }
+                let position = CGPoint(x: x, y: y)
+                if glyph.layer.position != position { glyph.layer.position = position }
+            }
+        }
+        // No all-track glyph cache: expired cues, seeks and hidden/zero-size
+        // viewports release their backing stores immediately. The scheduler
+        // admits at most eight simultaneously visible lanes.
+        var expired: [Int] = []
+        for (id, glyph) in glyphs where glyph.generation != generation {
+            glyph.layer.removeFromSuperlayer()
+            expired.append(id)
+        }
+        for id in expired { glyphs.removeValue(forKey: id) }
+    }
+
+    private func prepare(_ glyph: Glyph, style: GlyphStyle) {
+        let font = UIFont.systemFont(ofSize: style.fontSize, weight: .medium)
+        let color = UIColor(red: CGFloat((style.color >> 16) & 255) / 255,
+                            green: CGFloat((style.color >> 8) & 255) / 255,
+                            blue: CGFloat(style.color & 255) / 255, alpha: 1)
+        let text = NSAttributedString(string: style.text, attributes: [.font: font, .foregroundColor: color])
+        let measured = text.boundingRect(with: CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                                      height: CGFloat.greatestFiniteMagnitude),
+                                         options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        glyph.style = style
+        glyph.layer.anchorPoint = .zero
+        glyph.layer.bounds = CGRect(x: 0, y: 0, width: ceil(measured.width), height: ceil(measured.height))
+        glyph.layer.contentsScale = style.scale
+        glyph.layer.string = text
+        glyph.layer.isWrapped = false
+        glyph.layer.truncationMode = .none
+        glyph.layer.shadowColor = UIColor.black.cgColor
+        glyph.layer.shadowOpacity = 0.95
+        glyph.layer.shadowRadius = 1
+        glyph.layer.shadowOffset = CGSize(width: 1, height: 1)
+        glyph.layer.shouldRasterize = true
+        glyph.layer.rasterizationScale = style.scale
+        textPreparationCount += 1
     }
 }
 
@@ -318,17 +525,6 @@ struct NativeAirPlayButton: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) { uiView.tintColor = tint }
-}
-
-/// A compact recovery surface for old routes; the primary experience lives in
-/// VideoDetailView and embeds InlineNativePlayer directly in that page.
-struct PlayerScreen: View {
-    let coordinator: PlaybackCoordinator
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        InlineNativePlayer(coordinator: coordinator, isExpanded: true, onToggleExpanded: { dismiss() })
-            .background(.black).ignoresSafeArea()
-    }
 }
 
 struct PlaybackSettingsView: View {
@@ -352,7 +548,7 @@ struct PlaybackSettingsView: View {
                     }
                     if let copy = coordinator.compatibleAudioVariant {
                         Button("使用 AAC 立体声兼容音轨") { Task { await coordinator.selectVariant(copy) } }
-                        Text("兼容版保留原视频画面，音频转换为 AAC 立体声，不含 Dolby Atmos。").font(.caption).foregroundStyle(.secondary)
+                        Text(appPrompt("兼容版保留原视频画面，音频转换为 AAC 立体声，不含 Dolby Atmos。")).font(.caption).foregroundStyle(.secondary)
                     }
                     if !coordinator.audioOptions.isEmpty {
                         Picker("内嵌音轨", selection: Binding(get: { coordinator.selectedAudio }, set: { coordinator.selectAudio($0) })) {
@@ -370,7 +566,7 @@ struct PlaybackSettingsView: View {
                             Text(track.label).tag("sidecar:\(index)")
                         }
                     }
-                    Text("内嵌字幕由系统播放器显示。归档独立字幕与弹幕显示于 App 内及全屏；画中画和 AirPlay 画面不包含这两种叠层。")
+                    Text(appPrompt("内嵌字幕由系统播放器显示。归档独立字幕与弹幕显示于 App 内及全屏；画中画和 AirPlay 画面不包含这两种叠层。"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("播放") {
@@ -378,7 +574,7 @@ struct PlaybackSettingsView: View {
                         ForEach([0.5, 0.75, 1, 1.25, 1.5, 2.0], id: \.self) { Text("\($0.formatted())×").tag($0) }
                     }
                     Toggle("响度平衡", isOn: $coordinator.loudnessBalance)
-                    Text("按归档的响度分析适度衰减过响内容；杜比全景声音轨自动跳过，保留系统原生音频路径。")
+                    Text(appPrompt("按归档的响度分析适度衰减过响内容；杜比全景声音轨自动跳过，保留系统原生音频路径。"))
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("填满画面", isOn: $coordinator.fitToFill)
                     Toggle("自动播放下一集", isOn: $coordinator.autoAdvance)
@@ -397,18 +593,18 @@ struct PlaybackSettingsView: View {
                     Slider(value: $coordinator.danmakuOpacity, in: 0.2...1).accessibilityLabel("弹幕透明度")
                     LabeledContent("字号", value: "\(Int(coordinator.danmakuFontSize))")
                     Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1).accessibilityLabel("弹幕字号")
-                    Text("原生时间轴与播放进度同步，自动避让相邻弹幕；开启“减弱动态效果”后使用静态显示。")
+                    Text(appPrompt("原生时间轴与播放进度同步，自动避让相邻弹幕；开启“减弱动态效果”后使用静态显示。"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("播放信息") {
                     LabeledContent("传输", value: coordinator.deliveryDescription)
                     LabeledContent("音频输出", value: coordinator.outputRoute)
                     LabeledContent("HDR 播放条件", value: coordinator.hdrEligible ? "系统报告当前具备条件" : "系统报告当前不具备条件")
-                    Text(coordinator.renderingStatus).font(.subheadline)
-                    Text("原档的 HDR、Dolby Vision 和 Atmos 标记描述已保存的媒体。实际呈现由编码、设备、显示器、音频路由与系统设置决定；HDR 播放条件不代表已在输出 HDR。部分耳机和内置扬声器不会向 App 报告渲染模式。")
+                    Text(appPrompt(coordinator.renderingStatus)).font(.subheadline)
+                    Text(appPrompt("原档的 HDR、Dolby Vision 和 Atmos 标记描述已保存的媒体。实际呈现由编码、设备、显示器、音频路由与系统设置决定；HDR 播放条件不代表已在输出 HDR。部分耳机和内置扬声器不会向 App 报告渲染模式。"))
                         .font(.caption).foregroundStyle(.secondary)
                     if coordinator.preferredRate != 1 {
-                        Text("变速播放可能改变空间音频处理；检查杜比效果时请使用 1× 速度。")
+                        Text(appPrompt("变速播放可能改变空间音频处理；检查杜比效果时请使用 1× 速度。"))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

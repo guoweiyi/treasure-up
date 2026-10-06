@@ -16,7 +16,9 @@ struct VideoDetailView: View {
     @State private var savePresented = false
     @State private var loginPresented = false
     @State private var actionBusy = false
-    @State private var expanded = false
+    @State private var lifetime = VideoPageLifetime()
+    @State private var fullscreen = false
+    @State private var playTask: Task<Void, Never>?
     @State private var followsPlayback = false
     @State private var isPageVisible = false
     @State private var page: VideoPage = .info
@@ -33,64 +35,62 @@ struct VideoDetailView: View {
     var body: some View {
         Group {
             if let video = displayedVideo {
-                GeometryReader { geometry in
-                    let wide = geometry.size.width > 850 && !expanded
-                    let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
-                    layout {
-                        playerSurface(video)
-                            .frame(width: wide ? geometry.size.width * 0.64 : geometry.size.width,
-                                   height: expanded || wide ? geometry.size.height : min(geometry.size.width * 9 / 16, geometry.size.height * 0.48))
-                            .background(.black)
-                        VStack(spacing: 0) {
-                            Picker("视频内容", selection: $page) {
-                                ForEach(VideoPage.allCases) { Text($0.rawValue).tag($0) }
-                            }.pickerStyle(.segmented).accessibilityIdentifier("videoSections")
-                                .padding(12)
-                            Divider()
-                            // Keep visited sections mounted so switching back preserves
-                            // comment searches, expanded replies and each scroll position.
-                            ZStack(alignment: .top) {
-                                ForEach(VideoPage.allCases) { section in
-                                    if visitedPages.contains(section) {
-                                        ScrollView {
-                                            sectionContent(section, video: video)
-                                                .padding(16).frame(maxWidth: 800).frame(maxWidth: .infinity)
-                                        }
-                                        .scrollDismissesKeyboard(.interactively)
-                                        .opacity(page == section ? 1 : 0)
-                                        .allowsHitTesting(page == section)
-                                        .accessibilityHidden(page != section)
-                                        .zIndex(page == section ? 1 : 0)
+                VideoDetailViewport(aspectRatio: inlineAspectRatio) {
+                    playerSurface(video)
+                } details: {
+                    VStack(spacing: 0) {
+                        Picker("视频内容", selection: $page) {
+                            ForEach(VideoPage.allCases) { Text($0.rawValue).tag($0) }
+                        }.pickerStyle(.segmented).accessibilityIdentifier("videoSections")
+                            .padding(12)
+                        Divider()
+                        // Keep visited sections mounted so switching back preserves
+                        // comment searches, expanded replies and each scroll position.
+                        ZStack(alignment: .top) {
+                            ForEach(VideoPage.allCases) { section in
+                                if visitedPages.contains(section) {
+                                    ScrollView {
+                                        sectionContent(section, video: video)
+                                            .padding(16).frame(maxWidth: 800).frame(maxWidth: .infinity)
                                     }
+                                    .id(section == .queue ? "playback-queue" : video.id)
+                                    .scrollDismissesKeyboard(.interactively)
+                                    .opacity(page == section ? 1 : 0)
+                                    .allowsHitTesting(page == section)
+                                    .accessibilityHidden(page != section)
+                                    .zIndex(page == section ? 1 : 0)
                                 }
-                            }.id(video.id)
+                            }
                         }
-                        .frame(width: expanded ? 0 : (wide ? geometry.size.width * 0.36 : nil),
-                               height: expanded ? 0 : nil)
-                        .opacity(expanded ? 0 : 1).clipped().accessibilityHidden(expanded)
                     }
                 }
             } else if let error { FailureView(message: error) { await load() } }
-            else { ProgressView("正在读取视频…") }
+            else { ProgressView(appPrompt("正在读取视频…")) }
         }
         .navigationTitle("").navigationBarTitleDisplayMode(.inline)
-        .toolbar(expanded ? .hidden : .visible, for: .navigationBar, .tabBar)
-        .statusBarHidden(expanded)
-        .preference(key: PlayerExpandedPreferenceKey.self, value: isPageVisible && expanded)
-        .preference(key: PlayerVisiblePreferenceKey.self, value: isPageVisible && isCurrent)
+        .background {
+            FullscreenPlayerPresenter(isPresented: $fullscreen, playback: playback, lifetime: lifetime)
+                .frame(width: 0, height: 0)
+        }
         .onAppear {
             isPageVisible = true
             followsPlayback = playback.currentVideo?.id == (video?.id ?? videoId)
             if video == nil && followsPlayback { video = playback.currentVideo }
         }
         .onDisappear {
-            // A covered navigation destination must not follow another page's player.
-            if followsPlayback, let current = playback.currentVideo { video = current }
+            // UIKit full-screen presentation covers this destination without leaving it.
+            guard !fullscreen, !savePresented, !loginPresented, !lifetime.isCoveredByPresentation else { return }
+            playTask?.cancel()
+            if followsPlayback {
+                if let current = playback.currentVideo { video = current }
+                playback.stop()
+            }
             followsPlayback = false
             isPageVisible = false
         }
         .onChange(of: page) { _, section in visitedPages.insert(section) }
         .onChange(of: playback.currentVideo?.id) { _, _ in
+            if playback.currentVideo == nil { fullscreen = false }
             if isPageVisible && followsPlayback, let current = playback.currentVideo { video = current }
         }
         .task(id: videoId) {
@@ -98,6 +98,21 @@ struct VideoDetailView: View {
         }
         .sheet(isPresented: $savePresented) { NavigationStack { SaveToPlaylistView(videoId: displayedVideo?.id ?? videoId) } }
         .sheet(isPresented: $loginPresented) { NavigationStack { LoginView() } }
+    }
+
+    private var inlineAspectRatio: CGFloat {
+        guard isCurrent else { return 16.0 / 9.0 }
+        let size = playback.player.currentItem?.presentationSize ?? .zero
+        if size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 {
+            return size.width / size.height
+        }
+        let variant = playback.currentVariant
+        let metadata = playback.session?.media ?? variant?.metadata
+        if let width = metadata?.width ?? variant?.width,
+           let height = metadata?.height ?? variant?.height, width > 0, height > 0 {
+            return CGFloat(width) / CGFloat(height)
+        }
+        return 16.0 / 9.0
     }
 
     @ViewBuilder private func sectionContent(_ section: VideoPage, video: ArchiveVideo) -> some View {
@@ -111,16 +126,19 @@ struct VideoDetailView: View {
                     Label("Treasure Up · 开源项目", systemImage: "chevron.left.forwardslash.chevron.right")
                         .font(.footnote)
                 }.padding(.top, 12)
-            case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !expanded && isPageVisible)
-            case .queue: PlaybackQueueSection { followsPlayback = true }
+            case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !fullscreen && isPageVisible)
+            case .queue:
+                PlaybackQueueSection(shouldCancelPlaybackOnDisappear: {
+                    !fullscreen && !savePresented && !loginPresented && !lifetime.isCoveredByPresentation
+                }) { followsPlayback = true }
             }
         }
     }
 
     @ViewBuilder private func playerSurface(_ video: ArchiveVideo) -> some View {
         if isCurrent {
-            InlineNativePlayer(coordinator: playback, isExpanded: expanded,
-                               onToggleExpanded: { expanded.toggle() }, onBack: { dismiss() })
+            InlineNativePlayer(coordinator: playback,
+                               onToggleExpanded: { fullscreen = true }, onBack: { dismiss() })
         } else {
             ZStack {
                 Artwork(path: video.coverUrl)
@@ -161,13 +179,13 @@ struct VideoDetailView: View {
                 Spacer()
                 if let url = api.resolveURL("/videos/\(video.id)") { ShareLink(item: url).labelStyle(.iconOnly) }
             }.buttonStyle(.bordered).font(.subheadline)
-            if !video.playable { Label("视频尚未完成归档", systemImage: "clock.badge.exclamationmark").foregroundStyle(.orange) }
+            if !video.playable { Label(appPrompt("视频尚未完成归档"), systemImage: "clock.badge.exclamationmark").foregroundStyle(.orange) }
             if !video.description.isEmpty { Text(video.description).font(.subheadline).textSelection(.enabled) }
             if let notes = video.notes, !notes.isEmpty { Label(notes, systemImage: "note.text").font(.subheadline).foregroundStyle(.secondary) }
             if !video.tags.isEmpty {
                 Text(video.tags.map { "#" + $0 }.joined(separator: "  ")).font(.caption).foregroundStyle(.secondary)
             }
-            if let error { Text(error).font(.callout).foregroundStyle(.red) }
+            if let error { Text(appPrompt(error)).font(.callout).foregroundStyle(.red) }
         }
     }
     private func uniqueCreators(_ creators: [ArchiveCreator]) -> [ArchiveCreator] {
@@ -215,7 +233,9 @@ struct VideoDetailView: View {
     }
     private func play(_ video: ArchiveVideo, part: VideoPart? = nil) {
         followsPlayback = true
-        Task {
+        playTask?.cancel()
+        playTask = Task {
+            guard !Task.isCancelled, isPageVisible else { return }
             // A resumed player has no new catalog scope; keep its established queue.
             let context = queueContext ?? (playback.currentVideo == nil ? PlaybackQueueContext(title: "资料库") : nil)
             await playback.start(video: video, part: part, context: context)

@@ -76,7 +76,8 @@ final class APIClient {
         catch { throw Self.translateNetwork(error) }
         guard revision == connectionRevision else { throw APIError.staleSession }
         try Self.validateHTTP(response, data: data)
-        let capability = try decode(ServerCapabilities.self, from: data)
+        let capability = try await APIResponseDecoder.decode(ServerCapabilities.self, from: data)
+        guard revision == connectionRevision else { throw APIError.staleSession }
         guard capability.application == "treasure-up", capability.apiVersion == 1 else {
             throw APIError.invalidServer("该地址不是兼容的 Treasure Up 服务器。")
         }
@@ -146,14 +147,20 @@ final class APIClient {
         if let failure { throw failure }
     }
 
-    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
+    func get<T: Decodable & Sendable>(_ path: String, query: [String: String] = [:]) async throws -> T {
+        let revision = sessionRevision
         let data = try await perform(path, method: "GET", query: query)
-        return try decode(T.self, from: data)
+        let value = try await APIResponseDecoder.decode(T.self, from: data)
+        guard revision == sessionRevision else { throw APIError.staleSession }
+        return value
     }
 
-    func send<T: Decodable>(_ path: String, method: String = "POST", body: [String: JSONValue] = [:]) async throws -> T {
+    func send<T: Decodable & Sendable>(_ path: String, method: String = "POST", body: [String: JSONValue] = [:]) async throws -> T {
+        let revision = sessionRevision
         let data = try await perform(path, method: method, body: body)
-        return try decode(T.self, from: data)
+        let value = try await APIResponseDecoder.decode(T.self, from: data)
+        guard revision == sessionRevision else { throw APIError.staleSession }
+        return value
     }
 
     func mutate(_ path: String, method: String = "POST", body: [String: JSONValue] = [:]) async throws {
@@ -296,13 +303,6 @@ final class APIClient {
         } catch { /* Optional display settings do not invalidate a working API session. */ }
     }
 
-    private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        do { return try decoder.decode(type, from: data) }
-        catch { throw APIError.decoding }
-    }
-
     static func normalizedServer(_ address: String) throws -> URL {
         var value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         if !value.contains("://") { value = "https://" + value }
@@ -375,9 +375,34 @@ final class APIClient {
         }
     }
 
-    private struct SessionEnvelope: Decodable { var user: ArchiveUser; var csrfToken: String }
-    private struct ServerCapabilities: Decodable { var application: String; var apiVersion: Int }
-    private struct DisplaySettings: Decodable { var siteName: String; var defaultDanmaku: Bool }
+    private struct SessionEnvelope: Decodable, Sendable { var user: ArchiveUser; var csrfToken: String }
+    private struct ServerCapabilities: Decodable, Sendable { var application: String; var apiVersion: Int }
+    private struct DisplaySettings: Decodable, Sendable { var siteName: String; var defaultDanmaku: Bool }
+}
+
+/// Network I/O is asynchronous, but JSONDecoder itself is synchronous. Large
+/// catalog/comment payloads must not monopolize the UI actor during playback.
+enum APIResponseDecoder {
+    nonisolated static func decode<T: Decodable & Sendable>(_ type: T.Type, from data: Data) async throws -> T {
+        try Task.checkCancellation()
+        let worker = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let value: T
+            do { value = try decoder.decode(type, from: data) }
+            catch { throw APIError.decoding }
+            try Task.checkCancellation()
+            return value
+        }
+        return try await withTaskCancellationHandler {
+            let value = try await worker.value
+            try Task.checkCancellation()
+            return value
+        } onCancel: {
+            worker.cancel()
+        }
+    }
 }
 
 /// Foundation may preserve explicit headers across redirects. Strip every credential

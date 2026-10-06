@@ -57,7 +57,7 @@ struct AdminNotice: View {
     let message: String
     var isError = true
     var body: some View {
-        Label(message, systemImage: isError ? "exclamationmark.triangle" : "checkmark.circle")
+        Label(appPrompt(message), systemImage: isError ? "exclamationmark.triangle" : "checkmark.circle")
             .font(.callout).foregroundStyle(isError ? .red : .green)
             .textSelection(.enabled).accessibilityAddTraits(.updatesFrequently)
     }
@@ -133,7 +133,7 @@ struct AdminHomeView: View {
                         Image(systemName: "server.rack").font(.largeTitle).foregroundStyle(.tint)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("归档控制中心").font(.title3.bold())
-                            Text("采集、存储与内容维护").font(.subheadline).foregroundStyle(.secondary)
+                            Text(appPrompt("采集、存储与内容维护")).font(.subheadline).foregroundStyle(.secondary)
                         }
                     }.padding(.vertical, 8)
                     let stats = overview.adminValue("stats")
@@ -149,7 +149,7 @@ struct AdminHomeView: View {
                 let protection = overview.adminValue("backup_protection")
                 if protection.objectValue != nil {
                     Section("备份保护") {
-                        Label(protection.adminBool("within_24_hours") ? "最近 24 小时内有完整备份" : "最近 24 小时内没有完整备份", systemImage: protection.adminBool("within_24_hours") ? "checkmark.shield" : "exclamationmark.shield")
+                        Label(appPrompt(protection.adminBool("within_24_hours") ? "最近 24 小时内有完整备份" : "最近 24 小时内没有完整备份"), systemImage: protection.adminBool("within_24_hours") ? "checkmark.shield" : "exclamationmark.shield")
                             .foregroundStyle(protection.adminBool("within_24_hours") ? .green : .orange)
                         LabeledContent("最近快照", value: adminDate(protection.adminText("snapshot_at")))
                     }

@@ -15,11 +15,11 @@ struct AdminIntegrationsView: View {
     var body: some View {
         List {
             Section {
-                Label("从浏览器提交视频到归档库", systemImage: "safari")
-                Text("令牌只允许提交采集任务，不能读取媒体或执行管理操作。每个令牌可设置独立采集策略。").font(.subheadline).foregroundStyle(.secondary)
+                Label(appPrompt("从浏览器提交视频到归档库"), systemImage: "safari")
+                Text(appPrompt("令牌只允许提交采集任务，不能读取媒体或执行管理操作。每个令牌可设置独立采集策略。")).font(.subheadline).foregroundStyle(.secondary)
             }
             if !error.isEmpty { Section { AdminNotice(message: error) } }
-            if items.isEmpty && !loading { ContentUnavailableView("暂无采集令牌", systemImage: "key.horizontal", description: Text("创建后可在已安装的浏览器采集脚本中连接此归档库。")) }
+            if items.isEmpty && !loading { ContentUnavailableView(appPrompt("暂无采集令牌"), systemImage: "key.horizontal", description: Text(appPrompt("创建后可在已安装的浏览器采集脚本中连接此归档库。"))) }
             ForEach(items, id: \.adminID) { item in
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
@@ -44,7 +44,7 @@ struct AdminIntegrationsView: View {
         .toolbar { ToolbarItem(placement: .primaryAction) { Button("创建令牌", systemImage: "plus") { creating = true } } }
         .sheet(isPresented: $creating, onDismiss: { Task { page = 1; await load() } }) { NavigationStack { AdminTokenEditorView(initial: nil) }.presentationSizing(.form) }
         .sheet(item: $editing, onDismiss: { Task { page = 1; await load() } }) { value in NavigationStack { AdminTokenEditorView(initial: value.row) }.presentationSizing(.form) }
-        .confirmationDialog("撤销“\(revoking?.adminTitle ?? "")”？", isPresented: $confirm, titleVisibility: .visible) { Button("撤销令牌", role: .destructive) { Task { await revoke() } } } message: { Text("使用该令牌的浏览器将不能继续提交采集，已有任务和归档会保留。") }
+        .confirmationDialog(appPrompt("撤销“\(revoking?.adminTitle ?? "")”？"), isPresented: $confirm, titleVisibility: .visible) { Button("撤销令牌", role: .destructive) { Task { await revoke() } } } message: { Text(appPrompt("使用该令牌的浏览器将不能继续提交采集，已有任务和归档会保留。")) }
         .task { await load() }
         .refreshable { page = 1; await load() }
     }
@@ -86,19 +86,19 @@ private struct AdminTokenEditorView: View {
             if loading { ProgressView() }
             else if !issuedSecret.isEmpty {
                 Section {
-                    Label("令牌已创建", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                    Label(appPrompt("令牌已创建"), systemImage: "checkmark.shield.fill").foregroundStyle(.green)
                     LabeledContent("服务地址", value: api.baseURL.absoluteString).textSelection(.enabled)
                     Text(issuedSecret).font(.footnote.monospaced()).textSelection(.enabled)
-                    Button(copied ? "已复制令牌" : "复制令牌") {
+                    Button(copied ? appPrompt("已复制令牌") : "复制令牌") {
                         // Restrict clipboard propagation and expire the transient secret.
                         UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: issuedSecret]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)])
                         copied = true
                     }
-                } header: { Text("只展示一次") } footer: { Text("请将令牌粘贴到浏览器采集脚本。关闭后不会再次显示；未保存时可撤销并重新创建。") }
+                } header: { Text(appPrompt("只展示一次")) } footer: { Text(appPrompt("请将令牌粘贴到浏览器采集脚本。关闭后不会再次显示；未保存时可撤销并重新创建。")) }
             } else {
                 Section("令牌设置") {
                     TextField("名称，例如 Safari", text: $name)
-                    Picker("采集账号", selection: $accountID) { Text("请选择").tag(""); ForEach(accounts, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
+                    Picker("采集账号", selection: $accountID) { Text(appPrompt("请选择")).tag(""); ForEach(accounts, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
                     if initial == nil { Stepper("有效期：\(expires) 天", value: $expires, in: 1...365) }
                 }
                 AdminPolicyFields(values: $policy)
@@ -107,7 +107,7 @@ private struct AdminTokenEditorView: View {
         .navigationTitle(initial == nil ? "创建采集令牌" : "编辑采集令牌")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button(issuedSecret.isEmpty ? "取消" : "完成") { issuedSecret = ""; dismiss() }.disabled(saving) }
-            if issuedSecret.isEmpty { ToolbarItem(placement: .confirmationAction) { Button(saving ? "保存中…" : "保存") { Task { await save() } }.disabled(loading || saving) } }
+            if issuedSecret.isEmpty { ToolbarItem(placement: .confirmationAction) { Button(saving ? appPrompt("保存中…") : "保存") { Task { await save() } }.disabled(loading || saving) } }
         }
         .interactiveDismissDisabled(saving)
         .onDisappear { issuedSecret = "" }

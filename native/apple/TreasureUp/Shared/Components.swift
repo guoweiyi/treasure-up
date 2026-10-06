@@ -36,8 +36,8 @@ struct FailureView: View {
     var retry: (() async -> Void)?
     var body: some View {
         ContentUnavailableView {
-            Label("暂时无法加载", systemImage: "wifi.exclamationmark")
-        } description: { Text(message) } actions: {
+            Label(appPrompt("暂时无法加载"), systemImage: "wifi.exclamationmark")
+        } description: { Text(appPrompt(message)) } actions: {
             if let retry { Button("重试") { Task { await retry() } }.buttonStyle(.borderedProminent) }
         }
     }
@@ -87,7 +87,7 @@ struct PaginationFooter: View {
                 Button { Task { await more() } } label: {
                     HStack(spacing: 8) {
                         if busy { ProgressView() }
-                        Text(busy ? "正在加载…" : "载入更多")
+                        Text(busy ? appPrompt("正在加载…") : "载入更多")
                     }.frame(minHeight: 32)
                 }.buttonStyle(.bordered).disabled(busy)
             }

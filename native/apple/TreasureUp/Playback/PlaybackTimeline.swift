@@ -48,7 +48,12 @@ enum PlaybackTimeline {
             if cues[middle].start <= time { low = middle + 1 } else { high = middle }
         }
         // Most VTT tracks contain one cue; include nearby overlapping bilingual cues.
-        return cues[max(0, low - 16)..<low].filter { $0.end > time }.map(\.text).joined(separator: "\n")
+        var text = ""
+        for cue in cues[max(0, low - 16)..<low] where cue.end > time {
+            if !text.isEmpty { text.append("\n") }
+            text.append(cue.text)
+        }
+        return text
     }
 
     static func scheduleDanmaku(_ rows: [NativeDanmakuCue]) -> [ScheduledDanmaku] {

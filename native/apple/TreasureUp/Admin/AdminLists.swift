@@ -28,7 +28,7 @@ struct AdminRecordRow: View {
                 case .audit: Text(row.adminText("entity_type")); Text(adminDate(row.adminText("created_at")))
                 }
             }.font(.caption).foregroundStyle(.secondary)
-            if !row.adminText("error").isEmpty { Text(row.adminText("error")).font(.caption).foregroundStyle(.red).lineLimit(2) }
+            if !row.adminText("error").isEmpty { Text(appPrompt(row.adminText("error"))).font(.caption).foregroundStyle(.red).lineLimit(2) }
         }.padding(.vertical, 5).accessibilityElement(children: .combine)
     }
 }
@@ -60,7 +60,7 @@ struct AdminListView: View {
                 }
             }
             if rows.isEmpty && !loading && error.isEmpty {
-                ContentUnavailableView("暂无\(area.title)", systemImage: area.icon, description: Text(area.canCreate ? "使用右上角添加按钮创建。" : "新的记录会在这里显示。"))
+                ContentUnavailableView(appPrompt("暂无\(area.title)"), systemImage: area.icon, description: Text(appPrompt(area.canCreate ? "使用右上角添加按钮创建。" : "新的记录会在这里显示。")))
             }
             ForEach(rows, id: \.adminID) { row in
                 if area == .jobs {
@@ -98,9 +98,9 @@ struct AdminListView: View {
                 .presentationSizing(.form)
         }
         .sheet(item: $operation) { job in NavigationStack { AdminJobDetailView(jobID: job.id).toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { operation = nil } } } }.presentationSizing(.form) }
-        .confirmationDialog("创建当前归档库的备份？", isPresented: $backupConfirmation, titleVisibility: .visible) {
+        .confirmationDialog(appPrompt("创建当前归档库的备份？"), isPresented: $backupConfirmation, titleVisibility: .visible) {
             Button("创建备份") { Task { await createBackup() } }
-        } message: { Text("备份任务在服务器执行，可在任务中心查看进度。") }
+        } message: { Text(appPrompt("备份任务在服务器执行，可在任务中心查看进度。")) }
         .task(id: area) { await load() }
         .task(id: scenePhase) {
             guard scenePhase == .active, area == .jobs else { return }
@@ -211,7 +211,7 @@ struct AdminJobDetailView: View {
                 }
             }
             if job.adminText("kind") == "verify_account", job.adminValue("result").adminBool("logged_in") {
-                Section { Label("B 站登录有效", systemImage: "checkmark.shield"); if job.adminValue("result").adminBool("vip") { Text("会员状态有效") } }
+                Section { Label(appPrompt("B 站登录有效"), systemImage: "checkmark.shield"); if job.adminValue("result").adminBool("vip") { Text(appPrompt("会员状态有效")) } }
             }
             if !actions.isEmpty {
                 Section("任务控制") {
@@ -224,9 +224,9 @@ struct AdminJobDetailView: View {
             }
             if ["delete_video", "delete_creator"].contains(job.adminText("kind")) && job.adminText("status") == "succeeded" {
                 Section("重新导入") {
-                    if job.adminValue("result").adminBool("reimport_allowed") { Label("已允许重新导入", systemImage: "checkmark.circle") }
+                    if job.adminValue("result").adminBool("reimport_allowed") { Label(appPrompt("已允许重新导入"), systemImage: "checkmark.circle") }
                     else { Button("解除重新导入限制") { reimportConfirmation = true }.disabled(busy) }
-                    Text("此操作不会恢复已删除文件，已停用的备份来源仍保持停用。")
+                    Text(appPrompt("此操作不会恢复已删除文件，已停用的备份来源仍保持停用。"))
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
@@ -239,10 +239,10 @@ struct AdminJobDetailView: View {
             }.textSelection(.enabled)
         }
         .navigationTitle("任务详情")
-        .confirmationDialog("取消此任务？", isPresented: $cancelConfirmation, titleVisibility: .visible) { Button("取消任务", role: .destructive) { Task { await run("cancel") } } } message: { Text("已归档的内容会保留。") }
-        .confirmationDialog("允许重新导入已删除的内容？", isPresented: $reimportConfirmation, titleVisibility: .visible) {
+        .confirmationDialog(appPrompt("取消此任务？"), isPresented: $cancelConfirmation, titleVisibility: .visible) { Button("取消任务", role: .destructive) { Task { await run("cancel") } } } message: { Text(appPrompt("已归档的内容会保留。")) }
+        .confirmationDialog(appPrompt("允许重新导入已删除的内容？"), isPresented: $reimportConfirmation, titleVisibility: .visible) {
             Button("允许重新导入") { Task { await allowReimport() } }
-        } message: { Text("解除防止重复采集的标记，不会恢复已删除文件或自动启用备份来源。") }
+        } message: { Text(appPrompt("解除防止重复采集的标记，不会恢复已删除文件或自动启用备份来源。")) }
         .task(id: jobID) { await load() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
