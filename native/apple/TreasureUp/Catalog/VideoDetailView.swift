@@ -19,7 +19,6 @@ struct VideoDetailView: View {
     @State private var lifetime = VideoPageLifetime()
     @State private var fullscreen = false
     @State private var playTask: Task<Void, Never>?
-    @State private var commentSeekRevision = UUID()
     @State private var followsPlayback = false
     @State private var isPageVisible = false
     @State private var page: VideoPage = .info
@@ -240,8 +239,6 @@ struct VideoDetailView: View {
     }
     private func seekComment(_ video: ArchiveVideo, part: VideoPart, seconds: Double) {
         guard isPageVisible, !part.variants.isEmpty, seconds.isFinite, seconds >= 0, seconds < part.duration else { return }
-        let revision = UUID()
-        commentSeekRevision = revision
         if playback.currentVideo?.id == video.id && playback.currentPart?.id == part.id {
             playback.seek(to: seconds)
             return
@@ -252,11 +249,8 @@ struct VideoDetailView: View {
         playTask?.cancel()
         playTask = Task {
             guard !Task.isCancelled, isPageVisible, identity == api.sessionRevision else { return }
-            await playback.start(video: video, part: part, context: queueContext)
-            guard !Task.isCancelled, isPageVisible, identity == api.sessionRevision, revision == commentSeekRevision,
-                  playback.currentVideo?.id == video.id, playback.currentPart?.id == part.id else { return }
-            if !shouldPlay { playback.pause() }
-            playback.seek(to: seconds)
+            await playback.start(video: video, part: part, context: queueContext,
+                                 autoplay: shouldPlay, initialSeek: seconds)
         }
     }
     private func play(_ video: ArchiveVideo, part: VideoPart? = nil) {

@@ -603,6 +603,10 @@ async function renew(input?: PlaybackInput) {
       switching.value = false;
       clearBuffering();
       renewalSnapshot = null;
+      // play() can wait for a newly selected timestamp to buffer. A further
+      // comment click in that interval must not remain queued until a future
+      // renewal; respect any newer pause/resume performed during that wait.
+      applyCommentSeek(false, !currentPlayer.video.paused);
     }
   }
 }
@@ -894,7 +898,7 @@ async function replay() {
     if (art === player) note.value = '请点击播放继续。';
   }
 }
-function applyCommentSeek(restoring = false) {
+function applyCommentSeek(restoring = false, currentPlayIntent?: boolean) {
   if (!art || startupPending || (renewing && !restoring)) return;
   const pending = requestedSeek.consume(
     { request, partId: activePartId, identity: sessionRevision.value },
@@ -902,11 +906,15 @@ function applyCommentSeek(restoring = false) {
   );
   if (!pending) return;
   const currentPlayer = art;
+  const play = currentPlayIntent ?? pending.play;
   currentPlayer.currentTime = pending.seconds;
-  startupPlayRequested = pending.play;
-  if (renewalSnapshot) renewalSnapshot.paused = !pending.play;
+  startupPlayRequested = play;
+  if (renewalSnapshot) {
+    renewalSnapshot.position = pending.seconds;
+    renewalSnapshot.paused = !play;
+  }
   if (!restoring) {
-    if (!pending.play) currentPlayer.pause();
+    if (!play) currentPlayer.pause();
     else
       void currentPlayer.play().catch(() => {
         if (art === currentPlayer) note.value = '请点击播放继续。';

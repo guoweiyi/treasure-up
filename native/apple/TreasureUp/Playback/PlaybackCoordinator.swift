@@ -184,18 +184,22 @@ final class PlaybackCoordinator {
         }
     }
 
-    func play(video: ArchiveVideo, part: VideoPart? = nil, variant: MediaVariant? = nil) async {
+    func play(video: ArchiveVideo, part: VideoPart? = nil, variant: MediaVariant? = nil,
+              autoplay: Bool = true, initialSeek: Double? = nil) async {
         guard !Task.isCancelled else { return }
+        if let initialSeek, !initialSeek.isFinite || initialSeek < 0 { return }
         ensureQueueIdentity()
-        if await resumeCurrentSelection(videoID: video.id, partID: part?.id, variantID: variant?.id) { return }
+        if await resumeCurrentSelection(videoID: video.id, partID: part?.id, variantID: variant?.id,
+                                        autoplay: autoplay, initialSeek: initialSeek) { return }
         navigationGeneration = UUID()
         queueTransitioning = false
         playbackQueue.select(video)
-        await beginPlayback(video: video, part: part, variant: variant, resumeHistory: true)
+        await beginPlayback(video: video, part: part, variant: variant, resumeHistory: true,
+                            autoplay: autoplay, initialSeek: initialSeek)
     }
 
     private func beginPlayback(video: ArchiveVideo, part: VideoPart? = nil, variant: MediaVariant? = nil,
-                               resumeHistory: Bool) async {
+                               resumeHistory: Bool, autoplay: Bool = true, initialSeek: Double? = nil) async {
         persistProgress()
         generation = UUID()
         activeItemGeneration = nil
@@ -231,11 +235,12 @@ final class PlaybackCoordinator {
         selectedRouteID = ""
         selectedTransport = "auto"
         startupPosition = PlaybackStartupPosition(resumeHistory: resumeHistory)
+        if let initialSeek { startupPosition.requestSeek(initialSeek) }
         historyReadPending = false
         recovery = NativePlaybackRecovery()
         initialResumeApplied = false
-        wantsPlayback = true
-        expectedTransportState = true
+        wantsPlayback = autoplay
+        expectedTransportState = autoplay
         isLoading = true
         recordDiagnostic("play-request")
         updateNowPlaying()
@@ -255,8 +260,9 @@ final class PlaybackCoordinator {
                 ?? selectedPart.variants.first(where: { $0.kind == "archive" })
                 ?? selectedPart.variants.first(where: { $0.kind == "playback" })
             duration = selectedPart.duration
+            currentTime = startupPosition.resolved(duration: duration)
             recordDiagnostic("source-selected")
-            if resumeHistory && api.user != nil {
+            if resumeHistory && startupPosition.acceptsHistory && api.user != nil {
                 historyReadPending = true
                 progressTask = Task { [weak self] in
                     guard let self else { return }
@@ -535,7 +541,8 @@ final class PlaybackCoordinator {
 
     /// The catalog supplies its exact search/filter/sort query. Loading starts at
     /// page 1, independent of the screen's currently loaded page or card count.
-    func start(video: ArchiveVideo, part: VideoPart? = nil, context: PlaybackQueueContext? = nil) async {
+    func start(video: ArchiveVideo, part: VideoPart? = nil, context: PlaybackQueueContext? = nil,
+               autoplay: Bool = true, initialSeek: Double? = nil) async {
         guard !Task.isCancelled else { return }
         ensureQueueIdentity()
         if let context {
@@ -548,7 +555,7 @@ final class PlaybackCoordinator {
             configureQueue(videos: [video], currentVideoId: video.id)
         }
         if playbackQueue.hasUnloadedItems, queueLoadTask?.isCancelled == true { beginLoadingQueue() }
-        await play(video: video, part: part)
+        await play(video: video, part: part, autoplay: autoplay, initialSeek: initialSeek)
     }
 
     func enqueue(video: ArchiveVideo) {
@@ -589,12 +596,26 @@ final class PlaybackCoordinator {
 
     /// Reopening the selected row means continue, including when its active part
     /// is not P1. Explicit queue transitions and loop playback bypass this path.
-    private func resumeCurrentSelection(videoID: String, partID: String? = nil, variantID: String? = nil) async -> Bool {
+    private func resumeCurrentSelection(videoID: String, partID: String? = nil, variantID: String? = nil,
+                                        autoplay: Bool = true, initialSeek: Double? = nil) async -> Bool {
         guard currentVideo?.id == videoID,
               partID == nil || partID == (currentPart?.id ?? requestedPartID),
               variantID == nil || variantID == currentVariant?.id else { return false }
+        // A failed explicit seek starts a fresh generation carrying both intents;
+        // retry() intentionally means play for the existing ordinary retry button.
+        if errorMessage != nil && (initialSeek != nil || !autoplay) { return false }
         cancelQueueNavigation()
-        if isLoading { wantsPlayback = true; expectedTransportState = true; return true }
+        if isLoading {
+            wantsPlayback = autoplay; expectedTransportState = autoplay
+            if !autoplay { player.pause() }
+            if let initialSeek {
+                let position = duration > 0 ? min(initialSeek, duration) : initialSeek
+                updateSeekIntent(to: position)
+                currentTime = position
+            }
+            updateNowPlaying()
+            return true
+        }
         if errorMessage != nil {
             if currentPart == nil {
                 // Detail hydration previously failed; let play() retry it.
@@ -605,7 +626,13 @@ final class PlaybackCoordinator {
             return true
         }
         guard player.currentItem != nil else { return false }
-        if !wantsPlayback { resume() }
+        if let initialSeek {
+            wantsPlayback = autoplay; expectedTransportState = autoplay
+            if !autoplay { player.pause() }
+            seek(to: initialSeek)
+        } else if autoplay {
+            if !wantsPlayback { resume() }
+        } else { pause() }
         return true
     }
 

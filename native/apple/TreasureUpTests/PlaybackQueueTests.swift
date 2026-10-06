@@ -345,6 +345,107 @@ final class PlaybackQueueTests: XCTestCase {
         }
     }
 
+    func testPausedCommentJumpKeepsNewestSamePartCoordinateDuringDelayedSession() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        await withCoordinator(player: player) { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1), self.part("a2", position: 2)])
+            await coordinator.start(video: source, part: source.parts[0])
+            coordinator.pause()
+            QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}", delay: 0.2) }
+            let starting = Task { await coordinator.start(video: source, part: source.parts[1],
+                                                          autoplay: false, initialSeek: 40) }
+            await self.waitForRequest("/api/v1/playback-sessions")
+            XCTAssertEqual(coordinator.currentPart?.id, "a2")
+            XCTAssertEqual(coordinator.currentTime, 40)
+            XCTAssertFalse(coordinator.wantsPlayback, "Paused intent must be installed before HTTP suspends")
+            await coordinator.start(video: source, part: source.parts[1], autoplay: coordinator.wantsPlayback, initialSeek: 75)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertEqual(coordinator.currentTime, 75)
+            await starting.value
+            XCTAssertEqual(coordinator.currentTime, 75, "The older start must not restore its original coordinate")
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertTrue(player.playedRates.isEmpty)
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.filter { $0 == "/api/v1/playback-sessions" }.count, 1)
+        }
+    }
+
+    func testRapidCommentJumpsAcrossPartsCarryOriginalPauseOrPlayIntentBeforeResponses() async {
+        for autoplay in [false, true] {
+            QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+            await withCoordinator { coordinator in
+                let source = self.video("a", parts: [self.part("a1", position: 1), self.part("a2", position: 2), self.part("a3", position: 3)])
+                await coordinator.start(video: source, part: source.parts[0])
+                QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}", delay: 0.2) }
+                let second = Task { await coordinator.start(video: source, part: source.parts[1], autoplay: autoplay, initialSeek: 40) }
+                await self.waitForRequest("/api/v1/playback-sessions")
+                XCTAssertEqual(coordinator.wantsPlayback, autoplay)
+                let preservedIntent = coordinator.wantsPlayback
+                let third = Task { await coordinator.start(video: source, part: source.parts[2], autoplay: preservedIntent, initialSeek: 90) }
+                await self.waitForRequest("/api/v1/playback-sessions", count: 2)
+                XCTAssertEqual(coordinator.currentPart?.id, "a3")
+                XCTAssertEqual(coordinator.currentTime, 90)
+                XCTAssertEqual(coordinator.wantsPlayback, autoplay)
+                await second.value
+                await third.value
+                XCTAssertEqual(coordinator.currentPart?.id, "a3")
+                XCTAssertEqual(coordinator.currentTime, 90, "A late P2 response must not change the P3 coordinate")
+            }
+        }
+    }
+
+    func testExplicitCommentSeekSurvivesDetailHydrationAndRepeatedCurrentSelection() async {
+        QueueTestURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/videos/a" {
+                return .init(body: #"{"id":"a","parts":[{"id":"a2","position":2,"duration":120,"variants":[{"id":"a2-source"}]}]}"#, delay: 0.2)
+            }
+            return .init(status: 503, body: "{}")
+        }
+        await withCoordinator { coordinator in
+            let source = self.video("a"), target = self.part("a2", position: 2)
+            let starting = Task { await coordinator.start(video: source, part: target, autoplay: false, initialSeek: 40) }
+            await self.waitForRequest("/api/v1/videos/a")
+            XCTAssertNil(coordinator.currentPart)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            await coordinator.start(video: source, part: target, autoplay: false, initialSeek: 75)
+            XCTAssertEqual(coordinator.currentTime, 75, "Unknown duration during hydration must not clamp the explicit seek to zero")
+            await starting.value
+            XCTAssertEqual(coordinator.currentPart?.id, "a2")
+            XCTAssertEqual(coordinator.currentTime, 75)
+            XCTAssertFalse(coordinator.wantsPlayback)
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.filter { $0 == "/api/v1/videos/a" }.count, 1)
+        }
+    }
+
+    func testReadySamePartStartSeeksBeforeApplyingExplicitTransportIntent() async {
+        QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
+        let player = ReplayTestPlayer()
+        defer { player.finishRemainingSeeks() }
+        await withCoordinator(player: player) { coordinator in
+            let source = self.video("a", parts: [self.part("a1", position: 1)])
+            await coordinator.start(video: source)
+            coordinator.errorMessage = nil
+            player.replaceCurrentItem(with: player.makeCancellationItem())
+            let requestCount = QueueTestURLProtocol.store.paths.count
+            await coordinator.start(video: source, part: source.parts[0], autoplay: false, initialSeek: 30)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [30])
+            XCTAssertFalse(coordinator.wantsPlayback)
+            player.finishNextSeek()
+            await self.waitForTransport("Paused coordinate should settle") { !coordinator.isSeeking }
+            XCTAssertTrue(player.playedRates.isEmpty)
+            await coordinator.start(video: source, part: source.parts[0], autoplay: true, initialSeek: 60)
+            await self.waitForSeek(player)
+            XCTAssertEqual(player.pendingTimes, [60])
+            XCTAssertTrue(player.playedRates.isEmpty, "Audio cannot resume before the new coordinate settles")
+            player.finishNextSeek()
+            await self.waitForTransport("Playing coordinate should settle") { !coordinator.isSeeking }
+            XCTAssertEqual(player.playedRates, [1])
+            XCTAssertEqual(coordinator.currentTime, 60)
+            XCTAssertEqual(QueueTestURLProtocol.store.paths.count, requestCount)
+        }
+    }
+
     func testFailedCurrentSelectionRetriesSamePartInsteadOfReturningToFirstPart() async {
         QueueTestURLProtocol.store.set { _ in .init(status: 503, body: "{}") }
         await withCoordinator { coordinator in
