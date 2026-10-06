@@ -135,6 +135,8 @@ def _statistics_page(db, *, manual):
         policy["refresh_danmaku"] = config.refresh_danmaku
         policy["refresh_comments"] = config.refresh_comments
         policy["refresh_tags"] = True
+        # Include sources previously reported unavailable: a later successful
+        # view check must be able to clear the badge without touching archives.
         state = _new_batch(db, Video, Video.bvid.like("BV%"), now)
         state.update({"manual": manual, "account_id": account.id, "policy": policy,
                       "interval_hours": config.interval_hours, "next_available_at": now.isoformat()})

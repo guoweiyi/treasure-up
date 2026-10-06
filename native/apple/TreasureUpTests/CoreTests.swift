@@ -3,6 +3,36 @@ import ImageIO
 @testable import TreasureUp
 
 final class CoreTests: XCTestCase {
+    func testCommentTimelinePreservesFullwidthTimesAndRejectsMalformedOrOutsidePart() {
+        let part = VideoPart(id: "p2", position: 2, duration: 4000)
+        let content = "0：00 开始 4：02 中段 1:02:03 结尾 1:99 无效 1:60:03 无效 66:40 越界"
+        let attributed = ArchivedCommentTimeline.attributed(content, part: part)
+        XCTAssertEqual(String(attributed.characters), content)
+        let targets = attributed.runs.compactMap { $0.link }.compactMap { ArchivedCommentTimeline.seconds($0, duration: 4000) }
+        XCTAssertEqual(targets, [0, 242, 3723])
+        XCTAssertNil(ArchivedCommentTimeline.seconds(URL(string: "https://example.com/?seconds=5")!, duration: 300))
+        XCTAssertNil(ArchivedCommentTimeline.seconds(URL(string: "treasureup-comment://seek?seconds=300")!, duration: 300))
+        XCTAssertNil(ArchivedCommentTimeline.seconds(URL(string: "treasureup-comment://seek?seconds=-1")!, duration: 300))
+        XCTAssertNil(ArchivedCommentTimeline.seconds(URL(string: "treasureup-comment://seek?seconds=nan")!, duration: 300))
+    }
+
+    func testLongCommentPreviewIsBoundedByLengthAndLines() {
+        XCTAssertEqual(ArchivedCommentTimeline.preview("短评论"), "短评论")
+        XCTAssertEqual(ArchivedCommentTimeline.preview(String(repeating: "😀", count: 400)), String(repeating: "😀", count: 360) + "…")
+        XCTAssertEqual(ArchivedCommentTimeline.preview("a\nb\nc\nd\ne\nf\ng"), "a\nb\nc\nd\ne\nf…")
+        XCTAssertEqual(ArchivedCommentTimeline.preview(String(repeating: "字", count: 357) + "4:02结尾"), String(repeating: "字", count: 357) + "…")
+    }
+
+    func testCommentTimelineChoosesExplicitPlayablePartWithoutFallback() {
+        let parts = [VideoPart(id: "p1", position: 1, duration: 300, variants: [MediaVariant(id: "v1")]),
+                     VideoPart(id: "p2", position: 2, duration: 4000, variants: [MediaVariant(id: "v2")]),
+                     VideoPart(id: "p3", position: 3, duration: 4000)]
+        XCTAssertEqual(ArchivedCommentTimeline.part("part2@天阙 总结\n0：00", parts: parts, currentPartID: "p1")?.id, "p2")
+        XCTAssertEqual(ArchivedCommentTimeline.part("4：02 中段", parts: parts, currentPartID: "p1")?.id, "p1")
+        XCTAssertNil(ArchivedCommentTimeline.part("P3 0:00", parts: parts, currentPartID: "p1"))
+        XCTAssertNil(ArchivedCommentTimeline.part("part4 0:00", parts: parts, currentPartID: "p1"))
+    }
+
     private func isolatedDefaults() -> UserDefaults {
         let suite = "com.guoweiyi.treasureup.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -155,12 +185,12 @@ final class CoreTests: XCTestCase {
     }
 
     @MainActor
-    func testGuestPolicyDefaultsToPrivateAndIdentityTokenCreatesOnlySession() async throws {
+    func testGuestPolicyDefaultsToPrivateAndPasswordCreatesOnlySession() async throws {
         let recorder = RequestRecorder()
         MockURLProtocol.store.set { request in
             recorder.append(request)
             switch request.url?.path {
-            case "/api/v1/auth/token-login":
+            case "/api/v1/auth/login":
                 return .init(body: "{\"user\":{\"id\":\"user-a\",\"username\":\"tester\",\"role\":\"reader\"},\"csrf_token\":\"csrf-test\"}",
                              headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
             default:
@@ -169,11 +199,11 @@ final class CoreTests: XCTestCase {
         }
         let client = makeClient()
         XCTAssertFalse(client.allowGuestAccess)
-        try await client.login(identityToken: "tul_synthetic-token-test-only")
+        try await client.login(username: "tester", password: "temporary-test-secret")
         XCTAssertEqual(client.user?.role, "reader")
         XCTAssertFalse(client.allowGuestAccess)
         let calls = recorder.requests
-        XCTAssertEqual(calls.first?.url?.path, "/api/v1/auth/token-login")
+        XCTAssertEqual(calls.first?.url?.path, "/api/v1/auth/login")
         XCTAssertNil(calls.last?.value(forHTTPHeaderField: "Authorization"))
         XCTAssertTrue(client.mediaCookies(for: URL(string: "https://other.example.test/asset")!).isEmpty)
     }

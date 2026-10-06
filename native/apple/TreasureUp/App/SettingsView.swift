@@ -45,8 +45,6 @@ struct LoginView: View {
     var requiresLogin = false
     @State private var username = ""
     @State private var password = ""
-    @State private var identityToken = ""
-    @State private var tokenMode = false
     @State private var serverPresented = false
     @State private var busy = false
     @State private var error: String?
@@ -56,27 +54,14 @@ struct LoginView: View {
             Section {
                 Label(appPrompt(requiresLogin ? "登录后浏览你的资料库" : "登录后同步你的片单和播放进度"), systemImage: "person.crop.circle.badge.checkmark")
                     .font(.headline).padding(.vertical, 12)
-                Picker("登录方式", selection: $tokenMode) {
-                    Text("账号密码").tag(false)
-                    Text("身份令牌").tag(true)
-                }.pickerStyle(.segmented)
-                if tokenMode {
-                    SecureField("粘贴身份令牌", text: $identityToken)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .submitLabel(.go).onSubmit { login() }
-                        .accessibilityIdentifier("loginIdentityToken")
-                    Text("在网页端的账户安全中创建。此设备只保存登录会话，不保存令牌原文。")
-                        .font(.footnote).foregroundStyle(.secondary)
-                } else {
                 TextField("用户名", text: $username).textContentType(.username)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.next)
                     .onSubmit { passwordFocused = true }.accessibilityIdentifier("loginUsername")
                 SecureField("密码", text: $password).textContentType(.password).focused($passwordFocused)
                     .submitLabel(.go).onSubmit { login() }.accessibilityIdentifier("loginPassword")
-                }
                 Button(action: login) {
                     HStack { Text("登录"); Spacer(); if busy { ProgressView() } }
-                }.disabled(busy || (tokenMode ? identityToken.isEmpty : username.isEmpty || password.isEmpty)).accessibilityIdentifier("loginSubmit")
+                }.disabled(busy || username.isEmpty || password.isEmpty).accessibilityIdentifier("loginSubmit")
             } footer: { Text(api.baseURL.host() ?? "") }
             if let error { Text(appPrompt(error)).foregroundStyle(.red) }
         }
@@ -87,18 +72,16 @@ struct LoginView: View {
             else { Button("取消") { dismiss() } }
         } }
         .sheet(isPresented: $serverPresented) { NavigationStack { ServerConnectionView() } }
-        .onChange(of: tokenMode) { _, _ in password = ""; identityToken = ""; error = nil }
-        .onChange(of: api.baseURL) { _, _ in username = ""; password = ""; identityToken = ""; error = nil }
-        .onDisappear { password = ""; identityToken = "" }
+        .onChange(of: api.baseURL) { _, _ in username = ""; password = ""; error = nil }
+        .onDisappear { password = "" }
     }
     private func login() {
-        guard !busy && (tokenMode ? !identityToken.isEmpty : !username.isEmpty && !password.isEmpty) else { return }
+        guard !busy && !username.isEmpty && !password.isEmpty else { return }
         busy = true; error = nil
         Task {
             do {
-                if tokenMode { try await api.login(identityToken: identityToken) }
-                else { try await api.login(username: username, password: password) }
-                password = ""; identityToken = ""; dismiss()
+                try await api.login(username: username, password: password)
+                password = ""; dismiss()
             }
             catch { self.error = error.localizedDescription }
             busy = false

@@ -6,7 +6,14 @@ import { createCommentFeed, emptyCommentFeed } from '../utils/commentFeed';
 import { commentGalleryImages } from '../utils/commentGallery';
 import CommentContent from './CommentContent.vue';
 import CommentImagePreview from './CommentImagePreview.vue';
-const props = defineProps<{ comment: Comment; videoId: string; reply?: boolean }>();
+import type { CommentPlayback, CommentSeek } from '../utils/commentTimeline';
+const props = defineProps<{
+  comment: Comment;
+  videoId: string;
+  reply?: boolean;
+  playback?: CommentPlayback;
+}>();
+const emit = defineEmits<{ seek: [value: CommentSeek] }>();
 const open = ref(false);
 const previewIndex = ref<number | null>(null);
 const state = reactive(emptyCommentFeed<Comment>());
@@ -32,6 +39,12 @@ async function expand() {
   if (!state.page) await feed.more();
 }
 const images = computed(() => commentGalleryImages(props.comment.images));
+const replies = computed(() =>
+  open.value && state.page ? state.items : props.comment.preview_replies || [],
+);
+const savedReplyCount = computed(
+  () => props.comment.saved_reply_count ?? props.comment.reply_count,
+);
 </script>
 <template>
   <article class="comment" :class="{ reply }">
@@ -61,18 +74,12 @@ const images = computed(() => commentGalleryImages(props.comment.images));
           >置顶</span
         >
       </div>
-      <CommentContent :content="comment.content" :emotes="comment.emotes" />
-      <p
-        v-if="
-          reply &&
-          comment.parent_rpid &&
-          comment.parent_rpid !== comment.root_rpid &&
-          comment.parent_rpid !== '0'
-        "
-        class="comment-reply-context"
-      >
-        回复楼中评论
-      </p>
+      <CommentContent
+        :content="comment.content"
+        :emotes="comment.emotes"
+        :playback="playback"
+        @seek="emit('seek', $event)"
+      />
       <div v-if="images.length" class="comment-images">
         <button
           v-for="(image, index) in images"
@@ -117,11 +124,11 @@ const images = computed(() => commentGalleryImages(props.comment.images));
           {{ comment.like_count.toLocaleString() }}
         </span>
         <button
-          v-if="!reply && comment.reply_count"
+          v-if="!reply && savedReplyCount > (comment.preview_replies?.length || 0)"
           type="button"
           class="text-button comment-reply-button"
           :aria-expanded="open"
-          title="来源记录的回复数；展开查看已保存的内容"
+          title="查看已保存的回复"
           @click="expand"
         >
           <svg
@@ -139,33 +146,34 @@ const images = computed(() => commentGalleryImages(props.comment.images));
             />
             <path d="M7 9h10M7 13h6" />
           </svg>
-          {{ open ? '收起回复' : `${comment.reply_count.toLocaleString()} 条回复` }}
+          {{ open ? '收起回复' : `查看全部 ${savedReplyCount.toLocaleString()} 条回复` }}
         </button>
       </div>
-      <div v-if="open" class="replies">
-        <p v-if="state.page" class="saved-reply-count">已保存 {{ state.total }} 条回复</p>
+      <div v-if="!reply && (open || replies.length)" class="replies">
         <CommentThread
-          v-for="item in state.items"
+          v-for="item in replies"
           :key="item.id"
           :comment="item"
           :video-id="videoId"
+          :playback="playback"
+          @seek="emit('seek', $event)"
           reply
         />
-        <p v-if="state.error" class="form-error" role="alert">
+        <p v-if="open && state.error" class="form-error" role="alert">
           {{ state.error }} <button type="button" @click="feed.more">重试</button>
         </p>
-        <p v-if="!state.loading && !state.items.length && !state.error" class="muted small">
+        <p v-if="open && !state.loading && !replies.length && !state.error" class="muted small">
           尚未保存这层回复。
         </p>
         <button
-          v-if="state.hasMore && !state.error"
+          v-if="open && state.hasMore && !state.error"
           type="button"
           :disabled="state.loading"
           @click="feed.more"
         >
           {{ state.loading ? '正在加载…' : '加载更多回复' }}
         </button>
-        <p v-else-if="state.loading" class="muted">正在读取回复…</p>
+        <p v-else-if="open && state.loading" class="muted">正在读取回复…</p>
       </div>
     </div>
     <CommentImagePreview
@@ -277,22 +285,11 @@ const images = computed(() => commentGalleryImages(props.comment.images));
 .comment-meta .comment-reply-button:hover {
   color: var(--accent);
 }
-.comment-body > .comment-reply-context {
-  color: #9499a0;
-  font-size: 12px;
-  margin: 5px 0 8px;
-}
 .replies {
   padding: 0 14px;
   margin-top: 15px;
   background: #f7f8fa;
   border-radius: 8px;
-}
-.saved-reply-count {
-  margin: 0;
-  padding-top: 12px;
-  color: #9499a0;
-  font-size: 12px;
 }
 .comment.reply {
   padding: 15px 0;

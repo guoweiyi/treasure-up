@@ -296,10 +296,20 @@ def observation(session_id: str, body: schemas.PlaybackObservationInput, identit
     return {"recorded": True}
 
 
-def video_asset_ids(db, video_id):
+def video_asset_ids(db, video_id, variant_ids=None):
     video = required(db, Video, video_id)
     parts = list(db.scalars(select(VideoPart.id).where(VideoPart.video_id == video.id)))
-    ids = set(db.scalars(select(MediaVariant.asset_id).where(MediaVariant.part_id.in_(parts))))
+    variants = list(db.scalars(select(MediaVariant).where(MediaVariant.part_id.in_(parts))))
+    if variant_ids is not None:
+        chosen = set(variant_ids)
+        valid = {v.id for v in variants if v.kind != "hls"}
+        if not chosen or not chosen.issubset(valid):
+            raise HTTPException(422, "所选版本不存在、已删除或不属于此视频")
+        # Include only the selected originals/compatible versions and their own
+        # HLS packages. Sidecars below are shared by all versions of the video.
+        variants = [v for v in variants if v.id in chosen or (
+            v.kind == "hls" and (v.metadata_json or {}).get("source_variant_id") in chosen)]
+    ids = {v.asset_id for v in variants}
     if video.cover_asset_id:
         ids.add(video.cover_asset_id)
     for track in db.scalars(select(SubtitleTrack).where(SubtitleTrack.part_id.in_(parts))):
@@ -336,18 +346,67 @@ def video_storage(video_id: str, user=Depends(require_admin), db: Session = Depe
     return {"items": items, "total_assets": len(ids)}
 
 
-@router.post("/admin/videos/{video_id}/sync", status_code=202)
-def sync_video(video_id: str, body: schemas.VideoSyncInput, user=Depends(require_admin), db: Session = Depends(get_db)):
-    target = required(db, StorageProfile, body.target_profile_id)
+def sync_target(db, identifier):
+    # Serialize submissions for this destination, including single-video calls.
+    # This lock spans only catalog queries/queue writes, never file transfers.
+    target = db.scalar(select(StorageProfile).where(StorageProfile.id == identifier)
+                       .with_for_update().execution_options(populate_existing=True))
+    if target is None:
+        raise HTTPException(404, "目标存储位置不存在")
     if not target.enabled:
         raise HTTPException(422, "目标存储位置已停用")
-    ids = video_asset_ids(db, video_id)
+    return target
+
+
+def enqueue_video_sync(db, user, target, video_id, variant_ids=None):
+    ids = video_asset_ids(db, video_id, variant_ids)
     if not ids:
         raise HTTPException(409, "此视频尚无可同步资产")
+    for active in db.scalars(select(Job).where(Job.kind == "sync_video", Job.target_id == video_id,
+                            Job.status.in_(["queued", "running", "paused", "blocked"]))):
+        policy = active.policy or {}
+        if policy.get("target_profile_id") == target.id and set(policy.get("asset_ids", [])) >= set(ids):
+            return active, True
     job = enqueue(db, "sync_video", video_id, policy={"asset_ids": ids, "target_profile_id": target.id})
     audit(db, user, "sync", "video", video_id, {"target_profile_id": target.id, "asset_count": len(ids)})
+    return job, False
+
+
+@router.post("/admin/videos/{video_id}/sync", status_code=202)
+def sync_video(video_id: str, body: schemas.VideoSyncInput, user=Depends(require_admin), db: Session = Depends(get_db)):
+    target = sync_target(db, body.target_profile_id)
+    job, _ = enqueue_video_sync(db, user, target, video_id)
     db.commit()
     return catalog.job_view(job)
+
+
+@router.post("/admin/storage/sync-batch", status_code=202)
+def sync_batch(body: schemas.ReplicaBatchSyncInput, user=Depends(require_admin), db: Session = Depends(get_db)):
+    target = sync_target(db, body.target_profile_id)
+    # Fold repeated videos into one operation; all versions supersedes subsets.
+    selections = {}
+    for item in body.items:
+        if item.video_id not in selections:
+            selections[item.video_id] = set(item.variant_ids) if item.variant_ids is not None else None
+        elif item.variant_ids is None:
+            selections[item.video_id] = None
+        elif selections[item.video_id] is not None:
+            selections[item.video_id].update(item.variant_ids)
+    results = []
+    for video_id, variants in selections.items():
+        try:
+            with db.begin_nested():
+                job, reused = enqueue_video_sync(db, user, target, video_id, variants)
+                result = {"video_id": video_id, "status": "existing" if reused else "queued",
+                          "job": catalog.job_view(job)}
+        except HTTPException as error:
+            result = {"video_id": video_id, "status": "failed", "error": error.detail}
+        results.append(result)
+    db.commit()
+    # Existing bounded worker pool executes each video's assets sequentially.
+    return {"items": results, "queued": sum(r["status"] == "queued" for r in results),
+            "existing": sum(r["status"] == "existing" for r in results),
+            "failed": sum(r["status"] == "failed" for r in results)}
 
 
 @router.delete("/admin/storage/locations/{location_id}", status_code=202)

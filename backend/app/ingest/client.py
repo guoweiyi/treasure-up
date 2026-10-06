@@ -203,7 +203,7 @@ class BiliClient:
             payload = json.loads(body)
         except (ValueError, UnicodeError):
             raise IngestError("源站返回非 JSON 数据，可能需要重新验证账号", code="invalid_response") from None
-        if not isinstance(payload, dict) or not isinstance(payload.get("code"), int):
+        if not isinstance(payload, dict) or type(payload.get("code")) is not int:
             raise IngestError("源站返回结构异常", code="invalid_response")
         code = payload["code"]
         data = payload.get("data")
@@ -212,7 +212,10 @@ class BiliClient:
         if code:
             names = {-101: ("账号登录已失效", "login_required"), -352: ("源站风控，请稍后恢复", "rate_limited"), -401: ("源站认证检查未通过", "rate_limited"), -403: ("源站拒绝请求或签名失效", "access_denied"), 12002: ("评论区已关闭", "comments_closed"), -404: ("来源内容不可访问", "not_found")}
             message, category = names.get(code, (f"源站接口失败（代码 {code}）", "api_error"))
-            raise IngestError(message, code=category, retryable=code not in (-101, -404, 12002))
+            if code == -101 and path != "/x/web-interface/nav":
+                self._confirm_login_failure(path)
+            raise IngestError(message, code=category, retryable=code not in (-101, -404, 12002),
+                              source_endpoint=path, source_code=code)
         if data is None:
             raise IngestError("源站缺少数据对象", code="invalid_response")
         if isinstance(data, dict) and data.get("v_voucher"):
@@ -221,11 +224,23 @@ class BiliClient:
 
     def nav(self, allow_anonymous=False):
         data = self.json("/x/web-interface/nav", allow_anonymous_nav=allow_anonymous)
+        if not isinstance(data, dict) or type(data.get("isLogin")) is not bool:
+            raise IngestError("登录状态响应结构不完整，请稍后重试", code="invalid_response")
         if data.get("wbi_img"):
             self.images, self.images_at = data["wbi_img"], time.monotonic()
-        if not allow_anonymous and not data.get("isLogin"):
-            raise IngestError("账号登录已失效", code="login_required", retryable=False)
+        if not allow_anonymous and data["isLogin"] is False:
+            raise IngestError("账号登录已失效", code="login_required", retryable=False,
+                              source_endpoint="/x/web-interface/nav", source_code=-101)
+        if data["isLogin"] and (type(data.get("mid")) not in (str, int) or len(str(data["mid"])) > 32 or not str(data["mid"]).isascii()
+                                or not str(data["mid"]).isdigit() or int(data["mid"]) < 1):
+            raise IngestError("登录用户标识无效，请稍后重试", code="invalid_response")
         return data
+
+    def _confirm_login_failure(self, path):
+        """One identity check, never a content retry or a risk-control bypass."""
+        self.nav()  # Only an authoritative anonymous result invalidates the account.
+        raise IngestError("当前接口暂不接受此登录状态，账号验证仍有效", code="endpoint_login_required",
+                          retryable=False, blocked=True, source_endpoint=path, source_code=-101)
 
     def view(self, bvid):
         if not re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid or ""):
@@ -281,7 +296,7 @@ class BiliClient:
                 if code in (-352, -401, -403):
                     raise IngestError("弹幕源站风控，请稍后恢复", code="rate_limited")
                 if code == -101:
-                    raise IngestError("账号登录已失效", code="login_required", retryable=False)
+                    self._confirm_login_failure("/x/v2/dm/wbi/web/seg.so")
                 raise IngestError("弹幕接口返回 JSON 错误响应", code="invalid_danmaku")
         return body
 

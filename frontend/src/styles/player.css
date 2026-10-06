@@ -41,6 +41,10 @@
 .treasure-archive-player.dm-uniform .art-danmuku > div {
   color: var(--dm-color) !important;
 }
+.treasure-archive-player .art-danmuku > div[data-mode='2'] {
+  /* Translate preserves the plugin's offsetTop-based lane collision coordinates. */
+  translate: 0 var(--dm-bottom-offset, 0px);
+}
 .video-heading {
   display: flex;
   align-items: flex-start;

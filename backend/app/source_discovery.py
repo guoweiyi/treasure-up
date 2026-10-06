@@ -98,8 +98,10 @@ def _safe_error(error):
     if error.code == "account_changed":
         return HTTPException(429, "账号凭据已更新，请稍后重新加载来源", headers={
             "Retry-After": "1", "X-Source-Error": "account_changed"})
-    if error.code in {"login_required", "invalid_cookie"}:
+    if error.code in {"login_required", "invalid_cookie", "account_disabled"}:
         return HTTPException(409, "B 站账号已失效或凭据不可用，请在账号管理中更新并验证")
+    if error.code == "endpoint_login_required":
+        return HTTPException(422, "账号登录仍有效，但 B 站暂不允许访问此接口，请稍后重试")
     if isinstance(error, IngestDeferred) or error.code == "rate_limited":
         return HTTPException(429, "账号正在采集或冷却，请稍后加载来源", headers={
             "Retry-After": str(max(1, min(86400, int(error.retry_after_seconds or 30)))),

@@ -98,12 +98,14 @@ def test_badges_require_source_entitlement_or_archived_dolby_evidence(context):
     variant.video_codec, variant.audio_codec = 'hevc', 'eac3'
     db.commit()
     url = f'/api/v1/videos/{video.id}'
-    assert client.get(url).json()['content_features'] == {'charging_exclusive':False,'dolby_vision':False,'dolby_atmos':False}
+    assert client.get(url).json()['content_features'] == {'charging_exclusive':False,'dolby_vision':False,'dolby_atmos':False,'source_unavailable':False}
     video.metadata_json = {'is_upower_exclusive': True, 'media_properties':{variant.id:{'dolby_vision':True,'dolby_atmos':True,
         'fps':23.976,'video_bitrate_bps':1734000,'audio_bitrate_bps':1025000}}}
     variant.width, variant.height = 3840, 2160
     db.commit()
-    assert all(client.get(url).json()['content_features'].values())
+    features = client.get(url).json()['content_features']
+    assert all(features[key] for key in ('charging_exclusive', 'dolby_vision', 'dolby_atmos'))
+    assert features['source_unavailable'] is False
     session = client.post('/api/v1/playback-sessions', json={'part_id':part.id,'protocol':'file'}).json()
     assert session['media']['mime_type'] == 'video/mp4'
     assert session['media']['segment_count'] is None
@@ -115,6 +117,22 @@ def test_badges_require_source_entitlement_or_archived_dolby_evidence(context):
     video.metadata_json = {'is_upower_exclusive': False, 'access': {'upower_exclusive': True}}
     db.commit()
     assert client.get(url).json()['content_features']['charging_exclusive'] is True
+
+
+def test_source_unavailable_badge_preserves_playable_archive(context):
+    client, db, tmp = context
+    video, _, _, asset = seed_media(db, tmp)
+    video.source_state = 'unavailable'
+    video.source_availability = {'outcome': 'unavailable', 'reason': 'not_found', 'history': []}
+    db.commit()
+    detail = client.get(f'/api/v1/videos/{video.id}').json()
+    assert detail['content_features']['source_unavailable'] is True
+    assert detail['playable'] is True and detail['parts'][0]['variants']
+    assert detail['source_availability']['outcome'] == 'unavailable'
+    card = next(row for row in client.get('/api/v1/videos').json()['items'] if row['id'] == video.id)
+    assert card['content_features']['source_unavailable'] is True
+    assert card['source_state'] == 'unavailable'
+    assert client.get(f'/api/v1/assets/{asset.id}').status_code == 200
 
 
 def test_comment_budget_defaults_are_bounded_and_validate_inputs():

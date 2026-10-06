@@ -34,16 +34,6 @@ class UserSession(Entity, Base):
     csrf_token: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     passkey_credential_id: Mapped[str | None] = mapped_column(ForeignKey("passkey_credentials.id", ondelete="SET NULL", use_alter=True, name="fk_sessions_passkey_credential"), index=True)
-    identity_token_id: Mapped[str | None] = mapped_column(ForeignKey("identity_tokens.id", ondelete="CASCADE"), index=True)
-
-
-class IdentityToken(Entity, Base):
-    __tablename__ = "identity_tokens"
-    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
-    name: Mapped[str] = mapped_column(String(80))
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LoginAttempt(Entity, Base):
@@ -127,6 +117,7 @@ class Video(Entity, Base):
     capture_status: Mapped[str] = mapped_column(String(40), default="pending")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     source_tags: Mapped[list] = mapped_column(JSON, default=list, server_default=text("'[]'"))
+    source_availability: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
 
 
 class VideoAnnotation(Entity, Base):

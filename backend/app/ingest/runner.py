@@ -104,6 +104,8 @@ def update_account_identity(db, account, generation, *, nav=None, invalid=False)
             current = writer.get(SourceAccount, account.id)
             if current is None or (current.id, hashlib.sha256(current.secret_encrypted.encode()).hexdigest()) != generation:
                 raise IngestDeferred("账号凭据已更新，请重新验证", code="account_changed", retry_after_seconds=1)
+            if current.status == "disabled":
+                raise IngestError("采集账号已停用", code="account_disabled", retryable=False, blocked=True)
             values = {"status": "invalid"} if invalid else {"uid": _id(nav.get("mid")), "status": "valid", "last_verified_at": _now()}
             writer.execute(update(SourceAccount).where(SourceAccount.id == current.id,
                 SourceAccount.secret_encrypted == current.secret_encrypted).values(**values))
@@ -133,7 +135,10 @@ def account_request_scope(db, account, client, pacer, url, *, decryptor=None):
     pacer.guard()
     with credential_lock(db, account.id):
         db.refresh(account, attribute_names=["secret_encrypted", "status", "cooldown_until", "risk_failures"])
-        if account.status in {"invalid", "expired", "disabled"}:
+        if account.status == "disabled":
+            raise IngestError("采集账号已停用", code="account_disabled", retryable=False, blocked=True)
+        reverify = getattr(client, "allow_reverification", False) and urlsplit(url).path == "/x/web-interface/nav"
+        if account.status in {"invalid", "expired"} and not reverify:
             raise IngestError("账号凭据已失效或停用", code="login_required", retryable=False)
         # No job guard/flush or capture commit while holding the credential lock.
         if account.cooldown_until and utc(account.cooldown_until) > pacer.clock():
@@ -508,6 +513,8 @@ def _metadata(ctx, video):
     video.metadata_json, video.source_state = source_metadata, "available"
     from .media import record_access
     record_access(video, data)
+    from .availability import observe
+    observe(ctx, video)
     if isinstance(data.get("stat"), dict):
         _save_stats(ctx, video, data["stat"])
     ctx.image(data.get("pic"), "video", video.id, "cover")
@@ -571,10 +578,20 @@ def _tags(ctx, video):
 
 
 def _refresh_stats(ctx, video):
+    if ctx.cp.get("source_unavailable"):
+        return True
     if not ctx.cp.get("stats_done"):
         ctx.guard()
-        data = ctx.client.view(video.bvid)
-        if data.get("bvid") != video.bvid or not isinstance(data.get("stat"), dict):
+        try:
+            data = ctx.client.view(video.bvid)
+        except IngestError as error:
+            from .availability import observe
+            if observe(ctx, video, error=error) == "unavailable":
+                ctx.cp.update(source_unavailable=True, stats_done=True)
+                ctx.save()
+                return True
+            raise
+        if not isinstance(data, dict) or data.get("bvid") != video.bvid or not isinstance(data.get("stat"), dict):
             raise IngestError("稿件统计数据无效", code="invalid_stats")
         if video.aid and str(data.get("aid")) != video.aid:
             raise IngestError("统计返回稿件与保存记录不匹配", code="invalid_stats")
@@ -590,6 +607,8 @@ def _refresh_stats(ctx, video):
             if not video.aid:
                 video.aid = _id(data.get("aid"))
         snapshot = _save_stats(ctx, video, data["stat"])
+        from .availability import observe
+        observe(ctx, video)
         ctx.cp["stats_snapshot_id"], ctx.cp["stats_done"] = snapshot.id, True
         ctx.run.scope = {**(ctx.run.scope or {}), "stats": True,
                          "danmaku": bool(ctx.policy.get("refresh_danmaku", False)), "media": False}
@@ -1171,6 +1190,7 @@ def run_job(db, job):
                 initial_generation = (account.id, hashlib.sha256(account.secret_encrypted.encode()).hexdigest())
             client = BiliClient(secret, interval=0)
             client.credential_generation = initial_generation
+            client.allow_reverification = job.kind == "verify_account"
             ctx = Context(db, job, client)
             client.asset_interval = max(0.05, min(5, float(ctx.policy.get("asset_interval_seconds", 0.1))))
             pacer = AccountPacer(db, account, ctx.policy, ctx.guard)
@@ -1235,10 +1255,14 @@ def run_job(db, job):
                             video.metadata_json = {**(video.metadata_json or {}), "capture_policy": _capture_policy(ctx.policy)}
                 result = {"video_id": video.id, "media_job_id": ctx.cp.get("media_job_id"),
                           "paid_consent_required": bool(ctx.cp.get("paid_consent_required"))}
+                if job.kind == "refresh_stats":
+                    result["source_check"] = ctx.cp.get("source_check")
             else:
                 raise IngestError("采集任务类型未支持", code="unsupported_job", retryable=False)
             ctx.run.status = "visible_traversal_complete" if done else "partial"
             ctx.run.end_reason = "normal_end" if done else "page_budget"
+            if done and ctx.cp.get("source_unavailable"):
+                ctx.run.end_reason = "source_unavailable"
             comments = ctx.cp.get("comments", {})
             if done and (comments.get("end_reason") == "scan_budget" or comments.get("replies_limited") or ctx.cp.get("comment_assets_limited")):
                 ctx.run.status, ctx.run.end_reason = "bounded_complete", "comment_policy_budget"
@@ -1265,6 +1289,12 @@ def run_job(db, job):
         if pacer and error.code == "rate_limited" and not getattr(error, "account_backoff_applied", False):
             pacer.failed(error)
         if ctx:
+            if job.kind == "refresh_stats" and not ctx.cp.get("stats_done"):
+                video = db.get(Video, job.target_id)
+                if video:
+                    from .availability import observe
+                    ctx.run.video_id = video.id
+                    observe(ctx, video, error=error)
             if job.kind == "scan_collection":
                 from app.source_monitoring import scan_error
                 scan_error(ctx, error)

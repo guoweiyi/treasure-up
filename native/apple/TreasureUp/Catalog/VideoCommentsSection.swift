@@ -5,6 +5,9 @@ struct VideoCommentsSection: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let videoId: String
     var isActive = true
+    var parts: [VideoPart] = []
+    var currentPartID: String?
+    var onSeek: ((VideoPart, Double) -> Void)?
     @FocusState private var searchFocused: Bool
     @State private var comments: [JSONValue] = []
     @State private var query = ""
@@ -40,7 +43,7 @@ struct VideoCommentsSection: View {
             }.padding(12).background(.quaternary.opacity(0.6), in: .rect(cornerRadius: 12))
             Text(appPrompt("展示归档时的评论、点赞与回复。")).font(.caption).foregroundStyle(.secondary)
             ForEach(Array(comments.enumerated()), id: \.element.commentIdentity) { _, comment in
-                ArchivedCommentRow(videoId: videoId, comment: comment)
+                ArchivedCommentRow(videoId: videoId, comment: comment, parts: parts, currentPartID: currentPartID, onSeek: onSeek)
                 Divider().padding(.leading, 48)
             }
             if loading { ProgressView().frame(maxWidth: .infinity) }
@@ -92,6 +95,9 @@ private struct ArchivedCommentRow: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let videoId: String
     let comment: JSONValue
+    var parts: [VideoPart] = []
+    var currentPartID: String?
+    var onSeek: ((VideoPart, Double) -> Void)?
     @State private var expanded = false
     @State private var replies: [JSONValue] = []
     @State private var total = 0
@@ -100,23 +106,27 @@ private struct ArchivedCommentRow: View {
     @State private var hasMore = true
     @State private var generation = 0
     @State private var error: String?
+    private var previewReplies: [JSONValue] { comment["preview_replies"]?.arrayValue ?? [] }
+    private var savedReplyCount: Int { comment["saved_reply_count"]?.intValue ?? comment["reply_count"]?.intValue ?? 0 }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ArchivedCommentBody(comment: comment)
-            if (comment["reply_count"]?.intValue ?? 0) > 0 {
+            ArchivedCommentBody(comment: comment, parts: parts, currentPartID: currentPartID, onSeek: onSeek)
+            if savedReplyCount > 0 || !previewReplies.isEmpty {
                 VStack(alignment: .leading, spacing: 14) {
-                    Button {
-                        expanded.toggle()
-                    } label: {
-                        HStack {
-                            Text(expanded ? "收起回复" : "\(comment["reply_count"]?.intValue ?? 0) 条回复")
-                            Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        }.font(.subheadline.weight(.medium)).frame(minHeight: 44)
-                    }.accessibilityValue(expanded ? "已展开" : "已收起")
+                    if savedReplyCount > previewReplies.count {
+                        Button {
+                            expanded.toggle()
+                        } label: {
+                            HStack {
+                                Text(expanded ? "收起回复" : "查看全部 \(savedReplyCount) 条回复")
+                                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            }.font(.subheadline.weight(.medium)).frame(minHeight: 44)
+                        }.accessibilityValue(expanded ? "已展开" : "已收起")
+                    }
+                    ForEach(Array((expanded && page > 0 ? replies : previewReplies).enumerated()), id: \.element.commentIdentity) { _, reply in
+                        ArchivedCommentBody(comment: reply, compact: true, parts: parts, currentPartID: currentPartID, onSeek: onSeek)
+                    }
                     if expanded {
-                        ForEach(Array(replies.enumerated()), id: \.element.commentIdentity) { _, reply in
-                            ArchivedCommentBody(comment: reply, compact: true)
-                        }
                         if loading { ProgressView() }
                         if let error {
                             Text(appPrompt(error)).font(.caption).foregroundStyle(.red)
@@ -157,7 +167,13 @@ private struct ArchivedCommentBody: View {
     @Environment(APIClient.self) private var api
     let comment: JSONValue
     var compact = false
+    var parts: [VideoPart] = []
+    var currentPartID: String?
+    var onSeek: ((VideoPart, Double) -> Void)?
     @State private var photo: CommentPhoto?
+    @State private var expandedText = false
+    private var content: String { comment["content"]?.stringValue ?? "" }
+    private var targetPart: VideoPart? { ArchivedCommentTimeline.part(content, parts: parts, currentPartID: currentPartID) }
     var body: some View {
         HStack(alignment: .top, spacing: compact ? 8 : 12) {
             Artwork(path: comment["author"]?["avatar_url"]?.stringValue, symbol: "person.fill")
@@ -178,8 +194,17 @@ private struct ArchivedCommentBody: View {
                             .background(.quaternary, in: .rect(cornerRadius: 3))
                     }
                 }
-                Text(comment["content"]?.stringValue ?? "").font(compact ? .subheadline : .body)
+                Text(ArchivedCommentTimeline.attributed(expandedText ? content : ArchivedCommentTimeline.preview(content), part: targetPart))
+                    .font(compact ? .subheadline : .body)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let part = targetPart, let seconds = ArchivedCommentTimeline.seconds(url, duration: part.duration), let onSeek else { return .discarded }
+                        onSeek(part, seconds)
+                        return .handled
+                    })
+                if ArchivedCommentTimeline.preview(content) != content {
+                    Button(expandedText ? "收起" : "展开全文") { expandedText.toggle() }.font(.caption)
+                }
                 if let images = comment["images"]?.arrayValue, !images.isEmpty {
                     ScrollView(.horizontal) {
                         HStack(spacing: 8) {
@@ -202,6 +227,56 @@ private struct ArchivedCommentBody: View {
                 }.font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.sheet(item: $photo) { photo in NavigationStack { CommentImageView(url: photo.url) } }
+    }
+}
+
+enum ArchivedCommentTimeline {
+    static func preview(_ content: String) -> String {
+        var characters: [Character] = [], lineBreaks = 0
+        for character in content {
+            if character == "\n" { lineBreaks += 1 }
+            if characters.count == 360 || lineBreaks == 6 {
+                let prefix = String(characters).replacingOccurrences(of: #"(?:\[[^\]\n]{0,100}|\d+[:：][\d:：]*)$"#,
+                    with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                return prefix + "…"
+            }
+            characters.append(character)
+        }
+        return content
+    }
+
+    static func part(_ content: String, parts: [VideoPart], currentPartID: String?) -> VideoPart? {
+        let regex = try? NSRegularExpression(pattern: #"^\s*(?:part|p)\s*([1-9]\d{0,3})(?!\d)"#, options: .caseInsensitive)
+        if let match = regex?.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+           let range = Range(match.range(at: 1), in: content), let position = Int(content[range]) {
+            return parts.first { $0.position == position && !$0.variants.isEmpty }
+        }
+        return parts.first { $0.id == currentPartID && !$0.variants.isEmpty }
+    }
+
+    static func attributed(_ content: String, part: VideoPart?) -> AttributedString {
+        var result = AttributedString(content)
+        guard let part, part.duration.isFinite, part.duration > 0,
+              let regex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9_:：/])\d{1,5}(?:[:：]\d{1,2}){1,3}(?![A-Za-z0-9_:：/])"#) else { return result }
+        for match in regex.matches(in: content, range: NSRange(content.startIndex..., in: content)) {
+            guard let range = Range(match.range, in: content) else { continue }
+            let fields = content[range].replacingOccurrences(of: "：", with: ":").split(separator: ":").compactMap { Int($0) }
+            guard (2...3).contains(fields.count), fields.last! < 60, fields.count != 3 || fields[1] < 60 else { continue }
+            let seconds = fields.reduce(0) { $0 * 60 + $1 }
+            guard Double(seconds) < part.duration,
+                  let start = AttributedString.Index(range.lowerBound, within: result),
+                  let end = AttributedString.Index(range.upperBound, within: result) else { continue }
+            result[start..<end].link = URL(string: "treasureup-comment://seek?seconds=\(seconds)")
+        }
+        return result
+    }
+
+    static func seconds(_ url: URL, duration: Double) -> Double? {
+        guard url.scheme == "treasureup-comment", url.host == "seek", duration.isFinite, duration > 0,
+              let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              query.count == 1, query[0].name == "seconds", let text = query[0].value,
+              let seconds = Double(text), seconds.isFinite, seconds >= 0, seconds < duration else { return nil }
+        return seconds
     }
 }
 

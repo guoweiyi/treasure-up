@@ -22,3 +22,12 @@ test('the same compact labels distinguish archive content from actual Atmos outp
   assert.match(badges[1].title, /归档/);
   assert.match(badges[2].title, /不代表当前设备正在输出/);
 });
+
+test('only an explicit source-unavailable flag creates the archive-preserving badge', () => {
+  assert.deepEqual(contentBadges({ source_unavailable: false }), []);
+  assert.deepEqual(contentBadges({ source_unavailable: 'true' }), []);
+  const [badge] = contentBadges({ source_unavailable: true });
+  assert.equal(badge.text, '源站已失效');
+  assert.match(badge.title, /本地归档保留/);
+  assert.match(badge.title, /不表示已确认删除原因/);
+});

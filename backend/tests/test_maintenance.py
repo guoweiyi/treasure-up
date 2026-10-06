@@ -63,6 +63,15 @@ def utc(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+def test_statistics_still_rechecks_previously_unavailable_sources(workspace):
+    with workspace.sessions() as db:
+        video_id = add_videos(db, 1, workspace.clock.now)[0]
+        db.get(Video, video_id).source_state = 'unavailable'
+        stats_config(db, enabled=True)
+        assert maintenance.enqueue_statistics(db)['queued'] == 1
+        assert db.scalar(select(Job.target_id).where(Job.kind == 'refresh_stats')) == video_id
+
+
 def test_media_production_batch_limit_same_timestamps_and_bulk_existing_dedupe(workspace):
     ws = workspace
     with ws.sessions() as db:

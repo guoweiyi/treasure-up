@@ -19,6 +19,7 @@ struct VideoDetailView: View {
     @State private var lifetime = VideoPageLifetime()
     @State private var fullscreen = false
     @State private var playTask: Task<Void, Never>?
+    @State private var commentSeekRevision = UUID()
     @State private var followsPlayback = false
     @State private var isPageVisible = false
     @State private var page: VideoPage = .info
@@ -126,7 +127,9 @@ struct VideoDetailView: View {
                     Label("Treasure Up · 开源项目", systemImage: "chevron.left.forwardslash.chevron.right")
                         .font(.footnote)
                 }.padding(.top, 12)
-            case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !fullscreen && isPageVisible)
+            case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !fullscreen && isPageVisible,
+                parts: video.parts, currentPartID: isCurrent ? playback.currentPart?.id : video.parts.first(where: { !$0.variants.isEmpty })?.id,
+                onSeek: { part, seconds in seekComment(video, part: part, seconds: seconds) })
             case .queue:
                 PlaybackQueueSection(shouldCancelPlaybackOnDisappear: {
                     !fullscreen && !savePresented && !loginPresented && !lifetime.isCoveredByPresentation
@@ -153,6 +156,10 @@ struct VideoDetailView: View {
     private func metadata(_ video: ArchiveVideo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(video.title).font(.title3.bold()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            if video.bvid.range(of: #"^BV[A-Za-z0-9]{10}$"#, options: .regularExpression) != nil,
+               let url = URL(string: "https://www.bilibili.com/video/\(video.bvid)/") {
+                Link(video.bvid, destination: url).font(.caption).accessibilityLabel("\(video.bvid)，在哔哩哔哩打开")
+            }
             ForEach(uniqueCreators(video.creators)) { creator in
                 NavigationLink { CreatorDetailView(creator: creator) } label: {
                     HStack(spacing: 12) {
@@ -229,6 +236,27 @@ struct VideoDetailView: View {
                         .background(selected ? Color.accentColor.opacity(0.1) : Color.secondary.opacity(0.07), in: .rect(cornerRadius: 12))
                 }.buttonStyle(.plain).foregroundStyle(selected ? Color.accentColor : .primary).disabled(part.variants.isEmpty)
             }
+        }
+    }
+    private func seekComment(_ video: ArchiveVideo, part: VideoPart, seconds: Double) {
+        guard isPageVisible, !part.variants.isEmpty, seconds.isFinite, seconds >= 0, seconds < part.duration else { return }
+        let revision = UUID()
+        commentSeekRevision = revision
+        if playback.currentVideo?.id == video.id && playback.currentPart?.id == part.id {
+            playback.seek(to: seconds)
+            return
+        }
+        let shouldPlay = playback.currentVideo?.id == video.id && playback.wantsPlayback
+        let identity = api.sessionRevision
+        followsPlayback = true
+        playTask?.cancel()
+        playTask = Task {
+            guard !Task.isCancelled, isPageVisible, identity == api.sessionRevision else { return }
+            await playback.start(video: video, part: part, context: queueContext)
+            guard !Task.isCancelled, isPageVisible, identity == api.sessionRevision, revision == commentSeekRevision,
+                  playback.currentVideo?.id == video.id, playback.currentPart?.id == part.id else { return }
+            if !shouldPlay { playback.pause() }
+            playback.seek(to: seconds)
         }
     }
     private func play(_ video: ArchiveVideo, part: VideoPart? = nil) {

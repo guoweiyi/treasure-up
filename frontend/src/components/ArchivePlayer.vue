@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import type Artplayer from 'artplayer';
 import type { Result as DanmakuPlugin, Mode } from 'artplayer-plugin-danmuku';
-import { api, write, errorText, display, session } from '../api';
+import { api, write, errorText, display, session, sessionRevision } from '../api';
 import type { Part, Playback, Danmaku, MediaProperties } from '../types';
 import { createMediaAdapter } from '../player/mediaAdapter';
 import { loadPlayerEngines } from '../player/engineLoader';
@@ -15,6 +15,7 @@ import type { MeasuredMedia } from '../player/mediaInfo';
 import { sameOriginalAudioAlternative } from '../player/audioAlternatives';
 import AudioCompatibilityNotice from './AudioCompatibilityNotice.vue';
 import { createEndGuard } from '../player/queue';
+import { createCommentSeekQueue } from '../player/commentSeek';
 import { createPlayback } from '../player/routing';
 import { createUrlRenewal } from '../player/urlRenewal';
 import { createRouteRecovery } from '../player/routeRecovery';
@@ -33,7 +34,7 @@ import DanmakuSettings from './DanmakuSettings.vue';
 import PlayerSettingsPanel from './PlayerSettingsPanel.vue';
 import { installPlayerControls } from '../player/controls';
 import PlayerChoice from '../player/PlayerChoice.vue';
-import { danmakuMargins, rateChoices } from '../player/layout';
+import { danmakuLayout, rateChoices } from '../player/layout';
 import {
   defaultPreferences,
   readPreferences,
@@ -129,6 +130,7 @@ let renewalSnapshot: PlaybackSnapshot | null = null;
 let startupPending = true,
   startupPlayRequested = false;
 let initialProgress: ReturnType<typeof preloadProgress> | null = null;
+const requestedSeek = createCommentSeekQueue();
 const mediaAdapter = createMediaAdapter(
   handleMediaFailure,
   (value) => (runtimeStats.value = value),
@@ -200,6 +202,17 @@ function screenScale() {
 }
 function applyPreferences() {
   syncPlayerStyles();
+  const layout = danmakuLayout(
+    art?.template.$player.clientWidth || 0,
+    art?.template.$player.clientHeight || 450,
+    art?.video.videoWidth || 0,
+    art?.video.videoHeight || 0,
+    prefs.area,
+    prefs.subtitleSafe,
+    art ? parseFloat(getComputedStyle(art.template.$bottom).paddingBottom) || 0 : 0,
+    fit.value,
+  );
+  art?.template.$player.style.setProperty('--dm-bottom-offset', `${layout.bottomOffset}px`);
   const size = clamp(prefs.fontSize, 12, 120) * screenScale();
   const modes: Mode[] = [];
   if (prefs.rolling) modes.push(0);
@@ -211,12 +224,7 @@ function applyPreferences() {
     opacity: clamp(prefs.opacity, 0, 100) / 100,
     fontSize: size,
     speed: clamp(prefs.speed, 1, 10),
-    margin: danmakuMargins(
-      art?.template.$player.clientHeight || 450,
-      prefs.area,
-      prefs.subtitleSafe,
-      art ? parseFloat(getComputedStyle(art.template.$bottom).paddingBottom) || 0 : 0,
-    ),
+    margin: layout.margin,
     modes,
     antiOverlap: prefs.antiOverlap,
     synchronousPlayback: prefs.synchronousPlayback,
@@ -319,6 +327,7 @@ function setVolume(value: number) {
 function setFit(value: 'contain' | 'cover') {
   fit.value = value;
   if (art) art.video.style.objectFit = value;
+  applyPreferences();
 }
 function resetSettings(tab: 'playback' | 'danmaku') {
   if (tab === 'danmaku') {
@@ -557,6 +566,7 @@ async function renew(input?: PlaybackInput) {
           if (!current()) return;
           startupPending = false;
           currentPlayer.currentTime = snapshot.position;
+          applyCommentSeek(true);
           currentPlayer.playbackRate = snapshot.rate;
           userVolume.value = snapshot.volume;
           applyVolume();
@@ -598,6 +608,7 @@ async function renew(input?: PlaybackInput) {
 }
 async function setup() {
   const key = ++request;
+  requestedSeek.clear();
   renewal++;
   renewalController?.abort();
   renewalSnapshot = null;
@@ -739,6 +750,8 @@ async function setup() {
     resize?.observe(art.template.$player);
     art.on('fullscreen', fullscreenChanged);
     art.on('fullscreenWeb', fullscreenChanged);
+    art.on('video:loadedmetadata', applyPreferences);
+    art.on('video:resize', applyPreferences);
     art.on('video:ratechange', () => {
       if (art) playbackRate.value = art.playbackRate;
     });
@@ -757,6 +770,7 @@ async function setup() {
           !renewing &&
           player === art &&
           player.video.paused &&
+          !requestedSeek.pending &&
           player.currentTime < 1 &&
           position > 0
         )
@@ -764,6 +778,7 @@ async function setup() {
       }
       if (key !== request || readyRenewal !== renewal || player !== art || renewing) return;
       startupPending = false;
+      applyCommentSeek(true);
       if (startupPlayRequested) {
         try {
           await player.play();
@@ -879,8 +894,49 @@ async function replay() {
     if (art === player) note.value = '请点击播放继续。';
   }
 }
+function applyCommentSeek(restoring = false) {
+  if (!art || startupPending || (renewing && !restoring)) return;
+  const pending = requestedSeek.consume(
+    { request, partId: activePartId, identity: sessionRevision.value },
+    art.duration,
+  );
+  if (!pending) return;
+  const currentPlayer = art;
+  currentPlayer.currentTime = pending.seconds;
+  startupPlayRequested = pending.play;
+  if (renewalSnapshot) renewalSnapshot.paused = !pending.play;
+  if (!restoring) {
+    if (!pending.play) currentPlayer.pause();
+    else
+      void currentPlayer.play().catch(() => {
+        if (art === currentPlayer) note.value = '请点击播放继续。';
+      });
+  }
+}
+function seekTo(seconds: number, partId: string, play = false) {
+  if (
+    partId !== props.part.id ||
+    !requestedSeek.enqueue(
+      { request, partId, identity: sessionRevision.value },
+      seconds,
+      play,
+      props.part.duration,
+    )
+  )
+    return false;
+  startupPlayRequested = play;
+  applyCommentSeek();
+  return true;
+}
 defineExpose({
   replay,
+  seekTo,
+  playIntent: () =>
+    renewalSnapshot
+      ? !renewalSnapshot.paused
+      : startupPending
+        ? startupPlayRequested
+        : !!art && !art.video.paused,
   selectRoute,
   isEnded: (partId: string) => activePartId === partId && !!art?.video.ended,
 });

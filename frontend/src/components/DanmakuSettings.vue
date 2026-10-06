@@ -35,7 +35,7 @@ const preview = computed(() => ({
         >字号 <output>{{ prefs.fontSize }} px</output
         ><input v-model.number="prefs.fontSize" type="range" aria-label="字号" min="12" max="120"
       /></label>
-      <label
+      <label title="限制弹幕占用的行数；底部弹幕仍然靠近画面下沿。"
         >显示区域 <output>{{ prefs.area }}%</output
         ><input
           v-model.number="prefs.area"

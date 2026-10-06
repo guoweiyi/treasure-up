@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import IdentityToken, Setting, StorageProfile, User
+from app.models import Setting, StorageProfile, User
 from app.schemas import BackupSettings, DisplaySettings, IngestPolicy, PlaybackSettings, StatisticsSettings
 from app.security import hash_password
 
@@ -97,7 +97,6 @@ def main():
                 raise RuntimeError("账号不存在")
             user.password_hash = hash_password(value)
             db.execute(delete(UserSession).where(UserSession.user_id == user.id))
-            db.execute(delete(IdentityToken).where(IdentityToken.user_id == user.id))
             db.commit()
         print("密码已更新，旧会话已撤销")
     elif args.command == "backup":

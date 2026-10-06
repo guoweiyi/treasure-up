@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { api, write, date } from '../api';
-import AccountCredentials from '../components/AccountCredentials.vue';
+import AccountPassword from '../components/AccountPassword.vue';
 import {
   getPasskeyCapabilities,
   passkeyError,
@@ -82,7 +82,7 @@ async function save() {
       <p>管理密码、通行密钥和个人设备的登录方式。</p>
     </header>
     <p v-if="route.query.password_updated === '1'" class="security-message" role="status">
-      密码已更新，其他会话与身份令牌已撤销。
+      密码已更新，其他设备需重新登录。已添加的通行密钥保留。
     </p>
     <section class="security-panel">
       <div class="security-heading">
@@ -154,7 +154,7 @@ async function save() {
       <p v-if="error" class="form-error" role="alert">{{ error }}</p>
       <p v-if="message" class="security-message" role="status">{{ message }}</p>
     </section>
-    <AccountCredentials />
+    <AccountPassword />
   </main>
 </template>
 

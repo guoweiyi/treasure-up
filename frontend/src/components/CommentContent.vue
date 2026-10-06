@@ -1,18 +1,37 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { commentContent, type CommentEmote } from '../utils/commentContent';
-const props = defineProps<{ content: string; emotes?: CommentEmote[] }>();
+import { commentContent, type CommentEmote, type ContentPiece } from '../utils/commentContent';
+import {
+  collapsedComment,
+  commentPart,
+  commentTimestamps,
+  type CommentPlayback,
+  type CommentSeek,
+} from '../utils/commentTimeline';
+const props = defineProps<{
+  content: string;
+  emotes?: CommentEmote[];
+  playback?: CommentPlayback;
+}>();
+const emit = defineEmits<{ seek: [value: CommentSeek] }>();
 const failed = ref(new Set<string>());
+const expanded = ref(false);
+const preview = computed(() => collapsedComment(props.content));
 watch(
   () => [props.content, props.emotes],
   () => {
     failed.value = new Set();
+    expanded.value = false;
   },
 );
 const pieces = computed(() =>
   commentContent(
-    props.content,
+    expanded.value ? props.content : preview.value.text,
     props.emotes?.filter((item) => !failed.value.has(item.asset_url)),
+  ).flatMap<ContentPiece | ReturnType<typeof commentTimestamps>[number]>((piece) =>
+    piece.kind === 'text'
+      ? commentTimestamps(piece.text, commentPart(props.content, props.playback))
+      : [piece],
   ),
 );
 function fallback(url: string) {
@@ -20,22 +39,42 @@ function fallback(url: string) {
 }
 </script>
 <template>
-  <p class="comment-content">
-    <template v-for="(piece, index) in pieces" :key="index"
-      ><img
-        v-if="piece.kind === 'emote'"
-        :src="piece.url"
-        :alt="piece.text"
-        :title="piece.text"
-        class="comment-emote"
-        loading="lazy"
-        decoding="async"
-        width="24"
-        height="24"
-        @error="fallback(piece.url)"
-      /><template v-else>{{ piece.text }}</template></template
+  <div class="comment-copy">
+    <p class="comment-content">
+      <template v-for="(piece, index) in pieces" :key="index"
+        ><img
+          v-if="piece.kind === 'emote'"
+          :src="piece.url"
+          :alt="piece.text"
+          :title="piece.text"
+          class="comment-emote"
+          loading="lazy"
+          decoding="async"
+          width="24"
+          height="24"
+          @error="fallback(piece.url)"
+        /><button
+          v-else-if="piece.kind === 'timestamp'"
+          type="button"
+          class="comment-timestamp"
+          :title="`跳转到 P${piece.position} · ${piece.text}`"
+          :aria-label="`跳转到 P${piece.position} · ${piece.text}`"
+          @click="emit('seek', { partId: piece.partId, seconds: piece.seconds })"
+        >
+          {{ piece.text }}</button
+        ><template v-else>{{ piece.text }}</template></template
+      >
+    </p>
+    <button
+      v-if="preview.collapsed"
+      type="button"
+      class="comment-expand"
+      :aria-expanded="expanded"
+      @click="expanded = !expanded"
     >
-  </p>
+      {{ expanded ? '收起' : '展开全文' }}
+    </button>
+  </div>
 </template>
 <style scoped>
 .comment-content {
@@ -45,6 +84,35 @@ function fallback(url: string) {
   line-height: 1.8;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.comment-timestamp,
+.comment-expand {
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.comment-timestamp {
+  display: inline;
+  line-height: inherit;
+}
+.comment-timestamp:hover,
+.comment-expand:hover {
+  text-decoration: underline;
+  background: transparent;
+}
+.comment-expand {
+  margin: -4px 0 12px;
+  font-size: 12px;
+}
+.comment-timestamp:focus-visible,
+.comment-expand:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .comment-emote {
   display: inline-block;

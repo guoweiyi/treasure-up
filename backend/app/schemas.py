@@ -170,6 +170,16 @@ class VideoSyncInput(Input):
     target_profile_id: str
 
 
+class ReplicaSyncSelection(Input):
+    video_id: str = Field(min_length=1, max_length=36)
+    # Omitted means every version. An explicitly empty selection is an error.
+    variant_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ReplicaBatchSyncInput(VideoSyncInput):
+    items: list[ReplicaSyncSelection] = Field(min_length=1, max_length=50)
+
+
 class PurgeLocationInput(Input):
     confirm: Literal["DELETE"]
 

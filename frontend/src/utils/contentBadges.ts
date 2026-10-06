@@ -1,10 +1,17 @@
 export interface ContentFeatures {
+  source_unavailable?: boolean;
   charging_exclusive?: boolean;
   dolby_vision?: boolean;
   dolby_atmos?: boolean;
 }
 export function contentBadges(features?: ContentFeatures) {
   return [
+    {
+      kind: 'unavailable' as const,
+      show: features?.source_unavailable === true,
+      text: '源站已失效',
+      title: '源站稿件信息接口已明确返回不存在，本地归档保留；不表示已确认删除原因',
+    },
     {
       kind: 'charging' as const,
       show: features?.charging_exclusive === true,

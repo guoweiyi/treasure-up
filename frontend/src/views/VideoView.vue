@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from 'vue';
+import { computed, ref, watch, onBeforeUnmount, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { api, errorText, statusText, session, date } from '../api';
+import { api, errorText, statusText, session, sessionRevision, date } from '../api';
 import { compactSpecification, measuredVariant, type VideoDetail } from '../player/mediaInfo';
 import {
   playlistScope,
@@ -26,6 +26,7 @@ import PartSelector from '../player/PartSelector.vue';
 import PlaybackNodeMenu from '../player/PlaybackNodeMenu.vue';
 import type { Playback } from '../types';
 import { count } from '../utils/format';
+import type { CommentSeek } from '../utils/commentTimeline';
 const route = useRoute(),
   router = useRouter(),
   video = ref<VideoDetail | null>(null),
@@ -61,6 +62,51 @@ let seq = 0,
   controller = new AbortController();
 let pendingNavigation: { id: string; start: boolean; resume: boolean } | null = null;
 const part = computed(() => video.value?.parts?.find((p) => p.id === partId.value));
+const commentPlayback = computed(() => ({
+  currentPartId: partId.value,
+  parts: (video.value?.parts || []).map((item) => ({
+    id: item.id,
+    position: item.position,
+    duration: item.duration,
+    playable: !!item.variants.length,
+  })),
+}));
+const sourceUrl = computed(() =>
+  /^BV[A-Za-z0-9]{10}$/.test(video.value?.bvid || '')
+    ? `https://www.bilibili.com/video/${video.value!.bvid}/`
+    : undefined,
+);
+let commentSeekGeneration = 0;
+async function seekComment(value: CommentSeek) {
+  const target = video.value?.parts?.find((item) => item.id === value.partId);
+  if (
+    !target?.variants.length ||
+    !Number.isFinite(value.seconds) ||
+    value.seconds < 0 ||
+    value.seconds >= target.duration
+  )
+    return;
+  const generation = ++commentSeekGeneration,
+    videoId = currentVideoId.value,
+    identity = sessionRevision.value;
+  const continuePlaying = player.value?.playIntent() ?? playing.value;
+  if (partId.value !== target.id) {
+    selectPart(target.id);
+    autoStart.value = continuePlaying;
+    resume.value = false;
+    await nextTick();
+  }
+  if (
+    generation !== commentSeekGeneration ||
+    videoId !== currentVideoId.value ||
+    identity !== sessionRevision.value ||
+    partId.value !== target.id
+  )
+    return;
+  if (player.value?.seekTo(value.seconds, target.id, continuePlaying)) {
+    heading.value?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+}
 const measured = computed(() =>
   measuredVariant(video.value?.media_properties, activeVariantId.value),
 );
@@ -245,7 +291,15 @@ onBeforeUnmount(() => {
               <time :datetime="video.published_at">{{ date(video.published_at) }}</time></span
             >
             <span v-else :title="'归档时间：' + date(video.created_at)">发布时间未记录</span>
-            <span>{{ video.bvid }}</span>
+            <a
+              v-if="sourceUrl"
+              :href="sourceUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="在哔哩哔哩打开"
+              >{{ video.bvid }}</a
+            >
+            <span v-else>{{ video.bvid }}</span>
           </div>
         </header>
         <ArchivePlayer
@@ -379,7 +433,12 @@ onBeforeUnmount(() => {
         />
         <RelatedVideos :video="video" />
       </aside>
-      <CommentsPanel class="watch-comments" :video-id="video.id" />
+      <CommentsPanel
+        class="watch-comments"
+        :video-id="video.id"
+        :playback="commentPlayback"
+        @seek="seekComment"
+      />
     </div>
   </main>
 </template>

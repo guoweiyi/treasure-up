@@ -15,8 +15,12 @@ const badges = computed(() => contentBadges(props.features));
       :aria-label="badge.title"
     >
       <svg width="12" height="12" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <template v-if="badge.kind === 'unavailable'">
+          <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.6" />
+          <path d="m5 5 10 10" stroke="currentColor" stroke-width="1.6" />
+        </template>
         <path
-          v-if="badge.kind === 'charging'"
+          v-else-if="badge.kind === 'charging'"
           d="m11.8 1.8-7 9h4.6l-1.2 7.4 7-10h-4.5z"
           fill="currentColor"
         />
@@ -72,6 +76,11 @@ const badges = computed(() => contentBadges(props.features));
   color: #98470b;
   background: #fff3e5;
   border-color: #f0ceaa;
+}
+.unavailable {
+  color: #9b4340;
+  background: #fff1ef;
+  border-color: #e7c1bb;
 }
 .vision {
   color: #7040aa;

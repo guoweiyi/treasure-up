@@ -22,7 +22,8 @@ def test_card_endpoint_is_small_and_full_detail_remains_available(context):
     assert not {'source_title', 'source_quality', 'media_properties', 'notes', 'capture_runs'} & card.keys()
     for field in ('id', 'title', 'cover_url', 'creators', 'stats', 'playable', 'capture_status', 'parts_count', 'content_features'):
         assert card[field] == full[field]
-    assert all(card['content_features'].values())
+    assert all(card['content_features'][key] for key in ('charging_exclusive', 'dolby_vision', 'dolby_atmos'))
+    assert card['content_features']['source_unavailable'] is False
     assert len(json.dumps(card)) < len(json.dumps(full)) / 20
     detail = client.get(f'/api/v1/videos/{video.id}').json()
     assert detail['description'] == video.description and detail['media_properties']['source']['dolby_atmos']

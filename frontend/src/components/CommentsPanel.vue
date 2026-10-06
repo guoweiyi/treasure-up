@@ -4,7 +4,9 @@ import { api, query } from '../api';
 import type { Comment, Page } from '../types';
 import CommentThread from './CommentThread.vue';
 import { createCommentFeed, emptyCommentFeed } from '../utils/commentFeed';
-const props = defineProps<{ videoId: string }>();
+import type { CommentPlayback, CommentSeek } from '../utils/commentTimeline';
+const props = defineProps<{ videoId: string; playback?: CommentPlayback }>();
+const emit = defineEmits<{ seek: [value: CommentSeek] }>();
 const state = reactive(emptyCommentFeed<Comment>());
 const q = ref(''),
   appliedQuery = ref(''),
@@ -87,6 +89,8 @@ onBeforeUnmount(() => {
       :key="comment.id"
       :comment="comment"
       :video-id="videoId"
+      :playback="playback"
+      @seek="emit('seek', $event)"
       :reply="
         !!comment.root_rpid && comment.root_rpid !== '0' && comment.root_rpid !== comment.rpid
       "

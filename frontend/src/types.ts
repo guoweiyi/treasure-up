@@ -88,6 +88,14 @@ export interface Video {
   published_at?: string | null;
   notes?: string;
   source_state?: string;
+  content_features?: import('./utils/contentBadges').ContentFeatures;
+  source_availability?: {
+    checked_at?: string;
+    outcome?: 'available' | 'unavailable' | 'inconclusive';
+    reason?: string;
+    last_confirmed_at?: string;
+    history?: { checked_at: string; outcome: string; reason: string; run_id: string }[];
+  };
   parts?: Part[];
   media_properties?: Record<string, MediaProperties>;
   stats?: VideoStats;
@@ -112,6 +120,8 @@ export interface Comment {
   posted_at: string;
   like_count: number;
   reply_count: number;
+  saved_reply_count?: number;
+  preview_replies?: Comment[];
   is_uploader?: boolean;
   is_pinned?: boolean;
   images: (string | { url?: string; asset_url?: string })[];

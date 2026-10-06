@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import {
   session,
@@ -22,12 +22,10 @@ import {
 import type { PasskeyCapabilities } from '../auth/passkeys';
 
 const username = ref(''),
-  password = ref(''),
-  token = ref('');
+  password = ref('');
 const busy = ref(false),
   error = ref(''),
   statusError = ref('');
-const mode = ref<'password' | 'token'>('password');
 const showSecret = ref(false),
   capsLock = ref(false);
 const router = useRouter(),
@@ -35,6 +33,9 @@ const router = useRouter(),
 const capabilities = ref<PasskeyCapabilities | null>(null);
 const passkeyAvailable = computed(() => supportsPasskeys() && capabilities.value?.available);
 const initialized = computed(() => authStatus.initialized !== false);
+onBeforeUnmount(() => {
+  password.value = '';
+});
 async function checkStatus() {
   statusError.value = '';
   try {
@@ -51,17 +52,8 @@ onMounted(async () => {
     }),
   ]);
 });
-function changeMode(value: 'password' | 'token') {
-  mode.value = value;
-  password.value = '';
-  token.value = '';
-  showSecret.value = false;
-  error.value = '';
-  capsLock.value = false;
-}
 async function acceptLogin(data: { user: User; csrf_token: string }) {
   password.value = '';
-  token.value = '';
   session.user = data.user;
   session.csrf = data.csrf_token;
   session.ready = true;
@@ -82,17 +74,13 @@ async function passkeyLogin() {
 }
 async function login() {
   if (busy.value || !initialized.value) return;
-  if (mode.value === 'token' && token.value.trim().startsWith('tu_ingest_')) {
-    error.value = '这是选片助手的采集令牌。请使用「账户安全」中创建的个人身份令牌。';
-    return;
-  }
   busy.value = true;
   error.value = '';
   try {
-    const data =
-      mode.value === 'token'
-        ? await write('/auth/token-login', { token: token.value.trim() })
-        : await write('/auth/login', { username: username.value.trim(), password: password.value });
+    const data = await write('/auth/login', {
+      username: username.value.trim(),
+      password: password.value,
+    });
     await acceptLogin(data);
   } catch (e) {
     error.value = errorText(e);
@@ -121,27 +109,7 @@ async function login() {
         <button type="button" @click="checkStatus">重新检查</button>
       </div>
       <template v-else>
-        <div class="login-methods" role="group" aria-label="登录方式">
-          <button
-            type="button"
-            :class="{ selected: mode === 'password' }"
-            :aria-pressed="mode === 'password'"
-            :disabled="busy"
-            @click="changeMode('password')"
-          >
-            账号密码
-          </button>
-          <button
-            type="button"
-            :class="{ selected: mode === 'token' }"
-            :aria-pressed="mode === 'token'"
-            :disabled="busy"
-            @click="changeMode('token')"
-          >
-            身份令牌
-          </button>
-        </div>
-        <label v-if="mode === 'password'" class="login-field"
+        <label class="login-field"
           >用户名
           <input
             v-model="username"
@@ -153,12 +121,9 @@ async function login() {
             autofocus
           />
         </label>
-        <label class="login-field" :for="mode === 'password' ? 'login-password' : 'login-token'">{{
-          mode === 'password' ? '密码' : '身份令牌'
-        }}</label>
+        <label class="login-field" for="login-password">密码</label>
         <div class="secret-field">
           <input
-            v-if="mode === 'password'"
             id="login-password"
             v-model="password"
             name="password"
@@ -171,20 +136,6 @@ async function login() {
             @keyup="capsLock = $event.getModifierState('CapsLock')"
             @blur="capsLock = false"
           />
-          <input
-            v-else
-            id="login-token"
-            v-model="token"
-            name="identity-token"
-            :type="showSecret ? 'text' : 'password'"
-            autocomplete="off"
-            spellcheck="false"
-            autocapitalize="none"
-            maxlength="256"
-            required
-            :disabled="busy"
-            placeholder="粘贴个人身份令牌"
-          />
           <button
             type="button"
             :aria-label="showSecret ? '隐藏凭据' : '显示凭据'"
@@ -196,13 +147,7 @@ async function login() {
           </button>
         </div>
         <p v-if="capsLock" class="login-hint">大写锁定已开启</p>
-        <p v-if="mode === 'token'" class="login-hint">
-          在「账户安全」创建个人身份令牌。浏览器选片助手的采集令牌不能用于登录。
-        </p>
         <p v-if="error" class="form-error" role="alert">{{ error }}</p>
-        <p v-else-if="route.query.revoked === '1'" class="login-hint" role="status">
-          当前设备的身份令牌已撤销，请重新登录。
-        </p>
         <button class="primary" :disabled="busy">{{ busy ? '正在登录…' : '登录' }}</button>
         <button
           v-if="passkeyAvailable"
@@ -257,25 +202,6 @@ async function login() {
 .login-intro {
   color: #9499a0;
   margin: 0 0 26px;
-}
-.login-methods {
-  display: flex;
-  gap: 24px;
-  border-bottom: 1px solid #e9ebee;
-  margin-bottom: 24px;
-}
-.login-methods button {
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  padding: 10px 0;
-  background: transparent;
-  color: #9499a0;
-  font-size: 14px;
-}
-.login-methods .selected {
-  color: #24282d;
-  border-bottom-color: #24282d;
 }
 .login-field {
   display: block;

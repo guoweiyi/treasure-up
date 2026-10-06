@@ -27,7 +27,7 @@ def test_explicit_playurl_requests_highest_modes_without_preview_flag():
     def transport(request):
         requests.append(request)
         if request.url.path.endswith("/nav"):
-            data = {"isLogin": True, "wbi_img": {"img_url": "https://i0.hdslb.com/" + "a"*32 + ".png", "sub_url": "https://i0.hdslb.com/" + "b"*32 + ".png"}}
+            data = {"isLogin": True, "mid": 1, "wbi_img": {"img_url": "https://i0.hdslb.com/" + "a"*32 + ".png", "sub_url": "https://i0.hdslb.com/" + "b"*32 + ".png"}}
         else:
             data = playinfo()
         return httpx.Response(200, json={"code": 0, "data": data})

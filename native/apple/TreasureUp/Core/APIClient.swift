@@ -149,20 +149,6 @@ final class APIClient {
         if let failure { throw failure }
     }
 
-    func login(identityToken: String) async throws {
-        let token = identityToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard token.hasPrefix("tul_"), token.count >= 20, token.count <= 256 else {
-            throw APIError.invalidServer("请使用账户安全中生成的身份令牌，采集令牌不能用于登录。")
-        }
-        connectionRevision += 1
-        resetMemory()
-        if persistSession { try vault.clear(for: baseURL) }
-        let envelope: SessionEnvelope = try await send("/auth/token-login", body: ["token": .string(token)])
-        apply(envelope)
-        isConnected = true
-        await loadDisplaySettings()
-    }
-
     func get<T: Decodable & Sendable>(_ path: String, query: [String: String] = [:]) async throws -> T {
         let revision = sessionRevision
         let data = try await perform(path, method: "GET", query: query)

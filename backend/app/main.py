@@ -82,7 +82,7 @@ def health(db: Session = Depends(get_db)):
 def server_capabilities():
     return {"application": "treasure-up", "api_version": 1, "version": app.version,
             "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring", "userscript-ingest", "personal-playlists"],
-            "authentication": ["session-cookie", "identity-token", "webauthn"] if settings.passkeys_enabled else ["session-cookie", "identity-token"]}
+            "authentication": ["session-cookie", "webauthn"] if settings.passkeys_enabled else ["session-cookie"]}
 
 
 @app.post(P + "/auth/login")
@@ -265,7 +265,8 @@ def comments(video_id: str, root: str = "", q: str = Query("", max_length=200), 
     ordering = (Comment.like_count.desc(), Comment.posted_at.desc(), Comment.id) if sort == "likes" else (Comment.posted_at.desc(), Comment.id)
     if not root and not q:
         ordering = (Comment.is_pinned.desc(), *ordering)
-    return catalog.page(db, stmt.order_by(*ordering), page, page_size, batch_mapper=catalog.comment_views)
+    return catalog.page(db, stmt.order_by(*ordering), page, page_size,
+                        batch_mapper=lambda session, rows: catalog.comment_views(session, rows, include_previews=not root))
 
 
 @app.api_route(P + "/assets/{asset_id}", methods=["GET", "HEAD"])
@@ -833,8 +834,6 @@ def update_user(user_id: str, body: schemas.UserUpdate, user=Depends(require_adm
         else:
             setattr(item, key, value)
     db.execute(delete(UserSession).where(UserSession.user_id == item.id))
-    from app.models import IdentityToken
-    db.execute(delete(IdentityToken).where(IdentityToken.user_id == item.id))
     audit(db, user, "update", "user", item.id, {"fields": list(values)})
     commit(db)
     return {"id": item.id, "username": item.username, "role": item.role, "disabled": item.disabled}
@@ -852,7 +851,7 @@ from app.userscript_api import router as userscript_router
 app.include_router(userscript_router)
 from app.personal_playlists import router as personal_playlists_router
 app.include_router(personal_playlists_router)
-from app.identity_api import router as identity_router
-app.include_router(identity_router)
+from app.account_api import router as account_router
+app.include_router(account_router)
 from app.creator_capture_api import router as creator_capture_router
 app.include_router(creator_capture_router)

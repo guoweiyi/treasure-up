@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.models import (Asset, CaptureRun, Collection, CollectionItem, Comment, CommentAsset, Creator,
@@ -121,6 +121,7 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
               "source_tags": video.source_tags or [], "manual_tags": (note.tags or []) if note else [],
               "starred": note.starred if note else False,
               "parts_count": len(parts), "playable": bool(variants), "capture_status": video.capture_status,
+              "source_state": video.source_state,
               "created_at": video.created_at}
     result["stats"] = {**{key: None for key in ("view", "like", "coin", "favorite", "share", "reply", "danmaku")},
                        **(latest_stats.counts if latest_stats else {}),
@@ -138,6 +139,7 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
     access = (video.metadata_json or {}).get("access")
     charging = access.get("upower_exclusive") if isinstance(access, dict) else None
     result["content_features"] = {
+        "source_unavailable": video.source_state == "unavailable",
         "charging_exclusive": charging if type(charging) is bool else (video.metadata_json or {}).get("is_upower_exclusive") is True,
         "dolby_vision": any(item.get("dolby_vision") is True for item in properties.values() if isinstance(item, dict)),
         "dolby_atmos": any(item.get("dolby_atmos") is True for item in properties.values() if isinstance(item, dict)),
@@ -150,6 +152,7 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
         result["description"] = ""
     if detail:
         result.update(notes=note.notes if note else "", source_state=video.source_state,
+                      source_availability=video.source_availability or {},
                       title_override=note.title_override if note else None,
                       description_override=note.description_override if note else None,
                       source_description=video.description,
@@ -169,9 +172,30 @@ def comment_view(db, comment: Comment):
     return comment_views(db, [comment])[0]
 
 
-def comment_views(db, rows):
+def comment_views(db, rows, *, include_previews=False):
     if not rows:
         return []
+    requested = rows
+    previews, reply_counts = defaultdict(list), {}
+    if include_previews:
+        roots = {(comment.video_id, comment.rpid) for comment in rows
+                 if comment.root_rpid in {"", "0", comment.rpid}}
+        if roots:
+            partition = (Comment.video_id, Comment.root_rpid)
+            ranked = (select(Comment.id,
+                func.row_number().over(partition_by=partition,
+                    order_by=(Comment.like_count.desc(), Comment.posted_at.desc(), Comment.id)).label("rank"),
+                func.count().over(partition_by=partition).label("saved_count"))
+                .where(tuple_(Comment.video_id, Comment.root_rpid).in_(roots), Comment.rpid != Comment.root_rpid)
+                .subquery())
+            for child, count in db.execute(select(Comment, ranked.c.saved_count)
+                    .join(ranked, ranked.c.id == Comment.id).where(ranked.c.rank <= 3)
+                    .order_by(Comment.video_id, Comment.root_rpid, ranked.c.rank)):
+                key = (child.video_id, child.root_rpid)
+                previews[key].append(child)
+                reply_counts[key] = count
+            # Hydrate authors and assets for the entire page and its previews together.
+            rows = list({comment.id: comment for comment in [*rows, *(child for group in previews.values() for child in group)]}.values())
     users = {user.id: user for user in db.scalars(select(PlatformUser)
              .where(PlatformUser.id.in_({comment.author_user_id for comment in rows if comment.author_user_id})))}
     snapshots = {snapshot.id: snapshot for snapshot in db.scalars(select(UserSnapshot)
@@ -187,9 +211,16 @@ def comment_views(db, rows):
             images[image.comment_id].append(asset_url(image.asset_id))
         elif image.kind == "emote":
             emotes[image.comment_id].append(image.asset_id)
-    return [_comment_view(comment, users.get(comment.author_user_id), snapshots.get(comment.author_snapshot_id),
+    serialized = {comment.id: _comment_view(comment, users.get(comment.author_user_id), snapshots.get(comment.author_snapshot_id),
                           creators.get(comment.author_user_id), images[comment.id], emotes[comment.id],
-                          is_uploader=(comment.video_id, comment.author_user_id) in owners) for comment in rows]
+                          is_uploader=(comment.video_id, comment.author_user_id) in owners) for comment in rows}
+    if include_previews:
+        for comment in requested:
+            if comment.root_rpid in {"", "0", comment.rpid}:
+                key = (comment.video_id, comment.rpid)
+                serialized[comment.id].update(preview_replies=[serialized[child.id] for child in previews[key]],
+                                              saved_reply_count=reply_counts.get(key, 0))
+    return [serialized[comment.id] for comment in requested]
 
 
 def _comment_view(comment, user, snapshot, creator, images, emote_ids=(), *, is_uploader=False):
