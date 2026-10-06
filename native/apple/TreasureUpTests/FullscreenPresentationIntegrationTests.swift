@@ -8,7 +8,7 @@ import AVFoundation
 final class FullscreenPresentationIntegrationTests: XCTestCase {
     func testTeardownBeforeQueuedPresentationStopsOnlyItsOwnInlinePlayback() async throws {
         let fixture = try await FullscreenTransitionFixture()
-        defer { fixture.close() }
+        addTeardownBlock { await fixture.close() }
         await waitUntil("Inline fixture must attach") { fixture.playback.presentation?.controller.view.window === fixture.window }
         let anchor = try XCTUnwrap(findAnchor(in: fixture.split))
         // These calls deliberately share one main-actor turn: the queued
@@ -22,7 +22,7 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
 
     func testQueuedTeardownDoesNotStopSameVideoBorrowedByAnotherContainer() async throws {
         let fixture = try await FullscreenTransitionFixture()
-        defer { fixture.close() }
+        addTeardownBlock { await fixture.close() }
         await waitUntil("Inline fixture must attach") { fixture.playback.presentation?.controller.view.window === fixture.window }
         let anchor = try XCTUnwrap(findAnchor(in: fixture.split))
         let presentation = try XCTUnwrap(fixture.playback.presentation)
@@ -42,7 +42,7 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
 
     func testTeardownDuringExitStopsPlaybackAfterInlineHasReclaimedLayer() async throws {
         let fixture = try await FullscreenTransitionFixture()
-        defer { fixture.close() }
+        addTeardownBlock { await fixture.close() }
         await waitUntil("Inline fixture must attach") { fixture.playback.presentation?.controller.view.window === fixture.window }
         let presentation = try XCTUnwrap(fixture.playback.presentation)
         let inline = try XCTUnwrap(presentation.controller.parent)
@@ -68,13 +68,24 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
 
     func testCancelDuringEntranceAndReopenDuringExitSerializeTheirTransitions() async throws {
         let fixture = try await FullscreenTransitionFixture()
-        defer { fixture.close() }
+        addTeardownBlock { await fixture.close() }
         await waitUntil("Inline surface must attach before transition testing") {
             fixture.playback.presentation?.controller.view.window === fixture.window
         }
         let presentation = try XCTUnwrap(fixture.playback.presentation)
         let inline = try XCTUnwrap(presentation.controller.parent)
-        fixture.state.isPresented = true
+        let anchor = try XCTUnwrap(findAnchor(in: fixture.split))
+        // Deliver every binding edge to the state machine being tested. SwiftUI
+        // may coalesce a false/true pair before updateUIViewController runs;
+        // changing only fixture state would not prove that either request was
+        // actually received during UIKit's transition.
+        let requestPresentation: (Bool) -> Void = { requested in
+            fixture.state.isPresented = requested
+            anchor.update(isPresented: requested, playback: fixture.playback) {
+                fixture.state.isPresented = false
+            }
+        }
+        requestPresentation(true)
         await waitUntil("The entrance animation must actually be in flight") {
             self.presentedFullscreen(from: fixture.split)?.isBeingPresented == true
         }
@@ -86,15 +97,15 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(fixture.playback.currentVideo?.id, fixture.source.id)
 
-        fixture.state.isPresented = true
+        requestPresentation(true)
         await waitUntil("A later request must still present after entrance cancellation") {
             guard let controller = self.presentedFullscreen(from: fixture.split) else { return false }
             return !controller.isBeingPresented && controller.view.window === fixture.window
         }
         let exiting = try XCTUnwrap(presentedFullscreen(from: fixture.split))
-        fixture.state.isPresented = false
+        requestPresentation(false)
         await waitUntil("The exit animation must actually be in flight") { exiting.isBeingDismissed }
-        fixture.state.isPresented = true
+        requestPresentation(true)
         await waitUntil("A new open request during dismissal must survive the old completion") {
             guard let controller = self.presentedFullscreen(from: fixture.split) else { return false }
             return controller !== exiting && !controller.isBeingPresented && controller.view.window === fixture.window
@@ -113,7 +124,7 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
 
     func testUnrelatedModalRejectsFullscreenWithoutLeavingPhantomPresentation() async throws {
         let fixture = try await FullscreenTransitionFixture()
-        defer { fixture.close() }
+        addTeardownBlock { await fixture.close() }
         await waitUntil("Fixture must be in its window") { fixture.playback.presentation?.controller.view.window === fixture.window }
         let alert = UIAlertController(title: "Offline modal", message: nil, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Close", style: .cancel))
@@ -139,7 +150,7 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
 
     func testChangedVideoUpdatesOrientationAndRetiredAnchorDoesNotStopReplacement() async throws {
         let fixture = try await FullscreenTransitionFixture()
-        defer { fixture.close() }
+        addTeardownBlock { await fixture.close() }
         await waitUntil("Inline fixture must attach") { fixture.playback.presentation?.controller.view.window === fixture.window }
         fixture.state.isPresented = true
         await waitUntil("Fullscreen must finish presenting") {
@@ -156,6 +167,17 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
         fixture.playback.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
         await waitUntil("Changing the actual player item must refresh the fullscreen orientation") {
             fullscreen.videoOrientation == .portrait && fullscreen.supportedInterfaceOrientations == .portrait
+        }
+        // The orientation property changes before UIKit performs its geometry
+        // update. Finish that update before retiring this fixture's hierarchy;
+        // otherwise its pending rotation can reach the next test's root view.
+        await waitUntil("The replacement video's orientation transition must finish before retiring its anchor") {
+            guard fullscreen.transitionCoordinator == nil else { return false }
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                return fullscreen.view.bounds.height > fullscreen.view.bounds.width &&
+                    fixture.window.bounds.height > fixture.window.bounds.width
+            }
+            return true
         }
         let anchor = try XCTUnwrap(findAnchor(in: fixture.split))
         anchor.tearDown()
@@ -189,29 +211,31 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
         let state = FullscreenFixtureState()
         let lifetime = VideoPageLifetime()
         let host = UIHostingController(rootView: FullscreenFixtureView(playback: playback, state: state, lifetime: lifetime))
-        let split = UISplitViewController(style: .doubleColumn)
-        split.setViewController(UIViewController(), for: .primary)
-        split.setViewController(UINavigationController(rootViewController: host), for: .secondary)
-        split.preferredDisplayMode = .oneBesideSecondary
-        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.frame = scene.coordinateSpace.bounds
+        let split = fullscreenFixtureRoot(hosting: host)
+        // Exercise the same single-window ownership used by the application.
+        // Two visible windows in one scene can each own a forced-orientation
+        // transaction, making one window's dismissal race the other's layout.
+        let window = try XCTUnwrap(scene.windows.first(where: \.isKeyWindow))
+        let previousRoot = window.rootViewController
         window.rootViewController = split
         window.makeKeyAndVisible()
-        defer {
-            split.dismiss(animated: false)
-            playback.stop(clearQueue: true, saveProgress: false)
-            window.isHidden = true
-            window.rootViewController = nil
-            previousKeyWindow?.makeKey()
+        addTeardownBlock {
+            await playback.stop(clearQueue: true, saveProgress: false)
+            await restoreFixtureWindow(window, replacing: split, with: previousRoot)
         }
 
         await waitUntil("Inline video should attach to the fixture window") {
             playback.presentation?.controller.view.window === window
         }
+        // Do not record a transient size while the root replacement is settling.
+        await waitUntil("The fixture window must match the scene before recording its original geometry") {
+            abs(window.bounds.width - scene.coordinateSpace.bounds.width) < 2 &&
+            abs(window.bounds.height - scene.coordinateSpace.bounds.height) < 2
+        }
         let presentation = try XCTUnwrap(playback.presentation)
         let originalContainer = try XCTUnwrap(presentation.controller.parent as? NativePlayerContainerViewController)
         let originalWindowSize = window.bounds.size
+        let originalOrientation = scene.interfaceOrientation
         XCTAssertLessThanOrEqual(originalContainer.view.bounds.width, 360)
 
         state.isPresented = true
@@ -246,9 +270,16 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
         XCTAssertEqual(playback.currentVideo?.id, source.id)
         XCTAssertFalse(lifetime.isCoveredByPresentation)
         XCTAssertEqual(presentation.videoView.bounds.size, originalContainer.view.bounds.size)
-        await waitUntil("Dismissing fullscreen should restore the original window orientation") {
+        await waitUntil("Dismissing fullscreen should restore the original window orientation", diagnostics: {
+            "originalWindow=\(originalWindowSize), currentWindow=\(window.bounds), " +
+            "sceneBounds=\(scene.coordinateSpace.bounds), originalOrientation=\(originalOrientation.rawValue), " +
+            "currentOrientation=\(scene.interfaceOrientation.rawValue), keyWindow=\(window.isKeyWindow), " +
+            "rootIsFixture=\(window.rootViewController === split), " +
+            "fullscreenPresented=\(fullscreen.presentingViewController != nil)"
+        }) {
             abs(window.bounds.width - originalWindowSize.width) < 2 &&
-            abs(window.bounds.height - originalWindowSize.height) < 2
+            abs(window.bounds.height - originalWindowSize.height) < 2 &&
+            scene.interfaceOrientation == originalOrientation
         }
 
         // A successful first transition alone would miss a stale presenter or
@@ -285,12 +316,13 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
         return nil
     }
 
-    private func waitUntil(_ message: String, condition: @MainActor () -> Bool) async {
+    private func waitUntil(_ message: String, diagnostics: @MainActor () -> String = { "" },
+                           condition: @MainActor () -> Bool) async {
         for _ in 0..<250 {
             if condition() { return }
             try? await Task.sleep(for: .milliseconds(20))
         }
-        XCTAssertTrue(condition(), message)
+        XCTAssertTrue(condition(), "\(message)\n\(diagnostics())")
     }
 }
 
@@ -299,9 +331,9 @@ private final class FullscreenTransitionFixture {
     let source: ArchiveVideo
     let playback: PlaybackCoordinator
     let state = FullscreenFixtureState()
-    let split = UISplitViewController(style: .doubleColumn)
+    let split: UIViewController
     let window: UIWindow
-    private let previousKeyWindow: UIWindow?
+    private let previousRoot: UIViewController?
     private let defaults: UserDefaults
     private let suite: String
 
@@ -321,14 +353,11 @@ private final class FullscreenTransitionFixture {
         source = ArchiveVideo(id: "transition-fixture", title: "Transition fixture", playable: true,
             parts: [VideoPart(id: "transition-part", position: 1, duration: 120,
                              variants: [MediaVariant(id: "transition-source", width: 1920, height: 1080)])])
-        previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        window = UIWindow(windowScene: scene)
-        window.frame = scene.coordinateSpace.bounds
+        window = try XCTUnwrap(scene.windows.first(where: \.isKeyWindow))
+        previousRoot = window.rootViewController
         let host = UIHostingController(rootView: FullscreenFixtureView(playback: coordinator, state: state,
                                                                        lifetime: VideoPageLifetime()))
-        split.setViewController(UIViewController(), for: .primary)
-        split.setViewController(UINavigationController(rootViewController: host), for: .secondary)
-        split.preferredDisplayMode = .oneBesideSecondary
+        split = fullscreenFixtureRoot(hosting: host)
         window.rootViewController = split
         await coordinator.start(video: source)
         coordinator.errorMessage = nil
@@ -336,14 +365,51 @@ private final class FullscreenTransitionFixture {
         window.makeKeyAndVisible()
     }
 
-    func close() {
-        split.dismiss(animated: false)
+    func close() async {
         playback.stop(clearQueue: true, saveProgress: false)
-        window.isHidden = true
-        window.rootViewController = nil
-        previousKeyWindow?.makeKey()
+        await restoreFixtureWindow(window, replacing: split, with: previousRoot)
         defaults.removePersistentDomain(forName: suite)
     }
+}
+
+@MainActor
+private func fullscreenFixtureRoot(hosting host: UIViewController) -> UIViewController {
+    let navigation = UINavigationController(rootViewController: host)
+    // Match the application's navigation containers. A collapsed UIKit split
+    // controller on iPhone owns extra adaptive-column transitions that the
+    // phone's actual NavigationStack does not have.
+    guard UIDevice.current.userInterfaceIdiom == .pad else { return navigation }
+    let split = UISplitViewController(style: .doubleColumn)
+    split.setViewController(UIViewController(), for: .primary)
+    split.setViewController(navigation, for: .secondary)
+    split.preferredDisplayMode = .oneBesideSecondary
+    return split
+}
+
+@MainActor
+private func restoreFixtureWindow(_ window: UIWindow, replacing fixture: UIViewController,
+                                  with previousRoot: UIViewController?) async {
+    let restore: @MainActor @Sendable () -> Void = {
+        guard window.rootViewController === fixture else { return }
+        window.rootViewController = previousRoot
+        window.makeKey()
+    }
+    if fixture.presentedViewController != nil {
+        // Keep the presenting hierarchy alive until UIKit releases the modal's
+        // orientation transaction; do not orphan it by clearing the root first.
+        let dismissed = XCTestExpectation(description: "Fixture modal dismissal must complete before restoring the app window")
+        fixture.dismiss(animated: false) {
+            DispatchQueue.main.async {
+                dismissed.fulfill()
+            }
+        }
+        // A failed assertion may leave an already-dismissing controller behind.
+        // Bound cleanup as well, rather than hanging the whole test process if
+        // UIKit cannot deliver a second dismissal completion in that state.
+        let result = await XCTWaiter.fulfillment(of: [dismissed], timeout: 5)
+        XCTAssertEqual(result, .completed, "Fixture dismissal must finish before the next test starts")
+    }
+    restore()
 }
 
 @MainActor @Observable

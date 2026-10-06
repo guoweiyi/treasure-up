@@ -59,20 +59,27 @@ final class OfflinePlayerInteractionTests: XCTestCase {
             throw XCTSkip("The sidebar scenario requires an iPad simulator")
         }
         setPlaying(false, in: app)
-        let detail = app.otherElements["offline-detail-viewport"].firstMatch
-        XCTAssertTrue(detail.waitForExistence(timeout: 5))
-        let sidebarWidth = detail.frame.width
+        let sidebar = app.staticTexts["offline-sidebar"]
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 5))
+        XCTAssertTrue(sidebar.isHittable)
+        // iPadOS 26 can report the whole window for SwiftUI's accessibility
+        // group even while its actual player column is narrower. Measure the
+        // native render surface, which is also the region receiving gestures.
+        let sidebarWidth = pictureFrame(in: app).width
         let toggle = app.buttons["offline-sidebar-toggle"]
         toggle.tap()
-        wait("Hiding the sidebar must enlarge the actual detail viewport") { detail.frame.width > sidebarWidth + 30 }
-        let expandedWidth = detail.frame.width
+        wait("Hiding the sidebar must enlarge the actual player viewport") {
+            !sidebar.isHittable && self.pictureFrame(in: app).width > sidebarWidth + 30
+        }
+        let expandedWidth = pictureFrame(in: app).width
         setPlaying(true, in: app)
         setPlaying(false, in: app)
         toggle.tap()
-        wait("Showing the sidebar must shrink the actual detail viewport") { detail.frame.width < expandedWidth - 30 }
-        let player = app.otherElements["inline-player"].firstMatch
+        wait("Showing the sidebar must shrink the actual player viewport") {
+            sidebar.isHittable && self.pictureFrame(in: app).width < expandedWidth - 30
+        }
         let button = control("player-play-pause", in: app)
-        XCTAssertTrue(player.frame.insetBy(dx: -1, dy: -1).contains(button.frame))
+        XCTAssertTrue(pictureFrame(in: app).insetBy(dx: -1, dy: -1).contains(button.frame))
         setPlaying(true, in: app)
         setPlaying(false, in: app)
         control("player-fullscreen", in: app).tap()
@@ -129,10 +136,19 @@ final class OfflinePlayerInteractionTests: XCTestCase {
         waitForSeek(near: 60, in: app)
         XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
 
-        // Hide controls, then double tap the moving picture without first
-        // revealing it: that same pair of touches must skip only once.
+        // Check single-tap reveal while paused, when the controls stay visible.
+        // A slow CI accessibility snapshot must not race the normal 3.5-second
+        // auto-hide timer, whose behavior is verified separately below.
         pictureCoordinate(in: app, x: 0.5).tap()
         wait("A single tap hides the controls") { !app.buttons["player-play-pause"].exists }
+        pictureCoordinate(in: app, x: 0.5).tap()
+        XCTAssertTrue(app.buttons["player-play-pause"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
+
+        // Hide again, then double tap without first revealing the controls:
+        // that same pair of touches must skip only once.
+        pictureCoordinate(in: app, x: 0.5).tap()
+        wait("Controls must be hidden before the double tap") { !app.buttons["player-play-pause"].exists }
         pictureCoordinate(in: app, x: 0.8).doubleTap()
         waitForSeek(near: 75, in: app)
         XCTAssertEqual(app.staticTexts["offline-player-state"].label, "paused")
@@ -163,15 +179,16 @@ final class OfflinePlayerInteractionTests: XCTestCase {
         XCTAssertTrue(close.waitForExistence(timeout: 5))
         close.tap()
         wait("Closing a panel must rearm normal auto-hide", timeout: 8) { !app.buttons["player-play-pause"].exists }
-        pictureCoordinate(in: app, x: 0.5).tap()
-        XCTAssertTrue(app.buttons["player-play-pause"].waitForExistence(timeout: 2))
-        setPlaying(false, in: app)
+    }
+
+    private func pictureFrame(in app: XCUIApplication) -> CGRect {
+        // SwiftUI's focus/accessibility group can include the navigation safe
+        // area. Its native rendering child reports the actual video viewport.
+        app.otherElements["inline-player"].firstMatch.children(matching: .other).firstMatch.frame
     }
 
     private func pictureCoordinate(in app: XCUIApplication, x: CGFloat) -> XCUICoordinate {
-        // SwiftUI's focus/accessibility group can include the navigation safe
-        // area. Its native rendering child reports the actual video viewport.
-        let frame = app.otherElements["inline-player"].firstMatch.children(matching: .other).firstMatch.frame
+        let frame = pictureFrame(in: app)
         return app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: frame.minX + frame.width * x, dy: frame.minY + frame.height * 0.42))
     }
