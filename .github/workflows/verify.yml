@@ -25,7 +25,6 @@ jobs:
       - name: Audit locked npm dependencies without running package scripts
         run: |
           npm --prefix frontend audit --package-lock-only --ignore-scripts
-          npm --prefix native audit --package-lock-only --ignore-scripts
       - name: Audit locked Python dependencies in a disposable tool environment
         run: |
           python3 -m venv .audit

@@ -1,6 +1,6 @@
 # 自动构建、发版与部署
 
-当前已发布 [v0.3.2](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.2)，[release.json](../release.json) 的 `channel` 为 `preview`。下面说明仓库已有的发布流程；各版本的镜像和附件，以 [GitHub Releases](https://github.com/guoweiyi/treasure-up/releases) 及对应 [Actions 运行结果](https://github.com/guoweiyi/treasure-up/actions) 为准。
+当前已发布 [v0.3.2](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.2)，[release.json](../release.json) 的 `channel` 为 `preview`。下面说明当前主线的发布流程，客户端已收敛为纯 Swift iOS / iPadOS；已发布旧版本的多平台附件保持原样。各版本的镜像和附件，以 [GitHub Releases](https://github.com/guoweiyi/treasure-up/releases) 及对应 [Actions 运行结果](https://github.com/guoweiyi/treasure-up/actions) 为准。
 
 ## 我只想部署
 
@@ -38,7 +38,7 @@ python deploy/start.py --prebuilt --light
 python deploy/release.py prepare v0.3.2 --channel preview
 ```
 
-`prepare` 更新前端、原生客户端、Cargo、API、Compose 镜像版本及 `release.json`，并创建缺少的发行说明。它**不会**替你提交、打标签或推送，也不会修改生产配置。
+`prepare` 更新前端、API、Compose 镜像版本及 `release.json`，并创建缺少的发行说明。iOS App 版本在 `native/apple/project.yml` 独立维护，修改后用 XcodeGen 同步工程；服务端发版不会改写 App 版本。它**不会**替你提交、打标签或推送，也不会修改生产配置。
 
 随后完成这些步骤：
 
@@ -62,21 +62,21 @@ gh workflow run release.yml -f tag=v0.3.2
 
 ## 流水线做什么
 
-入口是 [release.yml](../.github/workflows/release.yml)，复用 [Verify](../.github/workflows/verify.yml)、[Native clients](../.github/workflows/native.yml) 和 [Container images](../.github/workflows/containers.yml)。
+入口是 [release.yml](../.github/workflows/release.yml)，复用 [Verify](../.github/workflows/verify.yml)、[iOS client](../.github/workflows/ios.yml) 和 [Container images](../.github/workflows/containers.yml)。
 
 | 阶段 | 实际检查或产物 |
 | --- | --- |
-| `validate` | 标签格式、所有应用版本、完整发行说明，以及版本是否已经公开发布 |
+| `validate` | 标签格式、服务端发布版本一致性、完整发行说明，以及版本是否已经公开发布 |
 | `verify` | 锁定依赖审计、部署与发版脚本测试、前端测试和构建、Docker 内后端与真实 PostgreSQL 回归、Web 健康检查 |
-| `native` | Windows x64、macOS ARM64 / x64、Android ARM64、iOS ARM64 模拟器的实际编译和打包 |
+| `ios` | iPhone / iPad 模拟器分别运行 Swift 单元与离线播放器 UI 回归，保存测试结果，打包一份临时签名的模拟器 App |
 | `containers` | 分别在 AMD64、ARM64 原生 Linux runner 构建 backend/web；运行同一份镜像的 PostgreSQL 回归与健康检查，成功后上传候选镜像并合并双架构索引 |
 | `package` | 收集本次运行的客户端与镜像记录，从标签提交导出源码、生成 digest 固定的部署 ZIP、清单和 SHA-256 校验文件 |
 | `promote` | 核对候选来源、版本和 digest，再创建受保护的版本标签及对应通道别名 |
 | `publish` | 校验附件哈希、先上传草稿并核对附件列表，最后公开 Release |
 
-`verify` 与 `native` 可以并行；容器构建依赖回归成功。客户端和容器都成功后才能打包、提升镜像版本并公开 Release。较早完成的候选镜像可能已在 GHCR 中，但不代表整次发版完成。
+`verify` 与 `ios` 可以并行；容器构建依赖回归成功。客户端和容器都成功后才能打包、提升镜像版本并公开 Release。较早完成的候选镜像可能已在 GHCR 中，但不代表整次发版完成。
 
-工作流使用当前仓库的 `GITHUB_TOKEN`：容器上传作业获得 `packages: write`，最终 Release 发布作业获得 `contents: write`，其他作业尽量只读。当前客户端打包不使用私人发布证书；不要为了让作业通过，把后台密码、B 站 Cookie、云存储密钥或个人签名材料加入代码。
+工作流使用当前仓库的 `GITHUB_TOKEN`：容器上传作业获得 `packages: write`，最终 Release 发布作业获得 `contents: write`，其他作业尽量只读。当前 iOS 模拟器打包使用 ad-hoc 临时签名，不使用私人发布证书；不要为了让作业通过，把后台密码、B 站 Cookie、云存储密钥或个人签名材料加入代码。
 
 ## 镜像版本与通道
 
@@ -100,16 +100,13 @@ ghcr.io/guoweiyi/treasure-up-web:0.3.2
 
 ## 下载附件怎么选
 
-客户端、部署包和源码包以 `treasure-up-v0.3.2-` 开头；脚本、说明和校验文件使用表中的完整名称：
+新发布的客户端、部署包和源码包以对应标签（如 `treasure-up-vX.Y.Z-`）开头；表格描述当前主线的产物，不改写 v0.3.2 等历史发行附件：
 
 | 附件后缀 / 名称 | 用途 |
 | --- | --- |
 | `docker.zip` | 服务端预构建镜像部署文件，默认固定 digest |
 | `source.zip` | 该标签提交中跟踪的源码，不含本地未提交数据 |
-| `windows-x64-unsigned.exe` | Windows x64 安装包，未作商业代码签名 |
-| `macos-arm64-unnotarized.dmg` / `macos-x64-unnotarized.dmg` | Apple Silicon / Intel Mac 安装包，未完成开发者发行签名与公证流程 |
-| `android-arm64-debug.apk` | ARM64 调试 APK，使用调试签名，不是长期发行签名；不同构建不保证可以覆盖安装 |
-| `ios-arm64-simulator.zip` | Mac 上 iOS ARM64 模拟器应用，**不是可装到 iPhone / iPad 的 IPA** |
+| `ios-simulator-ad-hoc.zip` | Mac 上临时签名的 iOS 模拟器应用（具体架构见包内构建记录），**不是可装到 iPhone / iPad 的 IPA** |
 | `treasure-up.user.js` | Tampermonkey 选片助手脚本 |
 | `RELEASE-NOTES.md`、`manifest.json`、`release-images.json`、`SHA256SUMS` | 变更说明、来源与镜像记录、文件大小和校验和 |
 

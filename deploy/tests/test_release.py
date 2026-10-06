@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import zipfile
@@ -16,40 +17,82 @@ spec.loader.exec_module(release)
 TAG = "v" + json.loads((Path(__file__).resolve().parents[2] / "release.json").read_text())["version"]
 
 
+def simulator_archive(path, *, platform="iPhoneSimulator", executable=True):
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("TreasureUp.app/Info.plist", plistlib.dumps({
+            "CFBundleSupportedPlatforms": [platform], "CFBundleExecutable": "TreasureUp",
+            "CFBundleShortVersionString": "0.4.2", "CFBundleVersion": "3",
+        }))
+        if executable:
+            archive.writestr("TreasureUp.app/TreasureUp", b"fixture-binary")
+
+
 def artifacts(tmp_path):
     for target, suffix, _ in release.CLIENTS:
         path = tmp_path / f"treasure-up-{target}" / f"client{suffix}"
         path.parent.mkdir()
-        path.write_bytes(b"fixture-client")
+        simulator_archive(path)
     return tmp_path
 
 
-def test_requires_real_installer_not_just_cargo_lock(tmp_path):
+def test_requires_ios_archive_and_ignores_obsolete_platforms(tmp_path):
     root = artifacts(tmp_path)
-    (root / "treasure-up-x86_64-pc-windows-msvc/client.exe").unlink()
-    (root / "treasure-up-x86_64-pc-windows-msvc/Cargo.lock").write_text("fixture")
-    with pytest.raises(ValueError, match="exactly one .exe"):
+    (root / "treasure-up-ios-simulator/client.zip").unlink()
+    legacy = root / "treasure-up-android-debug"
+    legacy.mkdir()
+    (legacy / "client.apk").write_bytes(b"must-not-ship")
+    with pytest.raises(ValueError, match="exactly one .zip for ios-simulator"):
         release.select_clients(root)
 
 
 def test_rejects_ambiguous_or_empty_client(tmp_path):
     root = artifacts(tmp_path)
-    extra = root / "treasure-up-android-debug/extra.apk"
+    extra = root / "treasure-up-ios-simulator/extra.zip"
     extra.write_bytes(b"stale")
     with pytest.raises(ValueError, match="found 2"):
         release.select_clients(root)
     extra.unlink()
-    (extra.parent / "client.apk").write_bytes(b"")
+    (extra.parent / "client.zip").write_bytes(b"")
     with pytest.raises(ValueError, match="empty"):
         release.select_clients(root)
 
 
-def test_all_platforms_have_explicit_output_labels(tmp_path):
-    selected = release.select_clients(artifacts(tmp_path))
-    assert len(selected) == 5
-    assert len({name for _, name in selected}) == 5
-    assert any("simulator" in name for _, name in selected)
-    assert any("debug" in name for _, name in selected)
+def test_only_ios_simulator_is_selected_with_explicit_output_label(tmp_path):
+    root = artifacts(tmp_path)
+    legacy = root / "treasure-up-x86_64-pc-windows-msvc"
+    legacy.mkdir()
+    (legacy / "client.exe").write_bytes(b"must-not-ship")
+    selected = release.select_clients(root)
+    assert selected == [(root / "treasure-up-ios-simulator/client.zip", "ios-simulator-ad-hoc.zip")]
+
+
+@pytest.mark.parametrize("invalid", ["not-zip", "empty-zip", "device", "missing-executable"])
+def test_rejects_placeholder_or_device_archives(tmp_path, invalid):
+    root = artifacts(tmp_path)
+    path = root / "treasure-up-ios-simulator/client.zip"
+    if invalid == "not-zip":
+        path.write_bytes(b"not-an-app")
+    elif invalid == "empty-zip":
+        with zipfile.ZipFile(path, "w"):
+            pass
+    else:
+        simulator_archive(path, platform="iPhoneOS" if invalid == "device" else "iPhoneSimulator",
+                          executable=invalid != "missing-executable")
+    with pytest.raises(ValueError, match="[Ss]imulator"):
+        release.select_clients(root)
+
+
+def test_rejects_symlinked_client_outside_artifact_directory(tmp_path):
+    inputs = tmp_path / "artifacts"
+    inputs.mkdir()
+    artifacts(inputs)
+    archive = inputs / "treasure-up-ios-simulator/client.zip"
+    archive.unlink()
+    external = tmp_path / "outside.zip"
+    simulator_archive(external)
+    archive.symlink_to(external)
+    with pytest.raises(ValueError, match="escapes input directory"):
+        release.select_clients(inputs)
 
 
 @pytest.mark.parametrize("tag", ["main", "v1.2", "v1.2.3/../../other", "v1.2.3\n", "v1.2.3$(id)"])
@@ -67,14 +110,10 @@ def versioned_project(root):
     }})
     files = {
         "frontend/package.json": package,
-        "native/package.json": package,
         "frontend/package-lock.json": lock,
-        "native/package-lock.json": lock,
-        "native/src-tauri/Cargo.toml": '[package]\nname = "treasure-up-native"\nversion = "1.2.3"\n'
-                                      '[dependencies]\nfixture = { version = "1.2.3" }\n',
-        "native/src-tauri/Cargo.lock": 'version = 4\n[[package]]\nname = "fixture"\nversion = "1.2.3"\n'
-                                      '[[package]]\nname = "treasure-up-native"\nversion = "1.2.3"\n',
-        "native/src-tauri/tauri.conf.json": '{"version": "1.2.3"}\n',
+        "native/apple/project.yml": 'settings:\n  base:\n    MARKETING_VERSION: "0.4.2"\n'
+                                    '    CURRENT_PROJECT_VERSION: "3"\n',
+        "native/apple/TreasureUp.xcodeproj/project.pbxproj": 'MARKETING_VERSION = 0.4.2;\n',
         "backend/app/main.py": 'app = FastAPI(title="Fixture", version="1.2.3")\n',
         "compose.yaml": 'services:\n  api:\n    image: treasure-up-backend:1.2.3\n'
                         '  web:\n    image: treasure-up-web:1.2.3\n',
@@ -108,22 +147,16 @@ def test_prepare_preserves_dependencies_format_notes_and_is_idempotent(tmp_path)
     notes.write_text("# Reviewed release\n\nKeep this hand-written upgrade guidance.\n", encoding="utf-8")
     notes_before = notes.read_bytes()
     package_before = (root / "frontend/package.json").read_text(encoding="utf-8")
+    ios_before = {p.relative_to(root): p.read_bytes() for p in (root / "native").rglob("*") if p.is_file()}
 
     release.prepare(root, "2.4.0", "stable")
 
-    for folder in ("frontend", "native"):
-        package = (root / folder / "package.json").read_text(encoding="utf-8")
-        assert package == package_before.replace('"version" : "1.2.3"', '"version" : "2.4.0"')
-        lock = json.loads((root / folder / "package-lock.json").read_text(encoding="utf-8"))
-        assert lock["version"] == lock["packages"][""]["version"] == "2.4.0"
-        assert lock["packages"]["node_modules/dependency"]["version"] == "1.2.3"
-    cargo = release.tomllib.loads((root / "native/src-tauri/Cargo.toml").read_text(encoding="utf-8"))
-    assert cargo["package"]["version"] == "2.4.0"
-    assert cargo["dependencies"]["fixture"]["version"] == "1.2.3"
-    cargo_lock = release.tomllib.loads((root / "native/src-tauri/Cargo.lock").read_text(encoding="utf-8"))
-    assert {p["name"]: p["version"] for p in cargo_lock["package"]} == {
-        "fixture": "1.2.3", "treasure-up-native": "2.4.0",
-    }
+    package = (root / "frontend/package.json").read_text(encoding="utf-8")
+    assert package == package_before.replace('"version" : "1.2.3"', '"version" : "2.4.0"')
+    lock = json.loads((root / "frontend/package-lock.json").read_text(encoding="utf-8"))
+    assert lock["version"] == lock["packages"][""]["version"] == "2.4.0"
+    assert lock["packages"]["node_modules/dependency"]["version"] == "1.2.3"
+    assert {p.relative_to(root): p.read_bytes() for p in (root / "native").rglob("*") if p.is_file()} == ios_before
     assert notes.read_bytes() == notes_before
     assert release.check_versions(root, "v2.4.0") == notes
     prepared = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
@@ -148,8 +181,8 @@ def test_packages_tagged_source_without_untracked_secrets(tmp_path, with_images)
     repo.mkdir()
     project = Path(__file__).resolve().parents[2]
     files = [
-        "frontend/package.json", "frontend/package-lock.json", "native/package.json", "native/package-lock.json",
-        "native/src-tauri/tauri.conf.json", "native/src-tauri/Cargo.toml", "native/src-tauri/Cargo.lock",
+        "frontend/package.json", "frontend/package-lock.json", "native/apple/project.yml",
+        "native/apple/TreasureUp.xcodeproj/project.pbxproj",
         "release.json", "backend/app/main.py", "compose.yaml", "compose.light.yaml", "compose.registry.yaml", "compose.registry.light.yaml", "deploy/start.py", "deploy/bootstrap.py", f"docs/releases/{TAG}.md", "frontend/public/userscripts/treasure-up.user.js",
     ]
     for name in files:
@@ -192,6 +225,11 @@ def test_packages_tagged_source_without_untracked_secrets(tmp_path, with_images)
     with zipfile.ZipFile(output / f"treasure-up-{TAG}-source.zip") as archive:
         assert not any(".env" in name or ".private" in name for name in archive.namelist())
         assert archive.read(f"treasure-up-{TAG}/frontend/public/userscripts/treasure-up.user.js") == script
+        assert archive.read(f"treasure-up-{TAG}/native/apple/project.yml") == git("show", "HEAD:native/apple/project.yml")
+    client = output / f"treasure-up-{TAG}-ios-simulator-ad-hoc.zip"
+    release.validate_simulator_archive(client)
+    assert client.read_bytes() == (inputs / "treasure-up-ios-simulator/client.zip").read_bytes()
+    assert not any(path.suffix in {".exe", ".dmg", ".apk"} for path in output.iterdir())
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["commit"] == git("rev-parse", "HEAD").decode().strip()
     for asset in manifest["assets"]:

@@ -9,7 +9,7 @@
 - 当前开发工具为 Xcode 27 / iOS 27 SDK。**SDK 编译、模拟器运行、真机音视频输出是不同的验收项**，各项状态见文末。
 - 本机已完成开发签名，并在 iPad Air 11-inch (M3) / iPadOS 27.0 真机安装、启动 App，确认横屏双栏视频页与基础播放画面；HDR、Atmos 和后台行为仍需分别验收。
 
-原来的跨平台客户端保留在 [`native/src-tauri`](../src-tauri/)；原有 `ios:*` 命令仍属于 Tauri。这个客户端使用 `swift:*` 命令与本目录中的工程，请确认 Xcode 打开的是 `TreasureUp.xcodeproj`。
+客户端目录现在只保留本原生工程。直接使用 Xcode / xcodebuild，无需 npm 或跨平台工具链；入口为 `TreasureUp.xcodeproj`。
 
 ## 打开和运行
 
@@ -26,15 +26,7 @@ open native/apple/TreasureUp.xcodeproj
 
 资料库支持访客浏览。账户登录后启用个人片单和观看进度，`editor` 与 `admin` 按服务器权限获得对应管理入口。测试账号凭据不写入仓库、构建参数、截图说明或 App 默认配置；请在登录表单中输入。
 
-如果使用已安装的 npm，也可以从仓库根目录运行：
-
-```sh
-cd native
-npm run swift:xcode
-npm run swift:build
-```
-
-`swift:build` 使用本地临时签名（ad hoc，`CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES`）构建模拟器 App，输出到 `native/apple/build/`；模拟器不需要配置 Development Team。这不是 App Store 或真机发布签名，模拟器 `.app` / ZIP 不能直接安装到真实 iPhone 或 iPad。
+命令行构建和测试使用下方的 `xcodebuild` 命令。模拟器保留本地临时签名（ad hoc，`CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES`），无需 Development Team；模拟器 `.app` / ZIP 不能直接安装到真实 iPhone 或 iPad。
 
 本轮实际运行中，使用 `CODE_SIGNING_ALLOWED=NO` 的模拟器构建写入 Keychain 时返回 `-34018`，导致密码登录无法完成。重新以本地临时签名构建并安装后，Keychain 与登录均正常。需要运行或测试的模拟器 App 请保留临时签名，不要为了跳过真机签名而全局禁用签名。
 
@@ -45,9 +37,9 @@ npm run swift:build
 添加、删除或移动 Swift 文件，或者修改 target / build settings 后，重新生成工程：
 
 ```sh
-# 在 native 目录运行；需要本机已有 xcodegen
-npm run swift:generate
-git diff -- apple/project.yml apple/TreasureUp.xcodeproj
+# 在仓库根目录运行；需要本机已有 xcodegen
+xcodegen generate --spec native/apple/project.yml
+git diff -- native/apple/project.yml native/apple/TreasureUp.xcodeproj
 ```
 
 也可在本目录执行 `xcodegen generate --spec project.yml`。常规源码修改不需要每次重新生成。避免只在 Xcode 中修改 build settings 而不更新 `project.yml`，下一次生成会覆盖工程中的单独修改。
@@ -75,14 +67,16 @@ xcodebuild \
   CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES build
 ```
 
-运行离线单元测试时，使用上一步列出的 **iOS 18 或更新版本**设备 UDID。以下命令在 `native` 目录执行：
+运行离线单元测试时，使用上一步列出的 **iOS 18 或更新版本**设备 UDID。以下命令在仓库根目录执行：
 
 ```sh
 TREASURE_SIMULATOR_ID='替换为可用设备的 UDID'
-npm run swift:test -- \
+xcodebuild -project native/apple/TreasureUp.xcodeproj -scheme TreasureUp \
   -destination "platform=iOS Simulator,id=$TREASURE_SIMULATOR_ID" \
-  -derivedDataPath apple/build \
-  CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES
+  -derivedDataPath native/apple/build -parallel-testing-enabled NO \
+  -collect-test-diagnostics never -only-testing:TreasureUpTests \
+  -only-testing:TreasureUpUITests/OfflinePlayerInteractionTests \
+  CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES test
 ```
 
 `TreasureUpTests` 包含 API / 数据解码 / 会话隔离，以及字幕、弹幕、断点续播、全屏呈现、连续窗口缩放和有限播放恢复策略测试。API 用 `URLProtocol` 模拟响应，DEBUG 测试宿主不启动真实服务器会话恢复，不访问正式服务器、不存储测试凭据。可以将设备 UDID 换为 iPad 模拟器重复运行，但本地回归不能替代真机音视频与触控验收。
@@ -91,7 +85,7 @@ npm run swift:test -- \
 
 `TreasureUpUITests/NativeSmokeTests` 是另一个在线冒烟测试，默认跳过；需在 Xcode 的 **Edit Scheme → Test → Arguments → Environment Variables** 中启用 `TREASURE_UI_SMOKE=1`。它依赖测试站资料库中标题含“红豆”的样本，检查目录导航、打开视频及播放器呈现，并保存 XCTest 截图。测试库内容变化时需要更新这个 fixture；它不证明 HDR、Atmos、后台持续播放或所有管理操作已通过。
 
-CI 的 `ios-simulator` job 位于 [原生客户端工作流](../../.github/workflows/native.yml)：选取已安装的 iOS 26.1+ SDK，编译提交的工程，在可用 iPhone 模拟器运行 `TreasureUpTests`，再保存本地临时签名的模拟器 App ZIP。临时签名用于本地运行与 Keychain 访问；该产物不是发布签名，job 不包含真机安装或在线 UI 测试。
+[iOS 客户端工作流](../../.github/workflows/ios.yml) 选取已安装的 iOS 26.1+ SDK，在 iPhone / iPad 模拟器分别运行单元测试和离线播放器 UI 回归，保存各自的测试结果，并仅上传一份临时签名的模拟器 App ZIP。工作流不安装 Node / Rust / Android 工具链，不访问 API 测试站，不包含真机安装或在线 UI 测试。
 
 ## 真机签名与 iPad
 

@@ -50,9 +50,9 @@ jobs:
     uses: ./.github/workflows/verify.yml
     with:
       source_ref: ${{ needs.validate.outputs.revision }}
-  native:
+  ios:
     needs: validate
-    uses: ./.github/workflows/native.yml
+    uses: ./.github/workflows/ios.yml
     with:
       source_ref: ${{ needs.validate.outputs.revision }}
   containers:
@@ -67,7 +67,7 @@ jobs:
       version: ${{ needs.validate.outputs.version }}
       revision: ${{ needs.validate.outputs.revision }}
   package:
-    needs: [validate, verify, native, containers]
+    needs: [validate, verify, ios, containers]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -77,13 +77,13 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: treasure-up-*
-          path: native-artifacts
+          name: treasure-up-ios-simulator
+          path: native-artifacts/treasure-up-ios-simulator
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-images
           path: container-artifacts
-      - name: Package exact-tag source, clients and checksums
+      - name: Package exact-tag source, iOS client and checksums
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: python3 deploy/release.py package "$RELEASE_TAG" --artifacts native-artifacts --images container-artifacts/release-images.json --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --output release-assets

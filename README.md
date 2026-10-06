@@ -63,7 +63,7 @@ docker compose up -d --no-deps --no-build --wait api
 - 后台账号与凭据轮换、UP / 收藏来源、检查历史和新增统计、任务暂停 / 继续 / 重试、存储配置 / 探测 / 迁移、备份记录、系统配置、用户权限与审计。
 - 通行密钥登录、个人密钥管理、撤销对应登录会话；保留密码登录和本机重置入口。
 - [浏览器选片助手](docs/browser-collector.md)：油猴脚本勾选 B 站视频，使用可撤销的专用令牌批量提交采集，后台统一处理与去重。
-- 可安装 Web 应用及 [轻量客户端工程](native/README.md)：Windows / macOS / Android 复用服务端站点；[iOS 纯 Swift 客户端](native/apple/README.md) 直接使用后端 API，提供 iPad 分栏和系统播放器。客户端不执行服务器采集任务。原生签名、设备适配与商店分发有独立验收要求。
+- 可安装 Web 应用及 [iOS / iPadOS 原生客户端](native/README.md)：纯 Swift App 直接使用后端 API，提供 iPad 分栏和原生播放器。客户端目录仅保留 iOS 工程，不执行服务器采集任务；真机签名、设备适配与商店分发有独立验收要求。
 - 可恢复任务检查点、批量下载限速、过期任务接管与旧 Worker 提交隔离。
 - 封面、人员资料、评论、弹幕等元数据先于媒体下载；下载、兼容副本独立任务，原档无需等待转码即可播放。
 - 普通 API 与批量下载分开调度，视频下载间隔、图片素材预算和实际风控冷却可配置；按小时更新播放、点赞、投币、收藏、分享、评论及弹幕计数，可选重新采集弹幕。
@@ -81,7 +81,7 @@ docker compose up -d --no-deps --no-build --wait api
 
 [运维说明](docs/operations.md) 包含存储参数、备份密钥、恢复、升级与验证命令。不要使用 `docker compose down -v` 卸载日常服务，它会删除持久卷。
 
-[自动发版指南](docs/ci-cd.md) 说明推送版本标签或手动选择已有标签后，如何运行回归、打包客户端并推送 GHCR 镜像。维护者的 `deploy/release.py prepare` 需要 Python 3.11+；用户部署入口 `deploy/start.py` 仍只需 Python 3.10+。Windows / macOS 安装包尚未完成正式签名 / 公证，Android 为调试 APK，iOS 为模拟器包，不是 iPhone IPA。
+[自动发版指南](docs/ci-cd.md) 说明推送版本标签或手动选择已有标签后，如何运行回归、打包客户端并推送 GHCR 镜像。维护者的 `deploy/release.py prepare` 需要 Python 3.11+；用户部署入口 `deploy/start.py` 仍只需 Python 3.10+。当前客户端流水线仅构建 iOS / iPadOS，附件为临时签名的模拟器包，不是真机 IPA。已发布版本的历史附件保持原样。
 
 [2026-10-04 代码审计](docs/code-review-2026-10-04.md) 记录本轮安全与并发修复、性能验证、依赖公告及尚未覆盖的验收范围。
 

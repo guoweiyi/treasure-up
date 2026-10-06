@@ -3,21 +3,17 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import subprocess
-import tomllib
 import zipfile
 
 from container_release import context, read_images
 
 
 CLIENTS = (
-    ("x86_64-pc-windows-msvc", ".exe", "windows-x64-unsigned.exe"),
-    ("aarch64-apple-darwin", ".dmg", "macos-arm64-unnotarized.dmg"),
-    ("x86_64-apple-darwin", ".dmg", "macos-x64-unnotarized.dmg"),
-    ("android-debug", ".apk", "android-arm64-debug.apk"),
-    ("ios-simulator-unsigned", ".zip", "ios-arm64-simulator.zip"),
+    ("ios-simulator", ".zip", "ios-simulator-ad-hoc.zip"),
 )
 
 DEPLOYMENT_FILES = (
@@ -55,24 +51,21 @@ def _replace_package_version(text, version):
 
 
 def prepare(root, version, channel):
+    """Prepare a service release; the native iOS app is versioned independently."""
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) or channel not in {"preview", "stable"}:
         raise ValueError("Expected MAJOR.MINOR.PATCH and preview/stable channel")
     planned = {}
-    for folder in ("frontend", "native"):
-        for name in ("package.json", "package-lock.json"):
-            path = root / folder / name
-            source = path.read_text(encoding="utf-8")
-            if name == "package.json":
-                planned[path] = _replace_package_version(source, version)
-                continue
-            data = json.loads(source)
-            data["version"] = version
-            data["packages"][""]["version"] = version
-            planned[path] = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    for name in ("package.json", "package-lock.json"):
+        path = root / "frontend" / name
+        source = path.read_text(encoding="utf-8")
+        if name == "package.json":
+            planned[path] = _replace_package_version(source, version)
+            continue
+        data = json.loads(source)
+        data["version"] = version
+        data["packages"][""]["version"] = version
+        planned[path] = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     changes = {
-        "native/src-tauri/Cargo.toml": (r'(?m)^version = "[^"]+"', f'version = "{version}"'),
-        "native/src-tauri/Cargo.lock": (r'(name = "treasure-up-native"\nversion = ")[^"]+', rf'\g<1>{version}'),
-        "native/src-tauri/tauri.conf.json": (r'"version": "[^"]+"', f'"version": "{version}"'),
         "backend/app/main.py": (r'(FastAPI\([^\n]*version=")[^"]+', rf'\g<1>{version}'),
         "compose.yaml": (r'(image: treasure-up-(?:backend|web):)[^\s]+', rf'\g<1>{version}'),
         "compose.registry.yaml": (r'(ghcr\.io/[^\s}]+:)[0-9]+\.[0-9]+\.[0-9]+', rf'\g<1>{version}'),
@@ -94,6 +87,7 @@ def prepare(root, version, channel):
 
 
 def check_versions(root, tag):
+    """Validate the service tag without coupling it to the iOS app version."""
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
         raise ValueError("Release tag must be vMAJOR.MINOR.PATCH")
     version = tag[1:]
@@ -102,17 +96,11 @@ def check_versions(root, tag):
     values["release.json"] = release["version"]
     if release.get("channel") not in {"preview", "stable"}:
         raise ValueError("Invalid release channel")
-    for folder in ("frontend", "native"):
-        for name in ("package.json", "package-lock.json"):
-            data = json.loads((root / folder / name).read_text(encoding="utf-8"))
-            values[f"{folder}/{name}"] = data["version"]
-            if name == "package-lock.json":
-                values[f"{folder}/lock root"] = data["packages"][""]["version"]
-    tauri = root / "native/src-tauri"
-    values["tauri.conf.json"] = json.loads((tauri / "tauri.conf.json").read_text(encoding="utf-8"))["version"]
-    values["Cargo.toml"] = tomllib.loads((tauri / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
-    lock = tomllib.loads((tauri / "Cargo.lock").read_text(encoding="utf-8"))
-    values["Cargo.lock"] = next(p["version"] for p in lock["package"] if p["name"] == "treasure-up-native")
+    for name in ("package.json", "package-lock.json"):
+        data = json.loads((root / "frontend" / name).read_text(encoding="utf-8"))
+        values[f"frontend/{name}"] = data["version"]
+        if name == "package-lock.json":
+            values["frontend/lock root"] = data["packages"][""]["version"]
     api = (root / "backend/app/main.py").read_text(encoding="utf-8")
     values["FastAPI"] = re.search(r'FastAPI\([^\n]*version="([^"]+)"', api).group(1)
     compose = (root / "compose.yaml").read_text(encoding="utf-8")
@@ -135,6 +123,26 @@ def check_versions(root, tag):
     return notes
 
 
+def validate_simulator_archive(path):
+    """Reject device bundles and placeholder ZIPs before publishing a simulator app."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = [entry for entry in archive.infolist() if entry.filename == "TreasureUp.app/Info.plist"]
+            if len(infos) != 1:
+                raise ValueError("Simulator archive must contain one TreasureUp.app/Info.plist")
+            info = plistlib.loads(archive.read(infos[0]))
+            if not isinstance(info, dict) or info.get("CFBundleSupportedPlatforms") != ["iPhoneSimulator"]:
+                raise ValueError("Client archive must target iPhoneSimulator, not a physical device")
+            executable = info.get("CFBundleExecutable")
+            if not isinstance(executable, str) or not executable or "/" in executable:
+                raise ValueError("Simulator app executable missing")
+            binaries = [entry for entry in archive.infolist() if entry.filename == f"TreasureUp.app/{executable}"]
+            if len(binaries) != 1 or binaries[0].is_dir() or binaries[0].file_size == 0:
+                raise ValueError("Simulator app executable missing or empty")
+    except (zipfile.BadZipFile, plistlib.InvalidFileException) as error:
+        raise ValueError("Invalid simulator app archive") from error
+
+
 def select_clients(artifacts):
     artifacts = artifacts.resolve()
     selected = []
@@ -148,6 +156,7 @@ def select_clients(artifacts):
             raise ValueError("Client artifact escapes input directory")
         if candidate.stat().st_size == 0:
             raise ValueError("Client artifact is empty")
+        validate_simulator_archive(candidate)
         selected.append((candidate, filename))
     return selected
 

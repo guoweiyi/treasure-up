@@ -1,7 +1,0 @@
-{
-  "identifier": "launcher",
-  "description": "Only the bundled connection page may configure a server. No remote capability exists.",
-  "local": true,
-  "windows": ["main"],
-  "permissions": ["allow-connection"]
-}
