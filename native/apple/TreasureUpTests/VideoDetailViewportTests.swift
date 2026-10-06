@@ -33,8 +33,11 @@ final class VideoDetailViewportTests: XCTestCase {
         // One hosting tree crosses the sidebar breakpoint in both directions.
         // Rebuilding a new hosting controller for every size would miss stale
         // UIKit bounds and accidental remounts during an actual sidebar toggle.
-        for width: CGFloat in [1180, 930, 800, 620, 1180] {
-            let size = CGSize(width: width, height: 700)
+        for size in [CGSize(width: 1180, height: 700), CGSize(width: 930, height: 700),
+                     CGSize(width: 800, height: 700), CGSize(width: 620, height: 700),
+                     CGSize(width: 834, height: 1100), CGSize(width: 1024, height: 1200),
+                     CGSize(width: 744, height: 520), CGSize(width: 930, height: 420),
+                     CGSize(width: 1180, height: 700)] {
             await resize(host, to: size, probes: probes, playback: playback)
             let player = try XCTUnwrap(probes.player)
             let details = try XCTUnwrap(probes.details)
@@ -115,6 +118,73 @@ final class VideoDetailViewportTests: XCTestCase {
         XCTAssertEqual(imageFrame.width / imageFrame.height, 16.0 / 9.0, accuracy: 0.001)
         XCTAssertEqual(fallback.playerFrame.width, fallback.playerColumn.width, accuracy: 0.001)
         XCTAssertGreaterThanOrEqual(fallback.detailsFrame.height, 700 * 0.52)
+    }
+
+    func testPortraitIPadUsesFullWidthWhileLandscapeKeepsReadableColumns() {
+        for size in [CGSize(width: 834, height: 1100), CGSize(width: 1024, height: 1200)] {
+            let layout = VideoViewportGeometry(size: size)
+            XCTAssertFalse(layout.isWide)
+            XCTAssertEqual(layout.playerFrame.width, size.width)
+            XCTAssertEqual(layout.detailsFrame.width, size.width)
+            XCTAssertEqual(layout.playerFrame.maxY, layout.detailsFrame.minY)
+            XCTAssertGreaterThanOrEqual(layout.detailsFrame.height, size.height * 0.52)
+        }
+        let landscape = VideoViewportGeometry(size: CGSize(width: 1180, height: 700))
+        XCTAssertTrue(landscape.isWide)
+        XCTAssertGreaterThanOrEqual(landscape.playerFrame.width, 500)
+        XCTAssertGreaterThanOrEqual(landscape.detailsFrame.width, 320)
+    }
+
+    func testAccessibilityTextDoesNotSqueezeInformationIntoNarrowSidebar() {
+        let narrow = VideoViewportGeometry(size: CGSize(width: 900, height: 650), minimumInformationWidth: 420)
+        XCTAssertFalse(narrow.isWide)
+        XCTAssertEqual(narrow.detailsFrame.width, 900)
+        let wide = VideoViewportGeometry(size: CGSize(width: 1180, height: 700), minimumInformationWidth: 420)
+        XCTAssertTrue(wide.isWide)
+        XCTAssertEqual(wide.detailsFrame.width, 420)
+        XCTAssertGreaterThanOrEqual(wide.playerColumn.width, 500)
+        let invalid = VideoViewportGeometry(size: CGSize(width: 1180, height: 700), minimumInformationWidth: .nan)
+        XCTAssertEqual(invalid, VideoViewportGeometry(size: CGSize(width: 1180, height: 700)))
+    }
+
+    func testKeyboardAvoidanceKeepsPortraitLayoutButStillShrinksDetails() throws {
+        let keyboard = try XCTUnwrap(VideoViewportKeyboardGeometry(viewportHeight: 1100, windowHeight: 1194))
+        let visible = CGSize(width: 834, height: 620)
+        let layout = VideoViewportGeometry(size: visible,
+            unobscuredHeight: keyboard.unobscuredHeight(viewportHeight: visible.height, windowHeight: 1194))
+        XCTAssertFalse(layout.isWide, "Opening comment search must not switch a portrait iPad to two columns")
+        XCTAssertEqual(layout.detailsFrame.maxY, visible.height)
+        XCTAssertFalse(layout.playerFrame.intersects(layout.detailsFrame))
+        XCTAssertEqual(layout.playerFrame.width, visible.width)
+    }
+
+    func testKeyboardClassificationTracksRotationSidebarAndStageManagerWindowHeight() throws {
+        let keyboard = try XCTUnwrap(VideoViewportKeyboardGeometry(viewportHeight: 1100, windowHeight: 1194))
+        // Rotating the same window changes its unobscured height, even while
+        // the keyboard remains presented and the SwiftUI proposal stays short.
+        let landscapeHeight = keyboard.unobscuredHeight(viewportHeight: 420, windowHeight: 834)
+        XCTAssertEqual(landscapeHeight, 740)
+        let landscape = VideoViewportGeometry(size: CGSize(width: 1100, height: 420), unobscuredHeight: landscapeHeight)
+        XCTAssertTrue(landscape.isWide)
+        let sidebar = VideoViewportGeometry(size: CGSize(width: 760, height: 420), unobscuredHeight: landscapeHeight)
+        XCTAssertFalse(sidebar.isWide)
+        let tallStageWindow = VideoViewportGeometry(size: CGSize(width: 930, height: 600),
+            unobscuredHeight: keyboard.unobscuredHeight(viewportHeight: 600, windowHeight: 1100))
+        XCTAssertFalse(tallStageWindow.isWide)
+        let shortStageWindow = VideoViewportGeometry(size: CGSize(width: 930, height: 400),
+            unobscuredHeight: keyboard.unobscuredHeight(viewportHeight: 400, windowHeight: 700))
+        XCTAssertTrue(shortStageWindow.isWide)
+        XCTAssertEqual(shortStageWindow.detailsFrame.height, 400)
+    }
+
+    func testKeyboardGeometryIgnoresInvalidMeasurementsAndDoesNotReduceAvailableHeight() throws {
+        XCTAssertNil(VideoViewportKeyboardGeometry(viewportHeight: 0, windowHeight: 1000))
+        XCTAssertNil(VideoViewportKeyboardGeometry(viewportHeight: .nan, windowHeight: 1000))
+        let keyboard = try XCTUnwrap(VideoViewportKeyboardGeometry(viewportHeight: 700, windowHeight: 800))
+        XCTAssertEqual(keyboard.unobscuredHeight(viewportHeight: 720, windowHeight: 800), 720)
+        XCTAssertEqual(keyboard.unobscuredHeight(viewportHeight: 400, windowHeight: .nan), 400)
+        let invalid = VideoViewportGeometry(size: CGSize(width: 930, height: 700), unobscuredHeight: .nan)
+        XCTAssertEqual(invalid, VideoViewportGeometry(size: CGSize(width: 930, height: 700)))
     }
 
     func testVeryWideMediaKeepsSeparateControlRowsInShortWindows() {

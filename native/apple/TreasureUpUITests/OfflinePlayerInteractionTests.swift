@@ -91,6 +91,64 @@ final class OfflinePlayerInteractionTests: XCTestCase {
         setPlaying(true, in: app)
     }
 
+    func testIPadCommentKeyboardPreservesViewportAndTransportThroughRotation() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch(keyboardScenario: true)
+        guard app.staticTexts["offline-device-kind"].label == "iPad" else {
+            throw XCTSkip("The comment keyboard and split-layout scenario requires an iPad simulator")
+        }
+        let search = app.textFields["offline-comment-search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["offline-sidebar"].isHittable)
+        wait("The portrait iPad player must fill the detail width before typing") {
+            let window = self.mainWindowFrame(in: app)
+            let picture = self.pictureFrame(in: app)
+            return window.height > window.width && abs(picture.width - window.width) < 3
+        }
+        let portraitWidth = pictureFrame(in: app).width
+        search.tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        wait("The test must present a real software keyboard, not only an input accessory") { keyboard.frame.height > 200 }
+        search.typeText("local comment")
+        wait("Keyboard avoidance must keep the portrait player full width and above the keyboard") {
+            let picture = self.pictureFrame(in: app)
+            return abs(picture.width - portraitWidth) < 3 && picture.maxY <= keyboard.frame.minY + 2
+        }
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+        XCTAssertTrue(keyboard.exists)
+        let portraitCapture = XCTAttachment(screenshot: app.screenshot())
+        portraitCapture.name = "Portrait iPad comment keyboard"
+        portraitCapture.lifetime = .keepAlways
+        add(portraitCapture)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        wait("Rotating with the keyboard open must place comments alongside the actual native player") {
+            let window = self.mainWindowFrame(in: app)
+            let picture = self.pictureFrame(in: app)
+            return window.width > window.height && keyboard.exists &&
+                picture.width < window.width - 250 && search.frame.minX >= picture.maxX - 2 &&
+                picture.maxY <= keyboard.frame.minY + 2
+        }
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+        let landscapeWidth = pictureFrame(in: app).width
+        app.buttons["offline-keyboard-dismiss"].tap()
+        wait("Explicit keyboard dismissal must finish without changing landscape column widths") {
+            !keyboard.exists && abs(self.pictureFrame(in: app).width - landscapeWidth) < 3
+        }
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+        XCUIDevice.shared.orientation = .portrait
+        wait("Returning to portrait after dismissing the keyboard must restore a full-width player") {
+            let window = self.mainWindowFrame(in: app)
+            return window.height > window.width && abs(self.pictureFrame(in: app).width - window.width) < 3
+        }
+        setPlaying(true, in: app)
+        setPlaying(false, in: app)
+    }
+
     func testPortraitVideoRetainsFullSizeTopAndTransportTargets() {
         defer { XCUIDevice.shared.orientation = .portrait }
         let app = launch(portrait: true)
@@ -200,12 +258,13 @@ final class OfflinePlayerInteractionTests: XCTestCase {
         }
     }
 
-    private func launch(portrait: Bool = false, landscapeWindow: Bool = false) -> XCUIApplication {
+    private func launch(portrait: Bool = false, landscapeWindow: Bool = false, keyboardScenario: Bool = false) -> XCUIApplication {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = landscapeWindow ? .landscapeLeft : .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--offline-player-ui"]
         if portrait { app.launchArguments.append("--offline-player-portrait") }
+        if keyboardScenario { app.launchArguments.append("--offline-player-keyboard") }
         app.launch()
         launchedApp = app
         let status = app.staticTexts["offline-player-ready"]

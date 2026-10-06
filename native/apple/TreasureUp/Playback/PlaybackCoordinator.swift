@@ -7,6 +7,7 @@ import UIKit
 @MainActor @Observable
 final class PlaybackCoordinator {
     let player: AVPlayer
+    let transferMonitor = PlaybackTransferMonitor()
     private(set) var currentVideo: ArchiveVideo?
     private(set) var currentPart: VideoPart?
     private(set) var currentVariant: MediaVariant?
@@ -784,6 +785,7 @@ final class PlaybackCoordinator {
 
     func renew() async {
         guard currentPart != nil else { return }
+        transferMonitor.stop()
         recordDiagnostic("renew-request")
         let resumeAt = initialResumeApplied ? currentTime : startupPosition.position
         let shouldPlay = wantsPlayback
@@ -900,6 +902,7 @@ final class PlaybackCoordinator {
                 }
             }
             activeItemGeneration = key
+            transferMonitor.start(item: item)
             player.replaceCurrentItem(with: item)
             startupTimeoutTask?.cancel()
             startupTimeoutTask = Task { [weak self] in
@@ -1328,6 +1331,7 @@ final class PlaybackCoordinator {
     }
 
     private func cancelMediaTasks() {
+        transferMonitor.stop()
         artworkTask?.cancel()
         artworkTask = nil
         seekTask?.cancel()

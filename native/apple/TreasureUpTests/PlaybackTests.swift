@@ -19,8 +19,27 @@ final class PlaybackTests: XCTestCase {
         container.endAppearanceTransition()
         defer { container.detachPlayerIfOwned(); coordinator.stop() }
 
-        for size in [CGSize(width: 960, height: 540), CGSize(width: 540, height: 304),
-                     CGSize(width: 320, height: 180), CGSize(width: 700, height: 394)] {
+        let retainedLayer = presentation.videoView.playerLayer
+        let content = presentation.controller.view!
+        // UIViewController adds its own safe-area/layout-guide constraints.
+        // Inspect the direct child-to-host pins, rather than counting UIKit's
+        // constraints as additional player attachments after the first layout.
+        func hostingConstraints() -> [NSLayoutConstraint] {
+            container.view.constraints.filter { constraint in
+                let first = constraint.firstItem as? UIView
+                let second = constraint.secondItem as? UIView
+                return (first === content && second === container.view) ||
+                    (first === container.view && second === content)
+            }
+        }
+        let initialPins = hostingConstraints()
+        let pinIdentities = Set(initialPins.map(ObjectIdentifier.init))
+        XCTAssertEqual(initialPins.count, 4)
+        XCTAssertEqual(Set(initialPins.map(\.firstAttribute)), Set([.leading, .trailing, .top, .bottom]))
+        let sizes = [CGSize(width: 960, height: 540), CGSize(width: 540, height: 304),
+                     CGSize(width: 320, height: 180), CGSize(width: 700, height: 394)] +
+            (0..<60).map { CGSize(width: 940 - Double($0) * 8, height: 560) }
+        for size in sizes {
             container.view.frame = CGRect(origin: .zero, size: size)
             container.view.setNeedsLayout()
             container.view.layoutIfNeeded()
@@ -29,6 +48,16 @@ final class PlaybackTests: XCTestCase {
             XCTAssertTrue(container.view.clipsToBounds)
             XCTAssertTrue(presentation.controller.view.clipsToBounds)
             XCTAssertTrue(presentation.videoView.playerLayer.masksToBounds)
+            XCTAssertTrue(presentation.videoView.playerLayer === retainedLayer)
+            XCTAssertTrue(presentation.videoView.playerLayer.player === coordinator.player)
+            XCTAssertEqual(presentation.controller.view.subviews.count, 2,
+                           "Continuous sidebar movement must keep one video surface and one overlay")
+            let pins = hostingConstraints()
+            XCTAssertEqual(pins.count, 4, "Resizing cannot accumulate child-to-host constraints")
+            XCTAssertEqual(Set(pins.map(ObjectIdentifier.init)), pinIdentities,
+                           "Every resize must retain the original four pins, not recreate them")
+            XCTAssertTrue(pins.allSatisfy { $0.isActive && $0.constant == 0 && $0.multiplier == 1 &&
+                $0.priority == .required && $0.relation == .equal })
             for layerView in presentation.controller.view.subviews {
                 XCTAssertTrue(layerView.clipsToBounds)
                 XCTAssertEqual(layerView.bounds.size, size)

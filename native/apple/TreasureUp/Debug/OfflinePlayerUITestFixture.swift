@@ -15,9 +15,12 @@ struct OfflinePlayerUITestFixture: View {
     }
 
     @State private var state = OfflinePlayerUIState()
-    @State private var columns: NavigationSplitViewVisibility = .all
+    @State private var columns: NavigationSplitViewVisibility = ProcessInfo.processInfo.arguments.contains("--offline-player-keyboard") ? .detailOnly : .all
     @State private var expanded = false
     @State private var lifetime = VideoPageLifetime()
+    @State private var commentQuery = ""
+    @FocusState private var commentSearchFocused: Bool
+    private let keyboardScenario = ProcessInfo.processInfo.arguments.contains("--offline-player-keyboard")
 
     var body: some View {
         Group {
@@ -45,29 +48,12 @@ struct OfflinePlayerUITestFixture: View {
         VideoDetailViewport(aspectRatio: state.portrait ? 9.0 / 16.0 : 16.0 / 9.0) {
             InlineNativePlayer(coordinator: state.playback, onToggleExpanded: { expanded = true })
         } details: {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("本地生成的视频").font(.headline)
-                Text(state.ready ? "ready" : state.failure ?? "preparing")
-                    .accessibilityIdentifier("offline-player-ready")
-                Text(state.playback.isPlaying ? "playing" : "paused")
-                    .accessibilityIdentifier("offline-player-state")
-                Text(String(format: "%.2f", state.playback.currentTime))
-                    .accessibilityIdentifier("offline-player-time")
-                Text(state.playback.isSeeking ? "seeking" : "settled")
-                    .accessibilityIdentifier("offline-player-seek-state")
-                Text(String(format: "%.2f", state.playback.player.currentTime().seconds))
-                    .accessibilityIdentifier("offline-player-actual-time")
-                Text(String(format: "%.2f", state.playback.preferredRate))
-                    .accessibilityIdentifier("offline-player-rate")
-                Text(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")
-                    .accessibilityIdentifier("offline-device-kind")
-                Text(state.portrait ? "portrait" : "landscape")
-                    .accessibilityIdentifier("offline-media-orientation")
-                Spacer()
+            if keyboardScenario {
+                ScrollView { fixtureDetails }
+                    .scrollDismissesKeyboard(.interactively)
+            } else {
+                fixtureDetails
             }
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .accessibilityElement(children: .contain)
         }
         // An identifier on an ungrouped SwiftUI container can propagate to
         // descendants and replace the fixture status/control identifiers.
@@ -76,6 +62,12 @@ struct OfflinePlayerUITestFixture: View {
         .navigationTitle("离线播放器回归")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if keyboardScenario {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("关闭键盘") { commentSearchFocused = false }
+                        .accessibilityIdentifier("offline-keyboard-dismiss")
+                }
+            }
             if UIDevice.current.userInterfaceIdiom == .pad {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("切换侧栏") { columns = columns == .detailOnly ? .all : .detailOnly }
@@ -87,6 +79,41 @@ struct OfflinePlayerUITestFixture: View {
             FullscreenPlayerPresenter(isPresented: $expanded, playback: state.playback, lifetime: lifetime)
                 .frame(width: 0, height: 0)
         }
+    }
+
+    private var fixtureDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if keyboardScenario {
+                TextField("离线评论搜索", text: $commentQuery)
+                    .focused($commentSearchFocused)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .onSubmit { commentSearchFocused = false }
+                    .accessibilityIdentifier("offline-comment-search")
+            }
+            Text("本地生成的视频").font(.headline)
+            Text(state.ready ? "ready" : state.failure ?? "preparing")
+                .accessibilityIdentifier("offline-player-ready")
+            Text(state.playback.isPlaying ? "playing" : "paused")
+                .accessibilityIdentifier("offline-player-state")
+            Text(String(format: "%.2f", state.playback.currentTime))
+                .accessibilityIdentifier("offline-player-time")
+            Text(state.playback.isSeeking ? "seeking" : "settled")
+                .accessibilityIdentifier("offline-player-seek-state")
+            Text(String(format: "%.2f", state.playback.player.currentTime().seconds))
+                .accessibilityIdentifier("offline-player-actual-time")
+            Text(String(format: "%.2f", state.playback.preferredRate))
+                .accessibilityIdentifier("offline-player-rate")
+            Text(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")
+                .accessibilityIdentifier("offline-device-kind")
+            Text(state.portrait ? "portrait" : "landscape")
+                .accessibilityIdentifier("offline-media-orientation")
+            Spacer()
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .contain)
     }
 }
 

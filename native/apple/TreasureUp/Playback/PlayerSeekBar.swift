@@ -25,6 +25,10 @@ final class PlayerSeekSlider: UISlider {
     private var configuration: PlayerSeekBar?
     private(set) var isScrubbing = false
     private var previewTime = 0.0
+    private var editingRevision: UInt64 = 0
+    private var interactionWidth: CGFloat?
+    private var deferredEditingEnd: Task<Void, Never>?
+    private var accessibilitySnapshot: PlayerClockSnapshot?
     private static let idleThumb = thumb(diameter: 12)
     private static let activeThumb = thumb(diameter: 18)
 
@@ -52,20 +56,36 @@ final class PlayerSeekSlider: UISlider {
     required init?(coder: NSCoder) { fatalError("Use init()") }
 
     func configure(_ configuration: PlayerSeekBar) {
-        if self.configuration?.mediaID != configuration.mediaID {
-            // The owning SwiftUI view resets its preview on part change. Never
-            // let a touch begun on the previous part seek into the next part.
-            isScrubbing = false
-            isHighlighted = false
+        let seekable = configuration.duration.isFinite && configuration.duration > 0
+        if isScrubbing && (self.configuration?.mediaID != configuration.mediaID || !seekable) {
+            invalidateInteraction()
         }
         self.configuration = configuration
-        isEnabled = configuration.duration.isFinite && configuration.duration > 0
+        isEnabled = seekable
         if !isScrubbing {
             previewTime = PlayerGestureMath.clampedTime(configuration.value, duration: configuration.duration)
             setValue(Float(fraction(previewTime)), animated: false)
         }
         updateAccessibilityValue()
         setNeedsLayout()
+    }
+
+    /// A new item or temporarily unknown duration invalidates the old touch.
+    /// End the owning SwiftUI preview after updateUIView has returned; publishing
+    /// from inside that update would reenter the view's current render pass.
+    private func invalidateInteraction() {
+        let didEnd = configuration?.onEditingChanged
+        isScrubbing = false
+        isHighlighted = false
+        interactionWidth = nil
+        editingRevision &+= 1
+        let revision = editingRevision
+        deferredEditingEnd?.cancel()
+        deferredEditingEnd = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled, self.editingRevision == revision else { return }
+            self.deferredEditingEnd = nil
+            didEnd?(false)
+        }
     }
 
     override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 44) }
@@ -76,6 +96,9 @@ final class PlayerSeekSlider: UISlider {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if isScrubbing, let interactionWidth, interactionWidth != bounds.width {
+            cancelInteraction()
+        }
         let rect = trackRect(forBounds: bounds)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -110,8 +133,13 @@ final class PlayerSeekSlider: UISlider {
 
     @discardableResult
     func beginInteraction(at x: CGFloat) -> Bool {
-        guard isEnabled, configuration != nil else { return false }
+        guard isEnabled, !isScrubbing, configuration != nil, x.isFinite,
+              bounds.width.isFinite, trackRect(forBounds: bounds).width > 0 else { return false }
+        deferredEditingEnd?.cancel()
+        deferredEditingEnd = nil
+        editingRevision &+= 1
         isScrubbing = true
+        interactionWidth = bounds.width
         isHighlighted = true
         configuration?.onEditingChanged(true)
         updateInteraction(at: x)
@@ -131,11 +159,15 @@ final class PlayerSeekSlider: UISlider {
     }
 
     func finishInteraction() {
-        guard isScrubbing else { return }
+        guard isScrubbing, let configuration else { return }
         isScrubbing = false
         isHighlighted = false
-        configuration?.onCommit(previewTime)
-        configuration?.onEditingChanged(false)
+        interactionWidth = nil
+        previewTime = PlayerGestureMath.clampedTime(previewTime, duration: configuration.duration)
+        setValue(Float(fraction(previewTime)), animated: false)
+        configuration.onCommit(previewTime)
+        configuration.onEditingChanged(false)
+        updateAccessibilityValue()
         setNeedsLayout()
     }
 
@@ -143,6 +175,7 @@ final class PlayerSeekSlider: UISlider {
         guard isScrubbing else { return }
         isScrubbing = false
         isHighlighted = false
+        interactionWidth = nil
         previewTime = PlayerGestureMath.clampedTime(configuration?.value ?? 0, duration: configuration?.duration ?? 0)
         setValue(Float(fraction(previewTime)), animated: false)
         configuration?.onEditingChanged(false)
@@ -154,7 +187,7 @@ final class PlayerSeekSlider: UISlider {
     override func accessibilityDecrement() { accessibleSeek(by: -10) }
 
     private func accessibleSeek(by delta: Double) {
-        guard isEnabled, let configuration else { return }
+        guard isEnabled, !isScrubbing, let configuration else { return }
         previewTime = PlayerGestureMath.clampedTime(previewTime + delta, duration: configuration.duration)
         setValue(Float(fraction(previewTime)), animated: false)
         configuration.onEditingChanged(true)
@@ -171,7 +204,10 @@ final class PlayerSeekSlider: UISlider {
     }
 
     private func updateAccessibilityValue() {
-        accessibilityValue = "\(PlayerGestureMath.timeLabel(previewTime))，共 \(PlayerGestureMath.timeLabel(configuration?.duration ?? 0))"
+        let snapshot = PlayerClockSnapshot(position: previewTime, duration: configuration?.duration ?? 0)
+        guard snapshot != accessibilitySnapshot else { return }
+        accessibilitySnapshot = snapshot
+        accessibilityValue = "\(PlayerGestureMath.timeLabel(snapshot.position))，共 \(PlayerGestureMath.timeLabel(snapshot.duration))"
     }
 
     private static func thumb(diameter: CGFloat) -> UIImage {

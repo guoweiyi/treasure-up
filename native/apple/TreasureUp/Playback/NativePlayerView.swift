@@ -6,6 +6,7 @@ import Observation
 /// its view, rather than creating competing AVPlayerLayers for the same player.
 struct NativePlayerView: UIViewControllerRepresentable {
     let coordinator: PlaybackCoordinator
+    var isExpanded = false
 
     func makeUIViewController(context: Context) -> NativePlayerContainerViewController {
         if coordinator.presentation == nil {
@@ -13,10 +14,11 @@ struct NativePlayerView: UIViewControllerRepresentable {
         }
         let presentation = coordinator.presentation!
         presentation.configure(coordinator: coordinator)
-        return NativePlayerContainerViewController(presentation: presentation)
+        return NativePlayerContainerViewController(presentation: presentation, isExpanded: isExpanded)
     }
 
     func updateUIViewController(_ container: NativePlayerContainerViewController, context: Context) {
+        container.isExpanded = isExpanded
         container.presentation.configure(coordinator: coordinator)
     }
 
@@ -37,10 +39,14 @@ struct NativePlayerView: UIViewControllerRepresentable {
 @MainActor
 final class NativePlayerContainerViewController: UIViewController {
     let presentation: NativePlaybackPresentation
+    var isExpanded: Bool {
+        didSet { if oldValue != isExpanded { updateOverlaySafeArea() } }
+    }
     private var playerConstraints: [NSLayoutConstraint] = []
 
-    init(presentation: NativePlaybackPresentation) {
+    init(presentation: NativePlaybackPresentation, isExpanded: Bool = false) {
         self.presentation = presentation
+        self.isExpanded = isExpanded
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -74,6 +80,18 @@ final class NativePlayerContainerViewController: UIViewController {
         }
         content.layoutIfNeeded()
         CATransaction.commit()
+        updateOverlaySafeArea()
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        updateOverlaySafeArea()
+    }
+
+    private func updateOverlaySafeArea() {
+        guard isViewLoaded, presentation.controller.parent === self else { return }
+        presentation.setOverlaySafeAreaInsets(NativeSubtitleLayout.safeAreaInsets(isExpanded: isExpanded,
+                                                                                 reported: view.safeAreaInsets))
     }
 
     private func attachPlayerIfNeeded() {
@@ -98,6 +116,7 @@ final class NativePlayerContainerViewController: UIViewController {
         ]
         NSLayoutConstraint.activate(playerConstraints)
         controller.didMove(toParent: self)
+        updateOverlaySafeArea()
     }
 
     func detachPlayerIfOwned() {
@@ -144,6 +163,7 @@ final class NativeVideoLayerView: UIView {
 private final class NativeOverlayPresentationState {
     var controlsVisible = false
     var isVisible = false
+    var safeAreaInsets = UIEdgeInsets.zero
 }
 
 /// Public AVKit custom-player PiP API. AVPlayerLayer preserves the native decoder,
@@ -235,6 +255,10 @@ final class NativePlaybackPresentation: NSObject, @preconcurrency AVPictureInPic
         if overlayState.controlsVisible != visible { overlayState.controlsVisible = visible }
     }
 
+    func setOverlaySafeAreaInsets(_ insets: UIEdgeInsets) {
+        if overlayState.safeAreaInsets != insets { overlayState.safeAreaInsets = insets }
+    }
+
     private func refreshOverlayVisibility() {
         guard let coordinator else { return }
         // The hosting controller is retained with playback even after leaving
@@ -316,60 +340,224 @@ private struct NativePlaybackOverlay: View {
 
     var body: some View {
         if presentation.isVisible && (hasDanmaku || !coordinator.subtitleCues.isEmpty) {
-            ZStack(alignment: .bottom) {
-                if hasDanmaku {
-                    TimelineView(.animation(minimumInterval: reduceMotion ? 0.1 : 1.0 / 30,
-                                            paused: !coordinator.isPlaying || scenePhase != .active)) { context in
-                        let time = coordinator.presentationTime(at: context.date)
-                        NativeDanmakuOverlay(rows: PlaybackTimeline.activeDanmaku(coordinator.danmaku, at: time),
-                                             time: time, fontSize: coordinator.danmakuFontSize,
-                                             opacity: coordinator.danmakuOpacity, reduceMotion: reduceMotion)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                }
-                if !coordinator.subtitleCues.isEmpty {
-                    // Subtitle changes do not need to reconstruct their string
-                    // and SwiftUI text at every moving-danmaku frame.
-                    TimelineView(.animation(minimumInterval: 0.1,
-                                            paused: !coordinator.isPlaying || scenePhase != .active)) { context in
-                        let text = PlaybackTimeline.subtitleText(coordinator.subtitleCues,
-                                                                  at: coordinator.presentationTime(at: context.date))
-                        if !text.isEmpty {
-                            Text(text)
-                                .font(.callout.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(.black.opacity(0.72), in: .rect(cornerRadius: 6))
-                                .padding(.horizontal, 24)
-                                .padding(.bottom, presentation.controlsVisible ? 88 : 22)
-                        }
-                    }
-                }
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .clipped()
+            NativeTimedPlaybackOverlay(coordinator: coordinator, playbackTime: coordinator.currentTime,
+                                       controlsVisible: presentation.controlsVisible,
+                                       reduceMotion: reduceMotion, sceneActive: scenePhase == .active,
+                                       safeAreaInsets: presentation.safeAreaInsets)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+                .clipped()
         }
     }
 }
 
-private struct NativeDanmakuOverlay: UIViewRepresentable {
-    let rows: ArraySlice<ScheduledDanmaku>
-    let time: Double
-    let fontSize: Double
-    let opacity: Double
+private struct NativeTimedPlaybackOverlay: UIViewRepresentable {
+    let coordinator: PlaybackCoordinator
+    // Observe coarse progress for seeks and paused frames; animation never
+    // publishes a SwiftUI state change or asks AVPlayer for its time per frame.
+    let playbackTime: Double
+    let controlsVisible: Bool
     let reduceMotion: Bool
+    let sceneActive: Bool
+    let safeAreaInsets: UIEdgeInsets
 
-    func makeUIView(context: Context) -> NativeDanmakuOverlayView { NativeDanmakuOverlayView(frame: .zero) }
+    func makeUIView(context: Context) -> NativeTimedOverlayView { NativeTimedOverlayView(frame: .zero) }
 
-    func updateUIView(_ view: NativeDanmakuOverlayView, context: Context) {
-        view.update(rows: rows, time: time, fontSize: fontSize, opacity: opacity, reduceMotion: reduceMotion)
+    func updateUIView(_ view: NativeTimedOverlayView, context: Context) {
+        view.configure(danmaku: coordinator.danmakuEnabled ? coordinator.danmaku : [],
+                       subtitles: coordinator.subtitleCues,
+                       time: coordinator.isPlaying ? coordinator.presentationTime(at: Date()) : playbackTime,
+                       fontSize: coordinator.danmakuFontSize, opacity: coordinator.danmakuOpacity,
+                       controlsVisible: controlsVisible, reduceMotion: reduceMotion,
+                       safeAreaInsets: safeAreaInsets,
+                       playing: coordinator.isPlaying && !coordinator.isLoading && !coordinator.isSeeking && sceneActive,
+                       timeProvider: { [weak coordinator] in coordinator?.presentationTime(at: Date()) ?? 0 })
     }
 
-    static func dismantleUIView(_ view: NativeDanmakuOverlayView, coordinator: ()) {
-        view.update(rows: [], time: 0, fontSize: 18, opacity: 0.85, reduceMotion: false)
+    static func dismantleUIView(_ view: NativeTimedOverlayView, coordinator: ()) { view.stop() }
+}
+
+/// Inline video is already placed inside the page's safe area. Only the
+/// edge-to-edge fullscreen container contributes device cutout/home-bar insets.
+enum NativeSubtitleLayout {
+    static func safeAreaInsets(isExpanded: Bool, reported: UIEdgeInsets) -> UIEdgeInsets {
+        guard isExpanded else { return .zero }
+        func finite(_ value: CGFloat) -> CGFloat { value.isFinite ? max(0, value) : 0 }
+        return UIEdgeInsets(top: finite(reported.top), left: finite(reported.left),
+                            bottom: finite(reported.bottom), right: finite(reported.right))
+    }
+}
+
+/// A single visible overlay owns the native animation clock. Moving a cached
+/// glyph no longer rebuilds SwiftUI/UIViewRepresentable 30 times per second;
+/// 60 Hz layer positions stay independent from the video's decoding/HDR path.
+@MainActor
+final class NativeTimedOverlayView: UIView {
+    @MainActor private final class DisplayLinkTarget: NSObject {
+        weak var owner: NativeTimedOverlayView?
+        init(owner: NativeTimedOverlayView) { self.owner = owner }
+        @objc func tick(_ link: CADisplayLink) { owner?.advance(link) }
+    }
+
+    let danmakuView = NativeDanmakuOverlayView(frame: .zero)
+    private let subtitleBackground = UIView()
+    private let subtitleLabel = UILabel()
+    private var subtitleBottom: NSLayoutConstraint!
+    private var subtitleTop: NSLayoutConstraint!
+    private var subtitleLeading: NSLayoutConstraint!
+    private var subtitleTrailing: NSLayoutConstraint!
+    private var subtitleCenter: NSLayoutConstraint!
+    private var viewportInsets = UIEdgeInsets.zero
+    private var controlsVisible = false
+    private var displayLink: CADisplayLink?
+    private var danmaku: [ScheduledDanmaku] = []
+    private var subtitles: [NativeSubtitleCue] = []
+    private var timeProvider: (() -> Double)?
+    private var playing = false
+    private var fontSize = 18.0
+    private var opacity = 0.85
+    private var reduceMotion = false
+    private var lastSubtitleHostTime: CFTimeInterval = -.infinity
+    private(set) var subtitleAssignmentCount = 0
+    private(set) var displayedSubtitleText = ""
+    private(set) var displayLinkCreationCount = 0
+    var isAnimationRunning: Bool { displayLink?.isPaused == false }
+    var animationFrameRate: Int { displayLink?.preferredFramesPerSecond ?? 0 }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        accessibilityElementsHidden = true
+        clipsToBounds = true
+        danmakuView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(danmakuView)
+        subtitleBackground.backgroundColor = UIColor.black.withAlphaComponent(0.72)
+        subtitleBackground.layer.cornerRadius = 6
+        subtitleBackground.clipsToBounds = true
+        subtitleBackground.translatesAutoresizingMaskIntoConstraints = false
+        subtitleBackground.isHidden = true
+        addSubview(subtitleBackground)
+        subtitleLabel.font = UIFontMetrics(forTextStyle: .callout)
+            .scaledFont(for: UIFont.systemFont(ofSize: 16, weight: .semibold))
+        subtitleLabel.adjustsFontForContentSizeCategory = true
+        subtitleLabel.textColor = .white
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.numberOfLines = 0
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleBackground.addSubview(subtitleLabel)
+        subtitleBottom = subtitleBackground.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -22)
+        subtitleTop = subtitleBackground.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 12)
+        // A transient zero-height viewport must not create required-constraint
+        // conflicts while UIKit transfers the player between containers.
+        subtitleTop.priority = UILayoutPriority(999)
+        subtitleLeading = subtitleBackground.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24)
+        subtitleTrailing = subtitleBackground.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24)
+        subtitleCenter = subtitleBackground.centerXAnchor.constraint(equalTo: centerXAnchor)
+        NSLayoutConstraint.activate([
+            danmakuView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            danmakuView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            danmakuView.topAnchor.constraint(equalTo: topAnchor),
+            danmakuView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            subtitleCenter, subtitleLeading, subtitleTrailing, subtitleBottom, subtitleTop,
+            subtitleLabel.leadingAnchor.constraint(equalTo: subtitleBackground.leadingAnchor, constant: 10),
+            subtitleLabel.trailingAnchor.constraint(equalTo: subtitleBackground.trailingAnchor, constant: -10),
+            subtitleLabel.topAnchor.constraint(equalTo: subtitleBackground.topAnchor, constant: 5),
+            subtitleLabel.bottomAnchor.constraint(equalTo: subtitleBackground.bottomAnchor, constant: -5)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
+
+    func configure(danmaku: [ScheduledDanmaku], subtitles: [NativeSubtitleCue], time: Double,
+                   fontSize: Double = 18, opacity: Double = 0.85, controlsVisible: Bool = false,
+                   reduceMotion: Bool = false, safeAreaInsets: UIEdgeInsets = .zero,
+                   playing: Bool, timeProvider: @escaping () -> Double) {
+        self.danmaku = danmaku
+        self.subtitles = subtitles
+        self.fontSize = fontSize
+        self.opacity = opacity
+        self.reduceMotion = reduceMotion
+        self.playing = playing
+        self.timeProvider = timeProvider
+        self.controlsVisible = controlsVisible
+        viewportInsets = safeAreaInsets
+        updateSubtitleLayout()
+        renderFrame(time: time, hostTime: CACurrentMediaTime(), forceSubtitle: true)
+        refreshClock()
+    }
+
+    override func layoutSubviews() {
+        updateSubtitleLayout()
+        super.layoutSubviews()
+    }
+
+    private func updateSubtitleLayout() {
+        let insets = NativeSubtitleLayout.safeAreaInsets(isExpanded: true, reported: viewportInsets)
+        let bottom = controlsVisible ? max(3, insets.bottom) + 96 : insets.bottom + 22
+        let top = insets.top + (controlsVisible ? 52 : 12)
+        let leading = insets.left + 24
+        let trailing = -(insets.right + 24)
+        let center = (insets.left - insets.right) / 2
+        if subtitleBottom.constant != -bottom { subtitleBottom.constant = -bottom }
+        if subtitleTop.constant != top { subtitleTop.constant = top }
+        if subtitleLeading.constant != leading { subtitleLeading.constant = leading }
+        if subtitleTrailing.constant != trailing { subtitleTrailing.constant = trailing }
+        if subtitleCenter.constant != center { subtitleCenter.constant = center }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        refreshClock()
+    }
+
+    private func refreshClock() {
+        guard window != nil else {
+            displayLink?.invalidate()
+            displayLink = nil
+            return
+        }
+        let running = playing && (!danmaku.isEmpty || !subtitles.isEmpty)
+        if running && displayLink == nil {
+            let link = CADisplayLink(target: DisplayLinkTarget(owner: self), selector: #selector(DisplayLinkTarget.tick(_:)))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+            displayLinkCreationCount += 1
+        }
+        let frameRate = !danmaku.isEmpty && !reduceMotion ? 60 : 10
+        if displayLink?.preferredFramesPerSecond != frameRate { displayLink?.preferredFramesPerSecond = frameRate }
+        displayLink?.isPaused = !running
+    }
+
+    private func advance(_ link: CADisplayLink) {
+        guard let timeProvider else { return }
+        renderFrame(time: timeProvider(), hostTime: link.timestamp)
+    }
+
+    // Also used by deterministic offline regressions: presentation time and
+    // display time are separate so 2× playback doesn't double subtitle work.
+    func renderFrame(time: Double, hostTime: CFTimeInterval, forceSubtitle: Bool = false) {
+        danmakuView.update(rows: PlaybackTimeline.activeDanmaku(danmaku, at: time), time: time,
+                           fontSize: fontSize, opacity: opacity, reduceMotion: reduceMotion)
+        guard forceSubtitle || hostTime - lastSubtitleHostTime >= 0.1 else { return }
+        lastSubtitleHostTime = hostTime
+        let text = PlaybackTimeline.subtitleText(subtitles, at: time)
+        guard displayedSubtitleText != text else { return }
+        displayedSubtitleText = text
+        subtitleLabel.text = text
+        subtitleBackground.isHidden = text.isEmpty
+        subtitleAssignmentCount += 1
+    }
+
+    func stop() {
+        playing = false
+        displayLink?.invalidate()
+        displayLink = nil
+        timeProvider = nil
+        danmaku = []
+        subtitles = []
+        renderFrame(time: 0, hostTime: CACurrentMediaTime(), forceSubtitle: true)
     }
 }
 
@@ -400,6 +588,8 @@ final class NativeDanmakuOverlayView: UIView {
     private var fontSize = 18.0
     private var opacity = 0.85
     private var reduceMotion = false
+    private var lastRenderedBounds: CGRect?
+    private var lastRenderedScale: CGFloat?
     private(set) var textPreparationCount = 0
     var cachedCueCount: Int { glyphs.count }
 
@@ -426,7 +616,9 @@ final class NativeDanmakuOverlayView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        renderFrame()
+        // A clock tick may already have rendered these bounds. Ordinary parent
+        // layout passes do not need another generation sweep/layer submission.
+        if lastRenderedBounds != bounds || lastRenderedScale != traitCollection.displayScale { renderFrame() }
     }
 
     override func didMoveToWindow() {
@@ -435,11 +627,13 @@ final class NativeDanmakuOverlayView: UIView {
     }
 
     private func renderFrame() {
+        lastRenderedBounds = bounds
+        lastRenderedScale = traitCollection.displayScale
         generation &+= 1
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        if bounds.height > 120, time.isFinite {
+        if bounds.width > 0, bounds.height > 120, time.isFinite {
             let laneHeight = min(29, max(17, (bounds.height - 100) / 8))
             let effectiveFont = min(fontSize.isFinite ? max(1, fontSize) : 18, laneHeight - 2)
             let scale = max(1, traitCollection.displayScale)

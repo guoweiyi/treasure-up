@@ -18,6 +18,7 @@
 		14BA7969250D795FF5E60FF6 /* PlayerControlsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */; };
 		15C605578E3FAE9F640FA0B7 /* FullscreenPresentationIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6C46D3AB956FE9CFBB9DCE2 /* FullscreenPresentationIntegrationTests.swift */; };
 		18241A4CCFCBC3BA88F036E0 /* PlaybackQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEFE56CE2C882AE34C1C945E /* PlaybackQueue.swift */; };
+		1C27BE46EB494487E0766C2E /* PlaybackTransferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DED42D6725C3D3B1AC80E69 /* PlaybackTransferTests.swift */; };
 		20A21A081DFE5596EEB0FC82 /* PlaybackTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */; };
 		2B69DED3044FFE04E3387BB7 /* VideoDetailViewportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7149DAC177494013BE160477 /* VideoDetailViewportTests.swift */; };
 		2F4710BF0625BD6EDA722A5E /* FullscreenPlayerPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB307D79CC6373AF2B3F5ACA /* FullscreenPlayerPresenter.swift */; };
@@ -35,6 +36,7 @@
 		8F8B3263AA8CF02D19006285 /* TreasureUpApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */; };
 		939BA262B351B4E9E7F2769F /* PromptText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C292CB4217994CFB56A14B1 /* PromptText.swift */; };
 		96A4E20FD13E5E767DE9CB4C /* PlayerSeekBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 093E2A40D0F44EEA0508C121 /* PlayerSeekBar.swift */; };
+		9D7B7D4A2F75DAFEFB4748A3 /* PlaybackTransferMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35420AFC2CB74604E3007C6D /* PlaybackTransferMonitor.swift */; };
 		9F0123BDAB6AA9D23043F68A /* PromptTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 164DBBD7F5A3D599F9193275 /* PromptTextTests.swift */; };
 		A17A51C283B9FDB2D815C99F /* CoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99D08916B4C68FE268D7A5D /* CoreTests.swift */; };
 		A93AD24D9C20E1D4E2A61A87 /* AdminEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */; };
@@ -86,7 +88,9 @@
 		2842D50C134401B327F19407 /* VideoLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoLibraryView.swift; sourceTree = "<group>"; };
 		29F71A0287A1369510ECA005 /* PlayerNativeInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerNativeInteractionTests.swift; sourceTree = "<group>"; };
 		2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreasureUpApp.swift; sourceTree = "<group>"; };
+		35420AFC2CB74604E3007C6D /* PlaybackTransferMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackTransferMonitor.swift; sourceTree = "<group>"; };
 		3C292CB4217994CFB56A14B1 /* PromptText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptText.swift; sourceTree = "<group>"; };
+		3DED42D6725C3D3B1AC80E69 /* PlaybackTransferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackTransferTests.swift; sourceTree = "<group>"; };
 		4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueSection.swift; sourceTree = "<group>"; };
 		4C313386880949F2564EBF49 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControlsState.swift; sourceTree = "<group>"; };
@@ -168,6 +172,7 @@
 				FEFE56CE2C882AE34C1C945E /* PlaybackQueue.swift */,
 				6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */,
 				DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */,
+				35420AFC2CB74604E3007C6D /* PlaybackTransferMonitor.swift */,
 				8A373D29FE2A013920CC377E /* PlayerControls.swift */,
 				4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */,
 				89F9B4C6129583BA74D2F131 /* PlayerGestureSurface.swift */,
@@ -199,6 +204,7 @@
 				BD6A6A0DECC7D1301EFF3DD3 /* NativeOverlayPerformanceTests.swift */,
 				B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */,
 				A9DF7300701A329C819838D6 /* PlaybackTests.swift */,
+				3DED42D6725C3D3B1AC80E69 /* PlaybackTransferTests.swift */,
 				D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */,
 				29F71A0287A1369510ECA005 /* PlayerNativeInteractionTests.swift */,
 				164DBBD7F5A3D599F9193275 /* PromptTextTests.swift */,
@@ -403,6 +409,7 @@
 				5B874CFCC636AB811D195869 /* PlaybackQueueSection.swift in Sources */,
 				BE22C0B378D0FA727A5C633E /* PlaybackRecovery.swift in Sources */,
 				20A21A081DFE5596EEB0FC82 /* PlaybackTimeline.swift in Sources */,
+				9D7B7D4A2F75DAFEFB4748A3 /* PlaybackTransferMonitor.swift in Sources */,
 				0BFFD73E0595766D7E862CD1 /* PlayerControls.swift in Sources */,
 				8B884E1482E6392B87B5DC53 /* PlayerControlsState.swift in Sources */,
 				06433F29A94490BF20778130 /* PlayerGestureSurface.swift in Sources */,
@@ -430,6 +437,7 @@
 				69D026203D8F37224109FF20 /* NativeOverlayPerformanceTests.swift in Sources */,
 				BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */,
 				CF038D291F8DB5C416396298 /* PlaybackTests.swift in Sources */,
+				1C27BE46EB494487E0766C2E /* PlaybackTransferTests.swift in Sources */,
 				14BA7969250D795FF5E60FF6 /* PlayerControlsTests.swift in Sources */,
 				BC88967D74F30C2D8FFC5E64 /* PlayerNativeInteractionTests.swift in Sources */,
 				9F0123BDAB6AA9D23043F68A /* PromptTextTests.swift in Sources */,
@@ -498,7 +506,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -517,7 +525,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.4.2;
+				MARKETING_VERSION = 0.4.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -566,7 +574,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -579,7 +587,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.4.2;
+				MARKETING_VERSION = 0.4.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

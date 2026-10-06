@@ -106,4 +106,129 @@ final class PlayerNativeInteractionTests: XCTestCase {
         XCTAssertTrue(view.gestureRecognizer(view.singleTap, shouldRecognizeSimultaneouslyWith: view.doubleTap))
         XCTAssertFalse(view.gestureRecognizer(view.pan, shouldRecognizeSimultaneouslyWith: view.hold))
     }
+
+    func testUnknownDurationDuringScrubEndsEditingWithoutCommittingStaleTarget() async {
+        for unavailableDuration in [0, Double.nan, .infinity] {
+            let slider = PlayerSeekSlider()
+            slider.frame = CGRect(x: 0, y: 0, width: 418, height: 44)
+            var commits: [Double] = []
+            var editing: [Bool] = []
+            func configure(duration: Double) {
+                slider.configure(PlayerSeekBar(value: 10, duration: duration, bufferedTime: 60, mediaID: "a",
+                    onPreview: { _ in }, onEditingChanged: { editing.append($0) }, onCommit: { commits.append($0) }))
+            }
+            configure(duration: 100)
+            XCTAssertTrue(slider.beginInteraction(at: 329))
+            configure(duration: unavailableDuration)
+            slider.finishInteraction()
+            for _ in 0..<20 where editing.last != false { await Task.yield() }
+            XCTAssertFalse(slider.isScrubbing)
+            XCTAssertFalse(slider.isEnabled)
+            XCTAssertTrue(commits.isEmpty, "The previous item's duration cannot be used for an invalid seek")
+            XCTAssertEqual(editing, [true, false], "The parent must release its auto-hide and preview gates")
+        }
+    }
+
+    func testItemReplacementCannotEndANewerScrubThroughDeferredCancellation() async {
+        let slider = PlayerSeekSlider()
+        slider.frame = CGRect(x: 0, y: 0, width: 418, height: 44)
+        var editing: [Bool] = []
+        var commits: [Double] = []
+        func configure(_ id: String) {
+            slider.configure(PlayerSeekBar(value: 10, duration: 100, bufferedTime: 60, mediaID: id,
+                onPreview: { _ in }, onEditingChanged: { editing.append($0) }, onCommit: { commits.append($0) }))
+        }
+        configure("a")
+        slider.beginInteraction(at: 329)
+        configure("b")
+        XCTAssertTrue(slider.beginInteraction(at: 209))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(slider.isScrubbing)
+        XCTAssertEqual(editing, [true, true], "An old deferred callback must not clear the new interaction")
+        slider.finishInteraction()
+        XCTAssertEqual(commits, [50])
+        XCTAssertEqual(editing.last, false)
+    }
+
+    func testSidebarResizeCancelsProgressTouchWithoutChangingPlaybackPosition() {
+        let slider = PlayerSeekSlider()
+        slider.frame = CGRect(x: 0, y: 0, width: 418, height: 44)
+        var commits: [Double] = []
+        var editing: [Bool] = []
+        slider.configure(PlayerSeekBar(value: 10, duration: 100, bufferedTime: 60, mediaID: "a",
+            onPreview: { _ in }, onEditingChanged: { editing.append($0) }, onCommit: { commits.append($0) }))
+        slider.layoutIfNeeded()
+        slider.beginInteraction(at: 329)
+        slider.frame.size.width = 300
+        slider.setNeedsLayout()
+        slider.layoutIfNeeded()
+        slider.finishInteraction()
+        XCTAssertTrue(commits.isEmpty)
+        XCTAssertEqual(slider.value, 0.1, accuracy: 0.001)
+        XCTAssertEqual(editing, [true, false])
+    }
+
+    func testUpdatedDurationClampsCommittedPositionAndRejectsInvalidInitialTouches() {
+        let slider = PlayerSeekSlider()
+        slider.frame = CGRect(x: 0, y: 0, width: 418, height: 44)
+        var commits: [Double] = []
+        var editing: [Bool] = []
+        func configure(_ duration: Double) {
+            slider.configure(PlayerSeekBar(value: 10, duration: duration, bufferedTime: 60, mediaID: "a",
+                onPreview: { _ in }, onEditingChanged: { editing.append($0) }, onCommit: { commits.append($0) }))
+        }
+        configure(100)
+        XCTAssertFalse(slider.beginInteraction(at: .nan))
+        XCTAssertTrue(editing.isEmpty)
+        XCTAssertTrue(slider.beginInteraction(at: 369))
+        XCTAssertFalse(slider.beginInteraction(at: 100), "One physical touch has exactly one editing lifecycle")
+        configure(60)
+        slider.finishInteraction()
+        XCTAssertEqual(commits, [60])
+        XCTAssertEqual(slider.value, 1)
+        XCTAssertEqual(editing, [true, false])
+    }
+
+    func testPictureDragKeepsOriginalCallbacksAndResizeCancelsInsteadOfSeeking() {
+        let view = PlayerGestureView()
+        view.frame = CGRect(x: 0, y: 0, width: 400, height: 225)
+        var firstPhases: [PlayerGesturePhase] = []
+        var secondPhases: [PlayerGesturePhase] = []
+        func configuration(_ callback: @escaping (PlayerGesturePhase) -> Void) -> PlayerGestureSurface {
+            PlayerGestureSurface(activeBounds: view.bounds, controlsVisible: false, isEnabled: true,
+                onReveal: {}, onToggleControls: {}, onSkip: { _ in },
+                onScrub: { _, phase in callback(phase) }, onHold: { _ in })
+        }
+        view.configure(configuration { firstPhases.append($0) })
+        view.layoutIfNeeded()
+        view.handlePan(translation: 5, phase: .began)
+        view.configure(configuration { secondPhases.append($0) })
+        view.handlePan(translation: 40, phase: .changed)
+        view.frame.size.width = 300
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        view.handlePan(translation: 50, phase: .ended)
+        XCTAssertEqual(firstPhases, [.began, .changed, .cancelled])
+        XCTAssertTrue(secondPhases.isEmpty, "A changing view must not steal the old gesture's final callback")
+        view.handlePan(translation: 5, phase: .began)
+        view.handlePan(translation: 10, phase: .ended)
+        XCTAssertEqual(secondPhases, [.began, .ended], "Fresh gestures use the new viewport configuration")
+    }
+
+    func testSidebarResizeRestoresTemporaryRateOnlyOnce() {
+        let view = PlayerGestureView()
+        view.frame = CGRect(x: 0, y: 0, width: 400, height: 225)
+        var holding: [Bool] = []
+        view.configure(PlayerGestureSurface(activeBounds: view.bounds, controlsVisible: false, isEnabled: true,
+            onReveal: {}, onToggleControls: {}, onSkip: { _ in }, onScrub: { _, _ in },
+            onHold: { holding.append($0) }))
+        view.handleHold(active: true)
+        view.frame.size.height = 300
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        view.handleHold(active: false)
+        view.cancelInteractions()
+        XCTAssertEqual(holding, [true, false])
+    }
+
 }

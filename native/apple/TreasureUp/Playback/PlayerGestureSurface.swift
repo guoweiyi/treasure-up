@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-enum PlayerGesturePhase { case began, changed, ended, cancelled }
+enum PlayerGesturePhase: Equatable { case began, changed, ended, cancelled }
 
 /// The recognizers survive controls appearing and disappearing. Only the hit
 /// region changes; a first tap can reveal controls without replacing the
@@ -34,6 +34,9 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     private var lastDoubleTap = Date.distantPast
     private var scrubbing = false
     private var holding = false
+    private var panConfiguration: PlayerGestureSurface?
+    private var holdConfiguration: PlayerGestureSurface?
+    private var interactionSize: CGSize?
     private(set) var singleTap: UITapGestureRecognizer!
     private(set) var doubleTap: UITapGestureRecognizer!
     private(set) var pan: UIPanGestureRecognizer!
@@ -74,6 +77,13 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
         return bounds.contains(point) && activeBounds.contains(point)
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // An iPad sidebar/window resize changes the drag's coordinate system.
+        // A touch from the old viewport may never commit using the new width.
+        if let interactionSize, interactionSize != bounds.size { cancelInteractions() }
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil { cancelInteractions() }
@@ -82,13 +92,18 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     func cancelInteractions() {
         pendingTap?.cancel()
         pendingTap = nil
+        let previousPan = panConfiguration
+        let previousHold = holdConfiguration
+        panConfiguration = nil
+        holdConfiguration = nil
+        interactionSize = nil
         if scrubbing {
             scrubbing = false
-            configuration?.onScrub(0, .cancelled)
+            previousPan?.onScrub(0, .cancelled)
         }
         if holding {
             holding = false
-            configuration?.onHold(false)
+            previousHold?.onHold(false)
         }
         for recognizer in gestureRecognizers ?? [] {
             recognizer.isEnabled = false
@@ -126,36 +141,60 @@ final class PlayerGestureView: UIView, UIGestureRecognizerDelegate {
     @objc private func panned(_ recognizer: UIPanGestureRecognizer) {
         let translation = recognizer.translation(in: self).x
         switch recognizer.state {
+        case .began: handlePan(translation: translation, phase: .began)
+        case .changed: handlePan(translation: translation, phase: .changed)
+        case .ended: handlePan(translation: translation, phase: .ended)
+        case .cancelled, .failed: handlePan(translation: translation, phase: .cancelled)
+        default: break
+        }
+    }
+
+    /// Keep the callbacks/geometry captured when this physical gesture began.
+    /// SwiftUI may replace configuration between any two UIKit touch updates.
+    func handlePan(translation: CGFloat, phase: PlayerGesturePhase) {
+        switch phase {
         case .began:
+            guard configuration?.isEnabled == true, !holding, !scrubbing else { return }
             pendingTap?.cancel()
             scrubbing = true
-            configuration?.onScrub(translation, .began)
+            panConfiguration = configuration
+            interactionSize = bounds.size
+            panConfiguration?.onScrub(translation, .began)
         case .changed where scrubbing:
-            configuration?.onScrub(translation, .changed)
-        case .ended where scrubbing:
+            panConfiguration?.onScrub(translation, .changed)
+        case .ended, .cancelled:
+            guard scrubbing else { return }
+            let previous = panConfiguration
             scrubbing = false
-            configuration?.onScrub(translation, .ended)
-        case .cancelled, .failed:
-            if scrubbing {
-                scrubbing = false
-                configuration?.onScrub(translation, .cancelled)
-            }
+            panConfiguration = nil
+            interactionSize = nil
+            previous?.onScrub(translation, phase)
         default: break
         }
     }
 
     @objc private func held(_ recognizer: UILongPressGestureRecognizer) {
         switch recognizer.state {
-        case .began:
+        case .began: handleHold(active: true)
+        case .ended, .cancelled, .failed: handleHold(active: false)
+        default: break
+        }
+    }
+
+    func handleHold(active: Bool) {
+        if active {
+            guard configuration?.isEnabled == true, !scrubbing, !holding else { return }
             pendingTap?.cancel()
             holding = true
-            configuration?.onHold(true)
-        case .ended, .cancelled, .failed:
-            if holding {
-                holding = false
-                configuration?.onHold(false)
-            }
-        default: break
+            holdConfiguration = configuration
+            interactionSize = bounds.size
+            holdConfiguration?.onHold(true)
+        } else if holding {
+            let previous = holdConfiguration
+            holding = false
+            holdConfiguration = nil
+            interactionSize = nil
+            previous?.onHold(false)
         }
     }
 

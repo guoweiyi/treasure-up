@@ -116,6 +116,136 @@ final class NativeOverlayPerformanceTests: XCTestCase {
         XCTAssertEqual(text.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, .red)
     }
 
+    func testNativeClockReusesItsLinkPausesAndReleasesAfterLeavingTheWindow() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1024, height: 768))
+        let view = NativeTimedOverlayView(frame: CGRect(x: 0, y: 0, width: 640, height: 360))
+        window.addSubview(view)
+        let archive = Self.largeArchive
+        view.configure(danmaku: archive, subtitles: [], time: 0.5, playing: true, timeProvider: { 0.5 })
+        XCTAssertTrue(view.isAnimationRunning)
+        XCTAssertEqual(view.animationFrameRate, 60)
+        XCTAssertEqual(view.displayLinkCreationCount, 1)
+        for _ in 0..<30 {
+            view.configure(danmaku: archive, subtitles: [], time: 0.5, playing: false, timeProvider: { 0.5 })
+            XCTAssertFalse(view.isAnimationRunning, "Paused/background overlays must stop animation work")
+            view.configure(danmaku: archive, subtitles: [], time: 0.5, playing: true, timeProvider: { 0.5 })
+        }
+        XCTAssertEqual(view.displayLinkCreationCount, 1, "Transport toggles reuse the clock instead of rescheduling links")
+        view.configure(danmaku: archive, subtitles: [], time: 0.5, reduceMotion: true,
+                       playing: true, timeProvider: { 0.5 })
+        XCTAssertEqual(view.animationFrameRate, 10)
+        view.configure(danmaku: [], subtitles: [], time: 0.5, playing: true, timeProvider: { 0.5 })
+        XCTAssertFalse(view.isAnimationRunning)
+        XCTAssertEqual(view.danmakuView.cachedCueCount, 0)
+        view.removeFromSuperview()
+        XCTAssertFalse(view.isAnimationRunning)
+        XCTAssertEqual(view.animationFrameRate, 0, "Offscreen overlays invalidate their run-loop registration")
+    }
+
+    func testNativeFramesKeepSubtitleLayoutAndDanmakuGlyphsCached() {
+        let view = NativeTimedOverlayView(frame: CGRect(x: 0, y: 0, width: 1000, height: 560))
+        let subtitles = [NativeSubtitleCue(start: 0, end: 2.5, text: "原生字幕\nNative subtitle"),
+                         NativeSubtitleCue(start: 3, end: 4, text: "下一句")]
+        view.configure(danmaku: Self.largeArchive, subtitles: subtitles, time: 0,
+                       playing: false, timeProvider: { 0 })
+        view.layoutIfNeeded()
+        let hostTime = CACurrentMediaTime() + 1
+        for frame in 0..<120 {
+            view.renderFrame(time: Double(frame) / 60, hostTime: hostTime + Double(frame) / 60)
+        }
+        XCTAssertEqual(view.danmakuView.textPreparationCount, 8)
+        XCTAssertEqual(view.subtitleAssignmentCount, 1, "A steady subtitle must not reassign text/layout at 60 Hz")
+        XCTAssertEqual(view.displayedSubtitleText, "原生字幕\nNative subtitle")
+        view.renderFrame(time: 2.5, hostTime: hostTime + 3)
+        XCTAssertEqual(view.displayedSubtitleText, "")
+        view.renderFrame(time: 3.5, hostTime: hostTime + 4)
+        XCTAssertEqual(view.displayedSubtitleText, "下一句")
+        view.configure(danmaku: [], subtitles: subtitles, time: 1,
+                       playing: false, timeProvider: { 1 })
+        XCTAssertEqual(view.displayedSubtitleText, "原生字幕\nNative subtitle", "A paused backward seek updates immediately")
+        view.configure(danmaku: [], subtitles: [NativeSubtitleCue(start: 0, end: 2.5, text: "替换字幕")],
+                       time: 1, playing: false, timeProvider: { 1 })
+        XCTAssertEqual(view.displayedSubtitleText, "替换字幕", "Switching tracks with identical timestamps replaces text")
+        view.stop()
+        XCTAssertEqual(view.displayedSubtitleText, "")
+        XCTAssertFalse(view.isAnimationRunning)
+    }
+
+    func testDisplayLinkTargetDoesNotRetainDetachedOverlay() {
+        weak var releasedView: NativeTimedOverlayView?
+        autoreleasepool {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1024, height: 768))
+            let view = NativeTimedOverlayView(frame: window.bounds)
+            releasedView = view
+            window.addSubview(view)
+            view.configure(danmaku: Self.largeArchive, subtitles: [], time: 0.5,
+                           playing: true, timeProvider: { 0.5 })
+            XCTAssertTrue(view.isAnimationRunning)
+            view.removeFromSuperview()
+            XCTAssertFalse(view.isAnimationRunning)
+            XCTAssertEqual(view.animationFrameRate, 0, "Leaving the window removes the run-loop registration")
+        }
+        // UIKit may autorelease a recently detached view. The assertion belongs
+        // outside that pool, while still rejecting any persistent link cycle.
+        XCTAssertNil(releasedView)
+    }
+
+    func testSubtitleFramesAvoidFullscreenCutoutsAndTransportDuringResize() throws {
+        let view = NativeTimedOverlayView(frame: CGRect(x: 0, y: 0, width: 852, height: 393))
+        let cue = NativeSubtitleCue(start: 0, end: 10,
+            text: "这是一段用于验证宽度约束与多行排版的离线字幕，需要在刘海和底部播放控件以内显示。")
+        let landscape = UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 20)
+        view.configure(danmaku: [], subtitles: [cue], time: 1, controlsVisible: true,
+                       safeAreaInsets: landscape, playing: false, timeProvider: { 1 })
+        view.layoutIfNeeded()
+        let label = try XCTUnwrap(view.subviews.flatMap(\.subviews).compactMap { $0 as? UILabel }.first)
+        func assertInside(_ insets: UIEdgeInsets, controls: Bool, file: StaticString = #filePath, line: UInt = #line) {
+            let actual = label.convert(label.bounds, to: view)
+            let bottomReservation = controls ? max(3, insets.bottom) + 88 : insets.bottom
+            XCTAssertFalse(actual.isEmpty, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(actual.minX, insets.left + 24, file: file, line: line)
+            XCTAssertLessThanOrEqual(actual.maxX, view.bounds.width - insets.right - 24, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(actual.minY, insets.top, file: file, line: line)
+            XCTAssertLessThanOrEqual(actual.maxY, view.bounds.height - bottomReservation - 8, file: file, line: line)
+        }
+        assertInside(landscape, controls: true)
+        let assignments = view.subtitleAssignmentCount
+        let portrait = UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
+        view.frame.size = CGSize(width: 393, height: 852)
+        view.configure(danmaku: [], subtitles: [cue], time: 1, controlsVisible: true,
+                       safeAreaInsets: portrait, playing: false, timeProvider: { 1 })
+        view.layoutIfNeeded()
+        assertInside(portrait, controls: true)
+        view.configure(danmaku: [], subtitles: [cue], time: 1, controlsVisible: false,
+                       safeAreaInsets: portrait, playing: false, timeProvider: { 1 })
+        view.layoutIfNeeded()
+        assertInside(portrait, controls: false)
+        XCTAssertEqual(view.subtitleAssignmentCount, assignments, "Resizing updates constraints without reassigning identical subtitle text")
+    }
+
+    func testInlineSubtitleDoesNotApplyAncestorSafeAreaTwiceAfterReturningFromFullscreen() throws {
+        let inherited = UIEdgeInsets(top: 106, left: 24, bottom: 34, right: 24)
+        let inline = NativeSubtitleLayout.safeAreaInsets(isExpanded: false, reported: inherited)
+        XCTAssertEqual(inline, .zero)
+        XCTAssertEqual(NativeSubtitleLayout.safeAreaInsets(isExpanded: true, reported: inherited), inherited)
+        let view = NativeTimedOverlayView(frame: CGRect(x: 0, y: 0, width: 852, height: 393))
+        let cues = [NativeSubtitleCue(start: 0, end: 10, text: "内联字幕")]
+        view.configure(danmaku: [], subtitles: cues, time: 1, controlsVisible: true,
+                       safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+                       playing: false, timeProvider: { 1 })
+        view.layoutIfNeeded()
+        view.frame.size = CGSize(width: 393, height: 221)
+        view.configure(danmaku: [], subtitles: cues, time: 1, controlsVisible: true,
+                       safeAreaInsets: inline, playing: false, timeProvider: { 1 })
+        view.layoutIfNeeded()
+        let label = try XCTUnwrap(view.subviews.flatMap(\.subviews).compactMap { $0 as? UILabel }.first)
+        let actual = label.convert(label.bounds, to: view)
+        XCTAssertGreaterThan(actual.minY, 50)
+        XCTAssertLessThanOrEqual(actual.maxY, 221 - 91 - 8)
+        XCTAssertGreaterThan(actual.maxY, 90, "Ancestor bottom padding must not be applied a second time")
+        XCTAssertGreaterThan(actual.width, 0)
+    }
+
     func testCachedLargeArchiveFrameUpdatesPerformance() {
         let archive = Self.largeArchive
         let view = NativeDanmakuOverlayView(frame: CGRect(x: 0, y: 0, width: 640, height: 360))

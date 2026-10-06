@@ -116,9 +116,9 @@ struct VideoDetailView: View {
     }
 
     @ViewBuilder private func sectionContent(_ section: VideoPage, video: ArchiveVideo) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
-            switch section {
-            case .info:
+        switch section {
+        case .info:
+            LazyVStack(alignment: .leading, spacing: 20) {
                 metadata(video)
                 parts(video)
                 RelatedVideosView(videoId: video.id, creatorId: video.creators.first?.id)
@@ -126,12 +126,13 @@ struct VideoDetailView: View {
                     Label("Treasure Up · 开源项目", systemImage: "chevron.left.forwardslash.chevron.right")
                         .font(.footnote)
                 }.padding(.top, 12)
-            case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !fullscreen && isPageVisible)
-            case .queue:
-                PlaybackQueueSection(shouldCancelPlaybackOnDisappear: {
-                    !fullscreen && !savePresented && !loginPresented && !lifetime.isCoveredByPresentation
-                }) { followsPlayback = true }
             }
+        case .comments:
+            VideoCommentsSection(videoId: video.id, isActive: page == .comments && !fullscreen && isPageVisible)
+        case .queue:
+            PlaybackQueueSection(shouldCancelPlaybackOnDisappear: {
+                !fullscreen && !savePresented && !loginPresented && !lifetime.isCoveredByPresentation
+            }) { followsPlayback = true }
         }
     }
 
@@ -209,7 +210,7 @@ struct VideoDetailView: View {
         if let date = video.publishedAt { Text(String(date.prefix(10))) }
     }
     private func parts(_ video: ArchiveVideo) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        LazyVStack(alignment: .leading, spacing: 10) {
             Divider()
             HStack {
                 Text("选集 · \(video.parts.count)").font(.headline)

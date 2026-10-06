@@ -208,23 +208,32 @@ Info.plist 声明音频后台模式，播放器处理锁屏信息、远程指令
 - 全屏进出由 UIKit 完成回调串行管理，快速关闭、退出中再次展开和其他弹层占用都可收敛；实际视频尺寸更新时同步调整方向。页面销毁时只停止它仍持有的视频，不影响后来打开的播放页。
 - 保留独立时钟刷新、弹幕图层复用和后台解码；新面板不订阅每次播放进度。离线测试使用生成的本地媒体和真实 AVPlayer，不访问关闭中的 API 站。
 
+## iPad 布局与加载测速（0.4.3 / build 4）
+
+- 弹幕动画从 SwiftUI 时间轴改为独立的原生 `CADisplayLink`，普通弹幕以 60 Hz 更新已缓存图层的位置；减弱动态效果、仅字幕场景为 10 Hz。字幕仅在文字变化时重新排版，暂停、后台和离屏停止动画。保留现有画质、音轨、字幕、弹幕、队列、HDR / Dolby、PiP 与 AirPlay 入口。
+- iPad 按详情区的实际窗口尺寸布局，竖向窗口为全宽播放器与下方详情，横向窗口使用双栏。播放器和信息区域在同一次布局中放置；键盘出现后详情仍避让键盘，列布局使用未遮挡的窗口形状，避免评论输入时突然变成左右栏。
+- 队列与选集按需创建，单行播放状态不再触发整个队列重建；选项面板和弹幕滑块单独观察状态。iPad 指针移动可唤出控件，悬停控制栏时保持显示。
+- 切换媒体、时长暂时无效或侧栏 / 窗口在拖动中改变尺寸时，取消旧手势和临时倍速，防止旧进度提交到新媒体；VoiceOver 的进度文字按整秒去重。
+- 加载 / 缓冲提示每秒显示一次媒体传输速度，例如 `1.2 MB/s`。使用 AVFoundation 资源请求的实际字节与传输时间，并以访问日志增量回退；并行音视频请求合并时间区间，缓存读不算网络速度，长请求的历史平均值不冒充即时速率。这里只保留最近 5 秒有效样本，没有统计时显示“正在测速喵～”，样本过期显示“等待数据喵～”，本地文件显示“本地媒体喵～”。
+- 测速对象独立于播放器与页面状态，仅加载提示订阅它；不代理媒体、不增加探测下载、不改变原生解码或音频路径。AVFoundation 尚未报告有效统计时无法提前给出数值；API 关闭期间，真实网络测速及设备帧率仍未验证。
+
 ## 当前验收记录
 
 记录日期：2026-10-06。下表中的手动设备记录保留自早期构建；最新一次暂停、全屏和侧栏布局修复按用户要求停止真机交互测试，仅报告本地回归与构建结果，不把早期截图当作最新修复已通过的证据。在线 XCTest UI 冒烟测试本轮没有执行。以下状态只对应已取得的证据。
 
-0.4.2（build 3）本轮仅完成本地代码、模拟器回归和 Release 开发签名构建，没有重新安装或操作真机。API 站关闭期间未访问站点，网络端到端播放与真实设备流畅度仍待恢复条件后验证。
+0.4.3（build 4）使用 Xcode 27 完成 iOS / iPadOS 18.5 离线模拟器回归：两端各 141 项单元测试通过，iPad 6 项 UI 测试通过，iPhone 4 项 UI 测试通过、2 项 iPad 专用测试按条件跳过，共 294 次运行、0 失败。没有重新安装或操作真机。API 站关闭期间未访问站点，网络端到端测速与真实设备帧率仍待恢复条件后验证。
 
 | 项目 | 当前状态 |
 | --- | --- |
 | Core Swift 6 严格并发类型检查 | **通过**；包含 Observation 宏编译 |
-| 集成单元测试 | **通过，iOS / iPadOS 18.5 模拟器各 118 项 / 0 失败**；包含定位取消与末尾状态、暂停时保存实际进度、旧缓冲超时失效、原生触控、全屏快速进出与销毁、宿主连续缩放，以及后台解码和十万条弹幕 / 字幕缓存回归 |
+| 集成单元测试 | **通过，iOS / iPadOS 18.5 模拟器各 141 项 / 0 失败，0.4.3**；覆盖实际字节测速、过期样本、时钟释放、字幕安全区、拖动期间换片与缩放取消、键盘几何，以及原有定位、全屏、后台解码和十万条弹幕 / 字幕缓存回归 |
 | 完整 iOS App 与测试 target | **通过**；Xcode 27 SDK 下 iOS Simulator 构建及集成测试成功；generic iOS 设备架构编译也取得 `BUILD SUCCEEDED`；开发签名与真机运行证据另列于下方 |
 | iPhone 16 Pro / iOS 18.5 模拟器：访客资料库 | **通过手动验收**；访客目录、视频详情、标记为 Dolby Vision 的 P1 播放和切换到 HDR P2 均实际运行；该记录属于早期构建；后续已移除迷你播放器；这不证明模拟器输出 Dolby Vision / HDR |
 | iPhone 16 Pro / iOS 18.5 模拟器：账户与管理 | **通过手动验收**；临时签名构建的密码 UI 登录成功，重启后仍恢复管理员会话，退出登录也已验证；进入管理中心实际读取 9 个视频、17 位 UP 主、2 个收藏夹及 27.32 GB 统计；没有在文档保存凭据 |
 | iPad Pro 11-inch (M4) / iPadOS 18.5 模拟器 | **通过手动验收**；目录、侧栏、横屏双栏详情，以及修正 AVKit 容器后的 HDR P2 实际点播、前进 15 秒、播放中横竖屏切换与右侧分集面板均已确认；分屏 / 窗口缩放仍需进一步验收 |
 | 最新暂停 / 全屏 / 侧栏修复 | **真机交互未复验**；用户要求停止真机操作。新增本地 UIKit 呈现与返回、SwiftUI 宿主连续缩放、播放意图状态回归；不宣称最新按钮触控已获真机验收 |
-| 离线 iPhone UI 点击回归 | **4 项通过 / 0 失败，iOS 18.5**；另 1 项 iPad 专用侧栏测试按条件跳过。本地媒体驱动真实 AVPlayer，验证点选进度、隐藏控件时双击、横向拖动、倍速面板关闭后自动隐藏、按住暂停、连续暂停 / 恢复及横竖视频全屏进出 |
-| 离线 iPad UI 点击回归 | **5 项通过 / 0 失败，iPadOS 18.5**；侧栏收放与缩放后点击、全窗口呈现与返回、竖视频控件、按住暂停超过隐藏阈值、原生进度条 / 双击 / 横向拖动、倍速面板均通过；未把 iPadOS 18 多任务窗口行为视为 iPadOS 26 / 27 已验证 |
+| 离线 iPhone UI 点击回归 | **4 项通过 / 0 失败，iOS 18.5，0.4.3**；另 2 项 iPad 专用侧栏 / 键盘测试按条件跳过。本地媒体驱动真实 AVPlayer，验证点选进度、隐藏控件时双击、横向拖动、倍速面板关闭后自动隐藏、按住暂停、连续暂停 / 恢复及横竖视频全屏进出 |
+| 离线 iPad UI 点击回归 | **6 项通过 / 0 失败，iPadOS 18.5，0.4.3**；侧栏收放、键盘出现及带键盘旋转、全窗口呈现与返回、竖视频控件、按住暂停超过隐藏阈值、原生进度条 / 双击 / 横向拖动、倍速面板均通过；未把该结果视为 iPadOS 26 / 27 Stage Manager 全部窗口场景已验证 |
 | 在线 `NativeSmokeTests` | **本轮未执行**；早期资料库记录来自手动 CUA；本轮自动化交互结果来自上述离线测试 |
 | iOS / iPadOS 26 或 27 运行时 | **iPadOS 27.0 真机已运行**；当前没有可用的 26 / 27 模拟器运行时，不将 27 SDK 编译视为模拟器运行验证 |
 | iPad Air 11-inch (M3) / iPadOS 27.0 真机 | **开发签名、安装与启动通过**；本机 Personal Team 签名构建通过 `devicectl` 完成安装与启动，CUA 实际查看到用户正在播放的原生双栏视频页。此项不证明 HDR / Atmos 输出或后台持续播放 |
@@ -233,7 +242,7 @@ Info.plist 声明音频后台模式，播放器处理锁屏信息、远程指令
 | Atmos / 空间音频实际渲染 | **未验证：需要匹配片源和支持的真实输出路由** |
 | 后台长时播放 / 锁屏控制 / PiP / AirPlay | 已实现原生接入；**设备集成行为未验证** |
 | 远端管理写操作全流程 | **未全面验收**；尤其是备份、迁移、永久删除及权限变更，不能由读取接口或编译成功推定通过 |
-| CI iOS job | [083323e 的远端工作流全部通过](https://github.com/guoweiyi/treasure-up/actions/runs/37326396930)，其中 [iOS job 111818139423 通过](https://github.com/guoweiyi/treasure-up/actions/runs/37326396930/job/111818139423)；这是上一版构建的远端 CI 结果，不包含真机安装或在线 UI 验收 |
+| CI iOS job | [主分支基线 c88bed2 的 iPhone / iPad 工作流通过](https://github.com/guoweiyi/treasure-up/actions/runs/37480344591)；0.4.3 的远端状态以对应提交的 Actions 记录为准，不将基线结果视为新版本已通过 |
 
 交付或发布前，应把上表中的“未验证”替换为具体设备、系统版本、构建版本及运行证据；保留尚未取得证据的限制说明。
 
@@ -241,6 +250,8 @@ Info.plist 声明音频后台模式，播放器处理锁屏信息、远程指令
 
 - [Adopting Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)：系统组件与玻璃材质的适配。
 - [AVPlayerLayer](https://developer.apple.com/documentation/avfoundation/avplayerlayer)：系统原生视频呈现。
+- [AVMetricMediaResourceRequestEvent](https://developer.apple.com/documentation/avfoundation/avmetricmediaresourcerequestevent)：系统媒体下载事务及缓存状态。
+- [AVPlayerItemAccessLogEvent.numberOfBytesTransferred](https://developer.apple.com/documentation/avfoundation/avplayeritemaccesslogevent/numberofbytestransferred)：实际收到的累计字节，用增量计算加载速度。
 - [Adopting Picture in Picture in a Custom Player](https://developer.apple.com/documentation/avkit/adopting-picture-in-picture-in-a-custom-player)：自定义原生控件的公开 PiP 接口。
 - [AVURLAssetHTTPCookiesKey](https://developer.apple.com/documentation/avfoundation/avurlassethttpcookieskey)：向媒体资源传递适用的 HTTP Cookie。
 - [AVAudioSession.renderingMode](https://developer.apple.com/documentation/avfaudio/avaudiosession/renderingmode-swift.property)：读取系统音频渲染模式；部分路由或未活动会话会返回 `notApplicable`，不能当作通用 Atmos 检测器。

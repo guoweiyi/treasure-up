@@ -26,10 +26,12 @@ final class PlayerWaitingState {
 }
 
 struct PlayerWaitingFeedback: View {
+    @Environment(\.scenePhase) private var scenePhase
     let isLoading: Bool
     let isBuffering: Bool
     let wantsPlayback: Bool
     let hasError: Bool
+    let transfer: PlaybackTransferMonitor
     @State private var state = PlayerWaitingState()
 
     private var isWaiting: Bool { !hasError && (isLoading || (isBuffering && wantsPlayback)) }
@@ -39,8 +41,13 @@ struct PlayerWaitingFeedback: View {
             if isWaiting && state.isVisible {
                 HStack(spacing: 10) {
                     ProgressView().tint(.white)
-                    Text(appPrompt(isLoading ? "正在准备视频" : "正在缓冲"))
-                        .font(.caption.weight(.medium))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(appPrompt(isLoading ? "正在准备视频" : "正在缓冲"))
+                            .font(.caption.weight(.medium))
+                        Text(transfer.status.label)
+                            .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.8))
+                            .accessibilityIdentifier("player-transfer-speed")
+                    }
                 }.foregroundStyle(.white).padding(.horizontal, 16).padding(.vertical, 12)
                     .background(.black.opacity(0.65), in: .capsule)
                     .accessibilityIdentifier("player-waiting")
@@ -48,6 +55,13 @@ struct PlayerWaitingFeedback: View {
         }
         .allowsHitTesting(false)
         .onChange(of: isWaiting, initial: true) { _, waiting in state.update(isWaiting: waiting) }
+        .task(id: isWaiting && scenePhase == .active) {
+            guard isWaiting, scenePhase == .active else { return }
+            while !Task.isCancelled {
+                transfer.refresh()
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+        }
         .onDisappear { state.update(isWaiting: false) }
     }
 }

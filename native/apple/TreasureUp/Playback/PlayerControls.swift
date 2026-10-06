@@ -24,6 +24,7 @@ struct InlineNativePlayer: View {
     @State private var holdingSpeed = false
     @State private var controlPressed = false
     @State private var routePickerPresented = false
+    @State private var pointerOverControls = false
 
     private var seekableDuration: Double { coordinator.duration.isFinite ? max(0, coordinator.duration) : 0 }
 
@@ -33,7 +34,7 @@ struct InlineNativePlayer: View {
             let gestureBounds = PlayerGestureMath.gestureBounds(size: geometry.size, insets: controlInsets,
                 controlsVisible: controlsVisible || voiceOver, largeText: dynamicTypeSize.isAccessibilitySize)
             ZStack {
-                NativePlayerView(coordinator: coordinator)
+                NativePlayerView(coordinator: coordinator, isExpanded: isExpanded)
                     .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                     .allowsHitTesting(false)
                 gestureSurface(width: geometry.size.width, bounds: gestureBounds)
@@ -54,7 +55,8 @@ struct InlineNativePlayer: View {
                 PlayerInteractionFeedback(coordinator: coordinator, scrubbing: scrubbing,
                     holdingSpeed: holdingSpeed, feedback: feedback, topInset: controlInsets.top)
                 PlayerWaitingFeedback(isLoading: coordinator.isLoading, isBuffering: coordinator.isBuffering,
-                                      wantsPlayback: coordinator.wantsPlayback, hasError: coordinator.errorMessage != nil)
+                                      wantsPlayback: coordinator.wantsPlayback, hasError: coordinator.errorMessage != nil,
+                                      transfer: coordinator.transferMonitor)
                 if let error = coordinator.errorMessage {
                     VStack(spacing: 10) {
                         Label(appPrompt("播放遇到问题"), systemImage: "exclamationmark.triangle")
@@ -71,11 +73,17 @@ struct InlineNativePlayer: View {
                     Color.black.opacity(0.3).contentShape(Rectangle())
                         .onTapGesture { closePanel() }
                         .accessibilityHidden(true)
-                    inlinePanel(panel, size: geometry.size, insets: controlInsets)
+                    PlayerOptionsPanel(coordinator: coordinator, panel: panel, size: geometry.size, insets: controlInsets,
+                                       onClose: { closePanel() }, onFeedback: { showFeedback($0) })
                         .accessibilityAddTraits(.isModal)
                 }
             }
             .background(.black)
+            .onContinuousHover { phase in
+                // Mouse/trackpad movement reveals controls without publishing
+                // pointer coordinates or rebuilding the view on every move.
+                if case .active = phase, !controlsVisible { revealControls() }
+            }
             .clipped()
             .onAppear {
                 if coordinator.presentation == nil { coordinator.presentation = NativePlaybackPresentation(coordinator: coordinator) }
@@ -155,6 +163,7 @@ struct InlineNativePlayer: View {
             noticeTask?.cancel()
             feedback = nil
             controlPressed = false
+            pointerOverControls = false
             holdingSpeed = false
             resetScrubbing()
             coordinator.endTemporaryRate()
@@ -248,6 +257,7 @@ struct InlineNativePlayer: View {
             }
             .padding(.horizontal, max(8, max(insets.leading, insets.trailing)))
             .padding(.top, max(0, insets.top))
+            .onHover { updatePointerOverControls($0) }
             .background(alignment: .top) {
                 LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
                     .padding(.bottom, -20).allowsHitTesting(false)
@@ -282,6 +292,7 @@ struct InlineNativePlayer: View {
             }
             .padding(.horizontal, max(isExpanded ? 18 : 10, max(insets.leading, insets.trailing)))
             .padding(.bottom, max(3, insets.bottom))
+            .onHover { updatePointerOverControls($0) }
             .background {
                 LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
                     .padding(.top, -28).allowsHitTesting(false)
@@ -311,173 +322,6 @@ struct InlineNativePlayer: View {
                 .font(.caption.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }.accessibilityLabel("分辨率与音轨")
-    }
-
-    private var speedChoices: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8),
-                                count: dynamicTypeSize.isAccessibilitySize ? 2 : 3), spacing: 8) {
-            ForEach([0.5, 0.75, 1, 1.25, 1.5, 2.0], id: \.self) { rate in
-                let selected = abs(Double(coordinator.preferredRate) - rate) < 0.01
-                Button {
-                    coordinator.setRate(Float(rate))
-                    closePanel()
-                    showFeedback("已切换为 \(rate.formatted())×")
-                } label: {
-                    Text("\(rate.formatted())×").font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(selected ? Color.cyan.opacity(0.26) : Color.white.opacity(0.09), in: .rect(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? .cyan : .clear, lineWidth: 1))
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel("\(rate.formatted()) 倍速")
-                .accessibilityAddTraits(selected ? .isSelected : [])
-            }
-        }
-    }
-
-    private var qualityChoices: some View {
-        VStack(spacing: 0) {
-            ForEach(coordinator.variants) { variant in
-                choiceRow(coordinator.variantLabel(variant), selected: coordinator.currentVariant?.id == variant.id) {
-                    closePanel()
-                    Task { await coordinator.selectVariant(variant) }
-                }
-            }
-            if coordinator.variants.isEmpty {
-                Text(appPrompt("暂无其他画质")).font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 12)
-            }
-        }
-    }
-
-    private var subtitleChoices: some View {
-        VStack(spacing: 0) {
-            subtitleChoice("跟随系统", id: "auto")
-            subtitleChoice("关闭", id: "off")
-            ForEach(coordinator.embeddedSubtitleOptions) { option in subtitleChoice(option.title, id: option.id) }
-            ForEach(Array(coordinator.availableSubtitles.enumerated()), id: \.offset) { index, track in
-                subtitleChoice(track.label, id: "sidecar:\(index)")
-            }
-        }
-    }
-
-    private func subtitleChoice(_ title: String, id: String) -> some View {
-        choiceRow(title, selected: coordinator.selectedSubtitle == id) {
-            closePanel()
-            Task { await coordinator.selectSubtitle(id) }
-        }
-    }
-
-    private func choiceRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Text(title).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                if selected { Image(systemName: "checkmark").foregroundStyle(.cyan) }
-            }.font(.subheadline).padding(.vertical, 8).frame(maxWidth: .infinity, minHeight: 44)
-                .contentShape(Rectangle())
-        }.accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private func panelSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                .accessibilityAddTraits(.isHeader)
-            content()
-        }.frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var settingsContent: some View {
-        LazyVStack(alignment: .leading, spacing: 20) {
-            panelSection("播放速度") { speedChoices }
-            panelSection("画质与音轨") { qualityChoices }
-            panelSection("字幕") { subtitleChoices }
-            if !coordinator.audioOptions.isEmpty {
-                panelSection("声音") {
-                    choiceRow("跟随系统", selected: coordinator.selectedAudio == "auto") {
-                        coordinator.selectAudio("auto"); closePanel()
-                    }
-                    ForEach(coordinator.audioOptions) { option in
-                        choiceRow(option.title, selected: coordinator.selectedAudio == option.id) {
-                            coordinator.selectAudio(option.id); closePanel()
-                        }
-                    }
-                }
-            }
-            panelSection("画面与播放") {
-                Toggle("填满画面", isOn: $coordinator.fitToFill).frame(minHeight: 44)
-                Toggle("响度平衡", isOn: $coordinator.loudnessBalance).frame(minHeight: 44)
-                Toggle("允许后台播放", isOn: $coordinator.backgroundPlayback).frame(minHeight: 44)
-            }
-            panelSection("弹幕") {
-                Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled).frame(minHeight: 44)
-                if coordinator.danmakuEnabled {
-                    Text("透明度 \(Int(coordinator.danmakuOpacity * 100))%").font(.subheadline)
-                    Slider(value: $coordinator.danmakuOpacity, in: 0.2...1).frame(minHeight: 44)
-                        .accessibilityLabel("弹幕透明度")
-                    Text("字号 \(Int(coordinator.danmakuFontSize))").font(.subheadline)
-                    Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1).frame(minHeight: 44)
-                        .accessibilityLabel("弹幕字号")
-                }
-            }
-            if !(coordinator.session?.routes.isEmpty ?? true) {
-                panelSection("分发节点") {
-                    choiceRow("自动选择", selected: coordinator.selectedRouteID.isEmpty) {
-                        closePanel(); Task { await coordinator.selectRoute("") }
-                    }
-                    ForEach(coordinator.session?.routes ?? []) { route in
-                        choiceRow(route.name, selected: coordinator.selectedRouteID == route.id) {
-                            closePanel(); Task { await coordinator.selectRoute(route.id) }
-                        }.disabled(route.status == "unavailable")
-                    }
-                }
-            }
-            panelSection("播放信息") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(coordinator.sourceFeatures.joined(separator: " · ")).fontWeight(.medium)
-                    Text(coordinator.deliveryDescription)
-                    Text(coordinator.outputRoute)
-                    Text(coordinator.renderingStatus)
-                    if let message = coordinator.progressWarning ?? coordinator.ancillaryWarning ?? coordinator.statusMessage {
-                        Text(appPrompt(message))
-                    }
-                }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
-        }
-    }
-
-    private func inlinePanel(_ panel: PlayerInlinePanel, size: CGSize, insets: EdgeInsets) -> some View {
-        let geometry = PlayerPanelGeometry(size: size, insets: insets,
-                                           preferredHeight: panel == .speed && !dynamicTypeSize.isAccessibilitySize ? 188 : 420)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(panel.title).font(.headline).lineLimit(1)
-                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 0)
-                controlButton("关闭", symbol: "xmark") { closePanel() }
-                    .accessibilityIdentifier("player-panel-close")
-            }.frame(height: 44)
-            ScrollView {
-                Group {
-                    switch panel {
-                    case .speed: speedChoices
-                    case .quality: qualityChoices
-                    case .settings: settingsContent
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.scrollBounceBehavior(.basedOnSize)
-        }
-        .padding(12)
-        .frame(width: geometry.panelSize.width, height: geometry.panelSize.height)
-        .background(.regularMaterial, in: .rect(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.1), lineWidth: 1))
-        .foregroundStyle(.white).tint(.cyan).buttonStyle(.plain)
-        .environment(\.colorScheme, .dark)
-        .padding(.leading, geometry.insets.leading).padding(.trailing, geometry.insets.trailing)
-        .padding(.top, geometry.insets.top).padding(.bottom, geometry.insets.bottom)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("player-options-panel")
-        .accessibilityAction(.escape) { closePanel() }
     }
 
     private func controlButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
@@ -512,7 +356,13 @@ struct InlineNativePlayer: View {
     private var permitsAutoHide: Bool {
         scenePhase == .active && controlsVisible && coordinator.wantsPlayback && coordinator.errorMessage == nil &&
         !coordinator.isLoading && !coordinator.isBuffering && !coordinator.isSeeking && !voiceOver && !holdingSpeed &&
-        !controlPressed && !routePickerPresented && !scrubbing.isSliderEditing && scrubbing.gestureStartTime == nil && panel == nil
+        !controlPressed && !pointerOverControls && !routePickerPresented && !scrubbing.isSliderEditing && scrubbing.gestureStartTime == nil && panel == nil
+    }
+    private func updatePointerOverControls(_ inside: Bool) {
+        guard pointerOverControls != inside else { return }
+        pointerOverControls = inside
+        if inside { hideTask?.cancel() }
+        else { scheduleHide() }
     }
     private func scheduleHide() {
         hideTask?.cancel()
@@ -524,6 +374,198 @@ struct InlineNativePlayer: View {
         }
     }
 }
+
+/// Settings have their own observation boundary: editing a continuous option
+/// must not rebuild the video surface, gesture bridge or transport controls.
+private struct PlayerOptionsPanel: View {
+    @Bindable var coordinator: PlaybackCoordinator
+    let panel: PlayerInlinePanel
+    let size: CGSize
+    let insets: EdgeInsets
+    let onClose: () -> Void
+    let onFeedback: (String) -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var speedChoices: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8),
+                                count: dynamicTypeSize.isAccessibilitySize ? 2 : 3), spacing: 8) {
+            ForEach([0.5, 0.75, 1, 1.25, 1.5, 2.0], id: \.self) { rate in
+                let selected = abs(Double(coordinator.preferredRate) - rate) < 0.01
+                Button {
+                    coordinator.setRate(Float(rate))
+                    onClose()
+                    onFeedback("已切换为 \(rate.formatted())×")
+                } label: {
+                    Text("\(rate.formatted())×").font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(selected ? Color.cyan.opacity(0.26) : Color.white.opacity(0.09), in: .rect(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? .cyan : .clear, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("\(rate.formatted()) 倍速")
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+
+    private var qualityChoices: some View {
+        VStack(spacing: 0) {
+            ForEach(coordinator.variants) { variant in
+                choiceRow(coordinator.variantLabel(variant), selected: coordinator.currentVariant?.id == variant.id) {
+                    onClose()
+                    Task { await coordinator.selectVariant(variant) }
+                }
+            }
+            if coordinator.variants.isEmpty {
+                Text(appPrompt("暂无其他画质")).font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 12)
+            }
+        }
+    }
+
+    private var subtitleChoices: some View {
+        VStack(spacing: 0) {
+            subtitleChoice("跟随系统", id: "auto")
+            subtitleChoice("关闭", id: "off")
+            ForEach(coordinator.embeddedSubtitleOptions) { option in subtitleChoice(option.title, id: option.id) }
+            ForEach(Array(coordinator.availableSubtitles.enumerated()), id: \.offset) { index, track in
+                subtitleChoice(track.label, id: "sidecar:\(index)")
+            }
+        }
+    }
+
+    private func subtitleChoice(_ title: String, id: String) -> some View {
+        choiceRow(title, selected: coordinator.selectedSubtitle == id) {
+            onClose()
+            Task { await coordinator.selectSubtitle(id) }
+        }
+    }
+
+    private func choiceRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Text(title).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                if selected { Image(systemName: "checkmark").foregroundStyle(.cyan) }
+            }.font(.subheadline).padding(.vertical, 8).frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }.accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func panelSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            content()
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var settingsContent: some View {
+        LazyVStack(alignment: .leading, spacing: 20) {
+            panelSection("播放速度") { speedChoices }
+            panelSection("画质与音轨") { qualityChoices }
+            panelSection("字幕") { subtitleChoices }
+            if !coordinator.audioOptions.isEmpty {
+                panelSection("声音") {
+                    choiceRow("跟随系统", selected: coordinator.selectedAudio == "auto") {
+                        coordinator.selectAudio("auto"); onClose()
+                    }
+                    ForEach(coordinator.audioOptions) { option in
+                        choiceRow(option.title, selected: coordinator.selectedAudio == option.id) {
+                            coordinator.selectAudio(option.id); onClose()
+                        }
+                    }
+                }
+            }
+            panelSection("画面与播放") {
+                Toggle("填满画面", isOn: $coordinator.fitToFill).frame(minHeight: 44)
+                Toggle("响度平衡", isOn: $coordinator.loudnessBalance).frame(minHeight: 44)
+                Toggle("允许后台播放", isOn: $coordinator.backgroundPlayback).frame(minHeight: 44)
+            }
+            panelSection("弹幕") {
+                PlayerDanmakuOptions(coordinator: coordinator)
+            }
+            if !(coordinator.session?.routes.isEmpty ?? true) {
+                panelSection("分发节点") {
+                    choiceRow("自动选择", selected: coordinator.selectedRouteID.isEmpty) {
+                        onClose(); Task { await coordinator.selectRoute("") }
+                    }
+                    ForEach(coordinator.session?.routes ?? []) { route in
+                        choiceRow(route.name, selected: coordinator.selectedRouteID == route.id) {
+                            onClose(); Task { await coordinator.selectRoute(route.id) }
+                        }.disabled(route.status == "unavailable")
+                    }
+                }
+            }
+            panelSection("播放信息") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(coordinator.sourceFeatures.joined(separator: " · ")).fontWeight(.medium)
+                    Text(coordinator.deliveryDescription)
+                    Text(coordinator.outputRoute)
+                    Text(coordinator.renderingStatus)
+                    if let message = coordinator.progressWarning ?? coordinator.ancillaryWarning ?? coordinator.statusMessage {
+                        Text(appPrompt(message))
+                    }
+                }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        }
+    }
+
+    var body: some View {
+        let geometry = PlayerPanelGeometry(size: size, insets: insets,
+                                           preferredHeight: panel == .speed && !dynamicTypeSize.isAccessibilitySize ? 188 : 420)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(panel.title).font(.headline).lineLimit(1)
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 0)
+                Button(action: onClose) {
+                    Image(systemName: "xmark").frame(width: 44, height: 44).contentShape(Rectangle())
+                }.accessibilityLabel("关闭").hoverEffect(.highlight)
+                    .accessibilityIdentifier("player-panel-close")
+            }.frame(height: 44)
+            ScrollView {
+                Group {
+                    switch panel {
+                    case .speed: speedChoices
+                    case .quality: qualityChoices
+                    case .settings: settingsContent
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.scrollBounceBehavior(.basedOnSize)
+        }
+        .padding(12)
+        .frame(width: geometry.panelSize.width, height: geometry.panelSize.height)
+        .background(.regularMaterial, in: .rect(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.1), lineWidth: 1))
+        .foregroundStyle(.white).tint(.cyan).buttonStyle(.plain)
+        .environment(\.colorScheme, .dark)
+        .padding(.leading, geometry.insets.leading).padding(.trailing, geometry.insets.trailing)
+        .padding(.top, geometry.insets.top).padding(.bottom, geometry.insets.bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player-options-panel")
+        .accessibilityAction(.escape) { onClose() }
+    }
+}
+
+private struct PlayerDanmakuOptions: View {
+    @Bindable var coordinator: PlaybackCoordinator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled).frame(minHeight: 44)
+            if coordinator.danmakuEnabled {
+                Text("透明度 \(Int(coordinator.danmakuOpacity * 100))%").font(.subheadline)
+                Slider(value: $coordinator.danmakuOpacity, in: 0.2...1).frame(minHeight: 44)
+                    .accessibilityLabel("弹幕透明度")
+                Text("字号 \(Int(coordinator.danmakuFontSize))").font(.subheadline)
+                Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1).frame(minHeight: 44)
+                    .accessibilityLabel("弹幕字号")
+            }
+        }
+    }
+}
+
 
 private enum PlayerInlinePanel {
     case speed, quality, settings
@@ -660,6 +702,7 @@ private struct PlayerOverlayButtonStyle: ButtonStyle {
         configuration.label
             .contentShape(Rectangle())
             .opacity(configuration.isPressed ? 0.6 : 1)
+            .hoverEffect(.highlight)
             .onChange(of: configuration.isPressed) { _, pressed in
                 onPressChanged(pressed)
             }
