@@ -60,6 +60,21 @@ def test_token_is_one_time_hash_only_scoped_and_cookie_independent(context):
     assert db.scalar(select(func.count()).select_from(Job)) == 2
 
 
+def test_connection_status_accepts_older_partial_policy_without_leaking_private_fields(context):
+    client, db, _ = context
+    _, item, token = setup_token(context)
+    stored = db.get(IntegrationToken, item["id"])
+    stored.policy = {"quality": "720p", "fetch_comments": False, "private_field": "NOT-FOR-BROWSER"}
+    db.commit()
+    response = client.get(STATUS, headers=bearer(token))
+    assert response.status_code == 200, response.text
+    policy = response.json()["policy"]
+    assert policy["quality"] == "720p" and policy["fetch_comments"] is False
+    assert policy["download_media"] is True
+    assert set(policy) == {"quality", "download_media", "fetch_comments", "fetch_danmaku", "fetch_subtitles"}
+    assert "NOT-FOR-BROWSER" not in response.text
+
+
 @pytest.mark.parametrize("body", [
     {"bvids": ["https://127.0.0.1/admin"]}, {"bvids": ["file:///etc/passwd"]},
     {"bvids": ["BV1234567890 " ]}, {"bvids": []}, {"bvids": ["BV1234567890"] * 51},

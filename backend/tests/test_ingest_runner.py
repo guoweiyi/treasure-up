@@ -43,6 +43,7 @@ class FakeClient:
     def __init__(self, *args, **kwargs): pass
     def close(self): pass
     def nav(self): return {"isLogin": True, "mid": "123", "vip": {"status": 1}}
+    def tags(self, bvid): return []
 
 
 def test_account_rotation_is_read_after_acquiring_account_lock(db, monkeypatch):
@@ -238,7 +239,8 @@ def test_danmaku_resume_raw_assets_and_subtitles(db, monkeypatch):
     monkeypatch.setattr(runner, "BiliClient", Source)
     policy = {"media": False, "comments": False, "profiles": False, "images": False, "request_budget": 1}
     job = setup(db, "archive_video", "BV1234567890", policy)
-    assert [runner.run_job(db, job)["continuation"] for _ in range(4)] == [True, True, True, False]
+    # The resumable tag API request has its own slot after the initial basics.
+    assert [runner.run_job(db, job)["continuation"] for _ in range(5)] == [True, True, True, True, False]
     assert calls == [1, 2]
     snapshot = db.scalar(select(DanmakuSnapshot))
     assert snapshot.completed_segments == 2 and snapshot.status == "visible_traversal_complete"

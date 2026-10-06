@@ -429,6 +429,8 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             restored.execute(delete(PasskeyChallenge))
             restored.execute(delete(PasskeyAttempt))
             restored.execute(delete(UserSession))
+            from app.models import IdentityToken
+            restored.execute(delete(IdentityToken))
             restored.execute(delete(PlaybackSession))
             for token in restored.scalars(select(IntegrationToken).where(IntegrationToken.revoked_at.is_(None))):
                 token.revoked_at = utcnow()

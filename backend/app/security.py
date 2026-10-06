@@ -39,7 +39,8 @@ def reserve_password_attempt(db, request):
             LoginAttempt.succeeded.is_(False)))
         if failures >= settings.login_limit:
             db.rollback()
-            raise HTTPException(429, "登录尝试过于频繁，请稍后再试")
+            raise HTTPException(429, "登录尝试过于频繁，请稍后再试",
+                                headers={"Retry-After": str(settings.login_window_seconds)})
         # Reserve before scrypt so concurrent requests cannot all see free quota.
         attempt = LoginAttempt(client_hash=digest, succeeded=False)
         db.add(attempt)

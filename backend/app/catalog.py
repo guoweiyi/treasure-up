@@ -117,7 +117,9 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
     result = {"id": video.id, "bvid": video.bvid, "title": effective(note.title_override if note else None, video.title),
               "source_title": video.title, "description": effective(note.description_override if note else None, video.description),
               "duration": video.duration, "cover_url": asset_url(video.cover_asset_id), "creators": people,
-              "tags": note.tags if note else [], "starred": note.starred if note else False,
+              "tags": list(dict.fromkeys([*(video.source_tags or []), *((note.tags or []) if note else [])])),
+              "source_tags": video.source_tags or [], "manual_tags": (note.tags or []) if note else [],
+              "starred": note.starred if note else False,
               "parts_count": len(parts), "playable": bool(variants), "capture_status": video.capture_status,
               "created_at": video.created_at}
     result["stats"] = {**{key: None for key in ("view", "like", "coin", "favorite", "share", "reply", "danmaku")},
@@ -175,6 +177,9 @@ def comment_views(db, rows):
     snapshots = {snapshot.id: snapshot for snapshot in db.scalars(select(UserSnapshot)
                  .where(UserSnapshot.id.in_({comment.author_snapshot_id for comment in rows if comment.author_snapshot_id})))}
     creators = {creator.user_id: creator for creator in db.scalars(select(Creator).where(Creator.user_id.in_(list(users))))}
+    owners = set(db.execute(select(VideoCreator.video_id, Creator.user_id)
+        .join(Creator, Creator.id == VideoCreator.creator_id)
+        .where(VideoCreator.video_id.in_({comment.video_id for comment in rows}), VideoCreator.role == "owner")))
     images, emotes = defaultdict(list), defaultdict(list)
     for image in db.scalars(select(CommentAsset).where(CommentAsset.comment_id.in_([comment.id for comment in rows]))
                            .order_by(CommentAsset.position)):
@@ -183,10 +188,11 @@ def comment_views(db, rows):
         elif image.kind == "emote":
             emotes[image.comment_id].append(image.asset_id)
     return [_comment_view(comment, users.get(comment.author_user_id), snapshots.get(comment.author_snapshot_id),
-                          creators.get(comment.author_user_id), images[comment.id], emotes[comment.id]) for comment in rows]
+                          creators.get(comment.author_user_id), images[comment.id], emotes[comment.id],
+                          is_uploader=(comment.video_id, comment.author_user_id) in owners) for comment in rows]
 
 
-def _comment_view(comment, user, snapshot, creator, images, emote_ids=()):
+def _comment_view(comment, user, snapshot, creator, images, emote_ids=(), *, is_uploader=False):
     avatar = snapshot.avatar_asset_id if snapshot else user.avatar_asset_id if user else None
     allowed, inline, seen = set(emote_ids), [], set()
     manifest = (comment.raw or {}).get("asset_manifest", [])
@@ -206,7 +212,7 @@ def _comment_view(comment, user, snapshot, creator, images, emote_ids=()):
             seen.add(token)
     return {"id": comment.id, "rpid": comment.rpid, "root_rpid": comment.root_rpid, "parent_rpid": comment.parent_rpid,
             "content": comment.content, "posted_at": comment.posted_at, "like_count": comment.like_count,
-            "reply_count": comment.reply_count,
+            "reply_count": comment.reply_count, "is_pinned": bool(comment.is_pinned), "is_uploader": is_uploader,
             "author": {"uid": user.uid if user else None,
                        "name": snapshot.display_name if snapshot else user.display_name if user else "未知作者",
                        "avatar_url": asset_url(avatar), "creator_id": creator.id if creator else None},

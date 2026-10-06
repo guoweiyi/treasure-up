@@ -57,7 +57,7 @@ onBeforeUnmount(() => {
     <div class="section-heading comments-heading">
       <h2 title="评论和点赞数为归档时快照。展开回复只读取本地保存的内容。">
         {{ appliedQuery ? '评论搜索结果' : '评论' }} <span class="muted">{{ state.total }}</span
-        ><small class="comment-sort-label">按热度</small>
+        ><small class="comment-sort-label">置顶优先 · 按热度</small>
       </h2>
       <form class="search-form compact" @submit.prevent="search">
         <input

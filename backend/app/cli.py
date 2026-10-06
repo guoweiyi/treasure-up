@@ -10,18 +10,27 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import Setting, StorageProfile, User
+from app.models import IdentityToken, Setting, StorageProfile, User
 from app.schemas import BackupSettings, DisplaySettings, IngestPolicy, PlaybackSettings, StatisticsSettings
 from app.security import hash_password
+
+
+def ensure_initial_admin(db):
+    """An upgrade never needs the old bootstrap password or silently creates a second owner."""
+    if db.scalar(select(User.id).where(User.role == "admin").limit(1)):
+        return False
+    if not settings.admin_password:
+        raise RuntimeError("首次初始化需要 TREASURE_ADMIN_PASSWORD；运行 python deploy/start.py 可自动生成本地配置")
+    if db.scalar(select(User.id).where(User.username == settings.admin_username)):
+        raise RuntimeError("初始管理员用户名已被占用，请使用现有管理员恢复流程")
+    db.add(User(username=settings.admin_username, password_hash=hash_password(settings.admin_password), role="admin"))
+    return True
 
 
 def initialize():
     if settings.database_url.startswith("sqlite") and not settings.dev_sqlite:
         raise RuntimeError("生产请配置PostgreSQL；SQLite仅用于显式开发验证")
     Fernet(settings.encryption_key().encode())
-    if not settings.admin_password:
-        raise RuntimeError("首次初始化需要TREASURE_ADMIN_PASSWORD，请在本地部署环境中设置")
-    password_hash = hash_password(settings.admin_password)
     settings.media_root.mkdir(parents=True, exist_ok=True)
     settings.scratch_dir.mkdir(parents=True, exist_ok=True)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -29,8 +38,7 @@ def initialize():
     with SessionLocal() as db:
         from app.storage.service import lock_storage_configuration
         lock_storage_configuration(db)
-        if not db.scalar(select(User).where(User.username == settings.admin_username)):
-            db.add(User(username=settings.admin_username, password_hash=password_hash, role="admin"))
+        ensure_initial_admin(db)
         if not db.scalar(select(StorageProfile.id).limit(1)):
             db.add(StorageProfile(name="本地媒体库", kind="local", config={"root": str(settings.media_root.resolve())}, is_default=True))
         for key, value in {"display": DisplaySettings().model_dump(), "ingest": IngestPolicy().model_dump(), "backup": BackupSettings().model_dump(),
@@ -89,6 +97,7 @@ def main():
                 raise RuntimeError("账号不存在")
             user.password_hash = hash_password(value)
             db.execute(delete(UserSession).where(UserSession.user_id == user.id))
+            db.execute(delete(IdentityToken).where(IdentityToken.user_id == user.id))
             db.commit()
         print("密码已更新，旧会话已撤销")
     elif args.command == "backup":

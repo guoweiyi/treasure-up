@@ -31,6 +31,7 @@ final class APIClient {
     private(set) var siteName = "Treasure Up"
     private(set) var isConnected = false
     private(set) var defaultDanmaku = true
+    private(set) var allowGuestAccess = false
     private(set) var sessionRevision = 0
     private(set) var persistenceWarning: String?
 
@@ -90,6 +91,7 @@ final class APIClient {
             }
             siteName = "Treasure Up"
             defaultDanmaku = true
+            allowGuestAccess = false
         }
         defaults.set(candidate.absoluteString, forKey: Self.serverDefaultsKey)
         isConnected = true
@@ -107,7 +109,7 @@ final class APIClient {
             let envelope: SessionEnvelope = try await get("/auth/me")
             apply(envelope)
         } catch let error as APIError where error.status == 401 {
-            // Public catalog and guest playback remain available without an account.
+            // The display policy below decides whether an unsigned-in viewer can browse.
         }
         await loadDisplaySettings()
     }
@@ -145,6 +147,20 @@ final class APIClient {
         do { if persistSession { try vault.clear(for: server) }; persistenceWarning = nil }
         catch { persistenceWarning = error.localizedDescription; if failure == nil { failure = error } }
         if let failure { throw failure }
+    }
+
+    func login(identityToken: String) async throws {
+        let token = identityToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard token.hasPrefix("tul_"), token.count >= 20, token.count <= 256 else {
+            throw APIError.invalidServer("请使用账户安全中生成的身份令牌，采集令牌不能用于登录。")
+        }
+        connectionRevision += 1
+        resetMemory()
+        if persistSession { try vault.clear(for: baseURL) }
+        let envelope: SessionEnvelope = try await send("/auth/token-login", body: ["token": .string(token)])
+        apply(envelope)
+        isConnected = true
+        await loadDisplaySettings()
     }
 
     func get<T: Decodable & Sendable>(_ path: String, query: [String: String] = [:]) async throws -> T {
@@ -300,7 +316,11 @@ final class APIClient {
             let settings: DisplaySettings = try await get("/library/settings")
             siteName = settings.siteName.isEmpty ? "Treasure Up" : settings.siteName
             defaultDanmaku = settings.defaultDanmaku
-        } catch { /* Optional display settings do not invalidate a working API session. */ }
+            allowGuestAccess = settings.allowGuestAccess ?? false
+        } catch {
+            // A stale public policy must not expose a guest navigation surface.
+            allowGuestAccess = false
+        }
     }
 
     static func normalizedServer(_ address: String) throws -> URL {
@@ -377,7 +397,11 @@ final class APIClient {
 
     private struct SessionEnvelope: Decodable, Sendable { var user: ArchiveUser; var csrfToken: String }
     private struct ServerCapabilities: Decodable, Sendable { var application: String; var apiVersion: Int }
-    private struct DisplaySettings: Decodable, Sendable { var siteName: String; var defaultDanmaku: Bool }
+    private struct DisplaySettings: Decodable, Sendable {
+        var siteName: String
+        var defaultDanmaku: Bool
+        var allowGuestAccess: Bool?
+    }
 }
 
 /// Network I/O is asynchronous, but JSONDecoder itself is synchronous. Large

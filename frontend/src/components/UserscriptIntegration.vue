@@ -40,6 +40,11 @@ const issued = ref<{ item: UserscriptToken; token: string } | null>(null);
 const revokedHere = ref(new Set<string>());
 const form = reactive(newUserscriptTokenForm());
 const origin = window.location.origin;
+const scriptVersion = '1.2.0';
+const scriptSource = ref(''),
+  scriptLoading = ref(false),
+  scriptOpen = ref(false);
+const scriptInput = ref<HTMLTextAreaElement>();
 const addressInput = ref<HTMLInputElement>(),
   tokenInput = ref<HTMLTextAreaElement>();
 const clock = ref(Date.now());
@@ -172,6 +177,31 @@ async function copy(value: string, secret = false) {
     else ElMessage.info(message);
   }
 }
+async function copyScript() {
+  if (scriptLoading.value) return;
+  scriptLoading.value = true;
+  try {
+    const response = await fetch('/userscripts/treasure-up.user.js', { cache: 'no-store' });
+    if (!response.ok) throw new Error('无法读取脚本，请确认服务已更新');
+    const source = await response.text();
+    if (source.length > 256_000 || !source.startsWith('// ==UserScript=='))
+      throw new Error('安装文件不完整，请重新构建前端后再试');
+    if (disposed) return;
+    scriptSource.value = source;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(source);
+      if (!disposed)
+        ElMessage.success('完整脚本已复制，在 Tampermonkey「添加新脚本」中替换默认内容并保存');
+    } catch {
+      if (!disposed) scriptOpen.value = true;
+    }
+  } catch (error) {
+    if (!disposed) ElMessage.error(errorText(error));
+  } finally {
+    if (!disposed) scriptLoading.value = false;
+  }
+}
 function tokenState(item: UserscriptToken) {
   return revokedHere.value.has(item.id)
     ? { key: 'revoked', label: '已撤销', usable: false }
@@ -255,6 +285,17 @@ onBeforeUnmount(() => {
             rel="noopener noreferrer"
             >安装选片助手 <span aria-hidden="true">↗</span></a
           >
+          <button
+            class="integration-script-copy"
+            type="button"
+            :disabled="scriptLoading"
+            @click="copyScript"
+          >
+            {{ scriptLoading ? '读取中…' : '复制完整脚本' }}
+          </button>
+          <p class="address-hint">
+            当前版本 {{ scriptVersion }} · 已安装旧版时，请重新打开安装链接更新。
+          </p>
         </div>
       </article>
       <article class="integration-step">
@@ -299,8 +340,13 @@ onBeforeUnmount(() => {
         </li>
         <li>
           <strong>只看见脚本源码：</strong>先确认 Tampermonkey
-          已安装并启用，再重开安装链接；也可在扩展「添加新脚本」中粘贴本站完整脚本并保存。这里只支持
+          已安装并启用，再重开安装链接；也可点击「复制完整脚本」，在扩展「添加新脚本」中替换默认内容并保存。这里只支持
           Tampermonkey，不支持 App 内嵌浏览器。
+        </li>
+        <li>
+          <strong>显示初始化未完成：</strong>点选片入口查看具体原因。如果提示 DOM 隔离，请更新
+          Tampermonkey，并在其「设置 → 安全 → 沙盒模式」允许 DOM 后刷新
+          B站。标签存储失败时仍可提交， 但未提交的选择只保留到当前页面关闭。
         </li>
         <li>
           <strong>有入口，但卡片没有勾选：</strong
@@ -319,6 +365,25 @@ onBeforeUnmount(() => {
         </li>
       </ol>
     </details>
+    <ElDialog
+      v-model="scriptOpen"
+      title="手动安装选片助手"
+      width="680px"
+      @opened="scriptInput?.select()"
+      @closed="scriptSource = ''"
+    >
+      <p>
+        复制下面的全部内容，在 Tampermonkey 的「添加新脚本」中替换默认内容并保存，然后刷新 B站。
+      </p>
+      <textarea
+        ref="scriptInput"
+        :value="scriptSource"
+        readonly
+        rows="12"
+        aria-label="选片助手完整脚本"
+        style="width: 100%; resize: vertical"
+      />
+    </ElDialog>
     <section class="integration-tokens" aria-labelledby="integration-tokens-title">
       <div class="token-heading">
         <div>

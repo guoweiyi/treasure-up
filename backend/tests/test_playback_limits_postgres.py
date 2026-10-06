@@ -13,7 +13,7 @@ from app import delivery_api, playback_limits
 from app.config import settings
 from app.db import get_db
 from app.main import app
-from app.models import PlaybackSession, StorageProfile, User, utcnow
+from app.models import PlaybackSession, Setting, StorageProfile, User, utcnow
 from app.security import COOKIE_NAME, create_session
 from test_delivery_api import seed_media
 from test_passkeys_postgres import _wait_for_postgres_lock_waiters
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(os.environ.get('TREASURE_RUN_POSTGRES_TESTS') !=
 def seed(space):
     with space.sessions() as db:
         user = User(username='playback-limit-user', password_hash='test-only')
-        db.add_all([user, StorageProfile(name='Local', kind='local', is_default=True,
+        db.add_all([user, Setting(key='display', value={'allow_guest_access': True}), StorageProfile(name='Local', kind='local', is_default=True,
                                         config={'root': str(settings.media_root)})])
         db.flush()
         session, token = create_session(db, user)

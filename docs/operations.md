@@ -1,6 +1,6 @@
 # 部署与维护
 
-本文对应当前 0.3 技术预览。默认部署用于本人本机或受保护内网；网站内容可由访客浏览，管理功能仍须授权。公网发布另行验收 HTTPS 与对象存储访问策略。
+本文对应当前 0.3 技术预览。默认部署用于本人本机或受保护内网；默认必须登录，管理员可在系统配置中开启游客浏览，管理功能始终须授权。公网发布另行验收 HTTPS 与对象存储访问策略。
 
 ## 服务与数据
 
@@ -124,7 +124,7 @@ docker compose exec api python -m app.cli reset-password admin
 
 ## HTTPS 和云端上线前验收
 
-默认 Nginx 只服务本机 HTTP。公网部署需配置证书与可信代理，将 `TREASURE_COOKIE_SECURE=true`，并添加真实域名到 `TREASURE_ALLOWED_HOSTS`。外层代理须保留浏览器 `Host` 及非默认端口。内置 Nginx 使用内部连接的 `$scheme`；登录和 CSRF 校验额外接受明确配置的外部 Origin，因此外层终止 TLS、内部 HTTP 转发的部署可通过站点配置支持，不依赖客户端提供的任意 Forwarded 头。当前视频库是访客可读的，未引用的原始采集资产不向访客开放。
+默认 Nginx 只服务本机 HTTP。公网部署需配置证书与可信代理，将 `TREASURE_COOKIE_SECURE=true`，并添加真实域名到 `TREASURE_ALLOWED_HOSTS`。外层代理须保留浏览器 `Host` 及非默认端口。内置 Nginx 使用内部连接的 `$scheme`；登录和 CSRF 校验额外接受明确配置的外部 Origin，因此外层终止 TLS、内部 HTTP 转发的部署可通过站点配置支持，不依赖客户端提供的任意 Forwarded 头。视频库默认私有；显式开启游客访问后，未引用的原始采集资产仍不向访客开放。
 
 首次创建配置可使用 `python deploy/start.py --origin https://video.example.com`；此参数不安装证书、不改变默认回环监听。已有 `.env` 时，普通启动原样保留配置；显式传入 `--origin` 会仅更新站点白名单、Origin、RP ID、Cookie Secure 和通行密钥开关，其他行及密钥不变。默认 `:443` / `:80` 按浏览器规则规范化；非默认端口保留在 Origin 中，但不进入 Host 白名单和 RP ID。手机上的 `localhost` 指手机本身，连接另一台服务器应使用可达的 HTTPS 域名；初始化器不接受 IP 地址作为通行密钥站点。
 
@@ -204,7 +204,7 @@ docker compose up -d --no-deps --no-build --wait api
 
 充电视频使用当前账号的实际授权获取完整播放地址，传输前检查充电权限、试看标志与时长，归档后继续校验媒体时长。权限不足或只返回试看时保留明确错误，不把试看当作完整视频。充电标记与杜比视界、杜比全景声标记独立；杜比标记依据归档文件的 DOVI/RPU 或 JOC 检测。接口实现参考 [yt-dlp 的 Bilibili 提取器](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/bilibili.py)。
 
-“统计更新”默认关闭。选定授权账号并开启后，可设每 1–720 小时刷新全部已保存 BV 视频，默认 6 小时；任务错开入队，遇到源站实际限流时遵守冷却。保存 view / like / coin / favorite / share / reply / danmaku 及观察时间，未知值保留为空，不伪造零。可选重新采集弹幕，默认仅更新计数。统计任务不重新下载音视频，也不自动刷新全部评论与 UP 资料。
+新配置的“统计更新”默认开启，每 6 小时刷新全部已保存 BV 视频，可设 1–720 小时。未指定账号时自动选择已验证有效的账号，无有效账号则等待配置；保留此前已保存的关闭设置。任务错开入队，遇到源站实际限流时遵守冷却。保存 view / like / coin / favorite / share / reply / danmaku 及观察时间，未知值保留为空，不伪造零。同时刷新来源标签，默认在既定数量及素材预算内刷新评论与置顶；重新采集弹幕仍可选。统计任务不重新下载音视频。详见[访问与采集](access-and-capture.md)。
 
 ## 删除本站归档
 

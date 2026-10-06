@@ -26,7 +26,7 @@ const busy = ref(false),
   queued = ref<Row | null>(null),
   accounts = ref<Row[]>([]);
 const form = reactive<Row>({
-  display: { site_name: 'Treasure Up', default_danmaku: true },
+  display: { site_name: 'Treasure Up', default_danmaku: true, allow_guest_access: false },
   ingest: {
     ...commentBudgetDefaults,
     quality: 'best',
@@ -50,7 +50,13 @@ const form = reactive<Row>({
     max_download_bytes: 30000000000,
     max_pages: 100,
   },
-  statistics: { enabled: false, account_id: null, interval_hours: 6, refresh_danmaku: false },
+  statistics: {
+    enabled: true,
+    account_id: null,
+    interval_hours: 6,
+    refresh_danmaku: false,
+    refresh_comments: true,
+  },
   playback: {
     package_long_videos: true,
     min_duration_seconds: 300,
@@ -142,6 +148,13 @@ onMounted(load);
   >
     <section class="admin-panel">
       <h2>网站展示</h2>
+      <el-form-item label="允许未登录用户浏览与播放">
+        <el-switch v-model="form.display.allow_guest_access" />
+        <p class="field-help">
+          默认关闭。开启后，任何可访问此站点的人都能浏览视频、UP
+          主、收藏夹和评论，并播放已保存视频；采集和管理仍需登录。
+        </p>
+      </el-form-item>
       <el-form-item label="网站名称"
         ><el-input v-model="form.display.site_name" maxlength="100" /></el-form-item
       ><el-form-item label="默认显示弹幕"
@@ -200,7 +213,7 @@ onMounted(load);
     </section>
     <section class="admin-panel">
       <div class="section-heading">
-        <h2>统计与弹幕更新</h2>
+        <h2>统计与互动数据更新</h2>
         <el-button :loading="saving" @click="refreshStatistics">立即刷新统计</el-button>
       </div>
       <el-form-item label="定时更新 B 站统计"
@@ -218,10 +231,13 @@ onMounted(load);
           ><el-input-number v-model="form.statistics.interval_hours" :min="1" :max="720"
         /></el-form-item>
       </div>
-      <el-checkbox v-model="form.statistics.refresh_danmaku">更新统计时重新采集弹幕</el-checkbox>
+      <div class="settings-switches">
+        <el-checkbox v-model="form.statistics.refresh_comments">同时更新热门与置顶评论</el-checkbox>
+        <el-checkbox v-model="form.statistics.refresh_danmaku">同时更新弹幕</el-checkbox>
+      </div>
       <p class="field-help">
         更新播放、点赞、投币、收藏等来源统计。此处展示采集时的快照，不会增加 B
-        站播放或互动。定时更新使用已保存的配置；修改后请先保存。
+        站播放或互动。评论沿用上方条数与素材预算。未指定账号时自动选择可用账号；修改后请先保存。
       </p>
     </section>
     <section class="admin-panel">

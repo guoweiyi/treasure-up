@@ -22,7 +22,9 @@ def test_source_free_release_bundle_resolves_registry_images_and_worker_queues(t
     for name in ["compose.yaml", "compose.light.yaml", "compose.registry.yaml", "compose.registry.light.yaml"]:
         shutil.copy2(ROOT / name, tmp_path / name)
     fixture = tmp_path / "fixture.env"
-    fixture.write_text("POSTGRES_PASSWORD=fixture\nTREASURE_ADMIN_PASSWORD=fixture\nTREASURE_SECRET_KEY=fixture\nTREASURE_BACKUP_KEY=fixture\n")
+    # An upgrade must resolve without retaining the initial administrator password.
+    # The application initializer separately requires it for a brand-new database.
+    fixture.write_text("POSTGRES_PASSWORD=fixture\nTREASURE_SECRET_KEY=fixture\nTREASURE_BACKUP_KEY=fixture\n")
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(("TREASURE_", "POSTGRES_", "COMPOSE_"))}
     backend = "ghcr.io/guoweiyi/treasure-up-backend:0.3.2"
@@ -41,6 +43,7 @@ def test_source_free_release_bundle_resolves_registry_images_and_worker_queues(t
                             env=environment, capture_output=True, text=True, encoding="utf-8", check=True)
     resolved = json.loads(result.stdout)
     services = resolved["services"]
+    assert services["init"]["environment"]["TREASURE_ADMIN_PASSWORD"] == ""
     assert resolved["name"] == "treasure-up"
     for name in ["init", "api", "scheduler", "collector", "backup-worker"]:
         assert services[name]["image"] == backend

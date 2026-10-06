@@ -232,6 +232,11 @@ class BiliClient:
             raise IngestError("视频 BV 号无效", code="invalid_video", retryable=False)
         return self.json("/x/web-interface/view", {"bvid": bvid})
 
+    def tags(self, bvid):
+        if not re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid or ""):
+            raise IngestError("视频 BV 号无效", code="invalid_video", retryable=False)
+        return self.json("/x/tag/archive/tags", {"bvid": bvid})
+
     def favorite_page(self, source_id, page):
         return self.json("/x/v3/fav/resource/list", {"media_id": source_id, "pn": page, "ps": 20, "order": "mtime", "type": 0, "tid": 0})
 

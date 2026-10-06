@@ -2,6 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { videoEditorDraft, videoEditorPayload, videoTags } from './videoEditor.ts';
 import { commentBudgetValue } from './commentBudget.ts';
+test('automatic source tags remain separate when an editor saves unrelated metadata', () => {
+  const draft = videoEditorDraft({
+    title: '视频',
+    tags: ['来源标签', '手动'],
+    source_tags: ['来源标签'],
+    manual_tags: ['手动'],
+  });
+  assert.deepEqual(draft.source_tags, ['来源标签']);
+  assert.deepEqual(videoEditorPayload(draft).tags, ['手动']);
+  const inherited = videoEditorDraft({
+    title: '视频',
+    tags: ['来源标签'],
+    source_tags: ['来源标签'],
+    manual_tags: [],
+  });
+  assert.deepEqual(videoEditorPayload(inherited).tags, []);
+});
 test('unchanged visible source fields remain inherited rather than becoming overrides', () => {
   const draft = videoEditorDraft({
     source_title: '来源标题',

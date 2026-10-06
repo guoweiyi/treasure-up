@@ -162,8 +162,11 @@ def _authenticate(db, request):
 @router.get("/integrations/userscript/status")
 def integration_status(request: Request, db: Session = Depends(get_db)):
     token, account = _authenticate(db, request)
+    # Older tokens can predate policy fields added by an upgrade. A missing
+    # optional field must not turn the connection check into HTTP 500.
+    policy = {**IngestPolicy().model_dump(), **(token.policy or {})}
     return {"ok": True, "scope": SCOPE, "max_batch": MAX_BATCH, "account": {"name": account.name},
-        "expires_at": token.expires_at, "policy": {key: token.policy[key] for key in
+        "expires_at": token.expires_at, "policy": {key: policy[key] for key in
             ("quality", "download_media", "fetch_comments", "fetch_danmaku", "fetch_subtitles")}}
 
 

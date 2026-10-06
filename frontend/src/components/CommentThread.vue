@@ -54,6 +54,12 @@ const images = computed(() => commentGalleryImages(props.comment.images));
           :to="`/creators/${comment.author.creator_id}`"
           >{{ comment.author.name || '未知作者' }}</RouterLink
         ><span v-else>{{ comment.author?.name || '未知作者' }}</span>
+        <span v-if="comment.is_uploader" class="comment-badge uploader" title="视频投稿作者"
+          >UP 主</span
+        >
+        <span v-if="comment.is_pinned" class="comment-badge pinned" title="采集时的置顶评论"
+          >置顶</span
+        >
       </div>
       <CommentContent :content="comment.content" :emotes="comment.emotes" />
       <p
@@ -177,10 +183,32 @@ const images = computed(() => commentGalleryImages(props.comment.images));
   border-bottom-color: #edf0f2;
 }
 .comment-author {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
   min-height: 20px;
   color: #61666d;
   font-weight: 500;
   font-size: 13px;
+}
+.comment-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: 500;
+}
+.comment-badge.uploader {
+  color: #b64a64;
+  background: #fceaf0;
+}
+.comment-badge.pinned {
+  color: #647a80;
+  border: 1px solid #c7d5d8;
+  line-height: 14px;
 }
 .comment-author a {
   color: inherit;

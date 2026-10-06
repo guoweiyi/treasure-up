@@ -259,7 +259,7 @@ def test_component_failure_is_not_erased_by_comment_budget_continuation(job_sess
         job = jobs.enqueue(db, "archive_video", video.id, account.id, policy={"request_budget": 2,
             "fetch_danmaku": False, "fetch_subtitles": True, "create_compatible_copy": False, "images": False})
         job.max_attempts = 2
-        job.checkpoint = {"metadata_done": True, "basics_done": True, "part_ids": [part.id]}
+        job.checkpoint = {"metadata_done": True, "basics_done": True, "tags_done": True, "part_ids": [part.id]}
         db.commit()
         job_id = job.id
     for number, expected in [(1, "queued"), (2, "partial")]:

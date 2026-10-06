@@ -8,6 +8,8 @@ export type EditableVideo = {
   duration?: number;
   notes?: string;
   tags?: string[];
+  source_tags?: string[];
+  manual_tags?: string[];
 };
 export function videoEditorDraft(video: EditableVideo) {
   return {
@@ -19,7 +21,8 @@ export function videoEditorDraft(video: EditableVideo) {
     bvid: video.bvid ?? '',
     duration: video.duration ?? 0,
     notes: video.notes ?? '',
-    tags: [...(video.tags ?? [])],
+    tags: [...(video.manual_tags ?? video.tags ?? [])],
+    source_tags: [...(video.source_tags ?? [])],
   };
 }
 export function videoEditorPayload(value: ReturnType<typeof videoEditorDraft>) {

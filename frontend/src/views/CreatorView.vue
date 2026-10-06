@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import { api, query, errorText, session } from '../api';
 import type { Creator, Video, Page } from '../types';
 import CreatorBio from '../components/CreatorBio.vue';
+import CreatorCapture from '../components/CreatorCapture.vue';
 import VideoCard from '../components/VideoCard.vue';
 import PlaylistStartButton from '../player/PlaylistStartButton.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -112,6 +113,11 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="profile-actions">
+        <CreatorCapture
+          v-if="['admin', 'editor'].includes(session.user?.role || '')"
+          :creator="creator"
+          @captured="search(page)"
+        />
         <PlaylistStartButton :scope="{ type: 'creator', id: creator.id }" />
         <RouterLink
           v-if="session.user?.role === 'admin'"

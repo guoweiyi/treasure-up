@@ -163,8 +163,21 @@ private struct ArchivedCommentBody: View {
             Artwork(path: comment["author"]?["avatar_url"]?.stringValue, symbol: "person.fill")
                 .frame(width: compact ? 28 : 36, height: compact ? 28 : 36).clipShape(.circle)
             VStack(alignment: .leading, spacing: 9) {
-                Text(comment["author"]?["name"]?.stringValue ?? "未知作者")
-                    .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text(comment["author"]?["name"]?.stringValue ?? "未知作者")
+                        .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                    if comment["is_uploader"]?.boolValue == true {
+                        Text("UP 主").font(.caption2.weight(.medium)).foregroundStyle(.pink).fixedSize()
+                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .background(.pink.opacity(0.10), in: .rect(cornerRadius: 3))
+                            .accessibilityLabel("视频投稿作者")
+                    }
+                    if comment["is_pinned"]?.boolValue == true {
+                        Text("置顶").font(.caption2).foregroundStyle(.secondary).fixedSize()
+                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .background(.quaternary, in: .rect(cornerRadius: 3))
+                    }
+                }
                 Text(comment["content"]?.stringValue ?? "").font(compact ? .subheadline : .body)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if let images = comment["images"]?.arrayValue, !images.isEmpty {
@@ -201,7 +214,7 @@ struct CommentImageView: View {
     var body: some View {
         GeometryReader { geometry in
             ScrollView([.horizontal, .vertical]) {
-                AsyncImage(url: url) { phase in
+                ArchiveAsyncImage(path: url.absoluteString, maximumPixelSize: 2048) { phase in
                     switch phase {
                     case .success(let image):
                         image.resizable().scaledToFit()

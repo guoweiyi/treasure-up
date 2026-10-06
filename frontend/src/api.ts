@@ -12,7 +12,21 @@ watch(
   () => sessionRevision.value++,
   { flush: 'sync' },
 );
-export const display = reactive({ site_name: 'Treasure Up', default_danmaku: true });
+export const display = reactive({
+  site_name: 'Treasure Up',
+  default_danmaku: true,
+  allow_guest_access: false,
+});
+export const authStatus = reactive<{ initialized: boolean | null; available: boolean }>({
+  initialized: null,
+  available: false,
+});
+export async function loadAuthStatus() {
+  const data = await api<{ initialized: boolean; allow_guest_access: boolean }>('/auth/status');
+  authStatus.initialized = data.initialized;
+  authStatus.available = true;
+  display.allow_guest_access = data.allow_guest_access === true;
+}
 export class ApiError extends Error {
   status: number;
   retryAfterSeconds?: number;
@@ -81,11 +95,16 @@ export async function loadSession() {
 }
 export async function loadDisplaySettings() {
   try {
-    const data = await api<{ site_name: string; default_danmaku: boolean }>('/library/settings');
+    const data = await api<{
+      site_name: string;
+      default_danmaku: boolean;
+      allow_guest_access: boolean;
+    }>('/library/settings');
     if (typeof data.site_name === 'string') display.site_name = data.site_name || 'Treasure Up';
     if (typeof data.default_danmaku === 'boolean') display.default_danmaku = data.default_danmaku;
+    display.allow_guest_access = data.allow_guest_access === true;
   } catch {
-    /* Server defaults keep the library usable if optional preferences fail. */
+    display.allow_guest_access = false;
   }
 }
 export function query(values: Record<string, unknown>) {

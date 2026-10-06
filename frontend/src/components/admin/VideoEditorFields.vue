@@ -78,7 +78,13 @@ function removeTag(tag: string) {
         >恢复来源简介</el-button
       >
     </el-form-item>
-    <el-form-item label="标签">
+    <el-form-item label="B 站标签">
+      <div v-if="value.source_tags?.length" class="source-tags">
+        <span v-for="tag in value.source_tags" :key="tag">{{ tag }}</span>
+      </div>
+      <p v-else class="field-help">尚未获取来源标签，下次采集时自动同步。</p>
+    </el-form-item>
+    <el-form-item label="自定义标签">
       <div class="video-tags" aria-label="视频标签">
         <span v-for="tag in value.tags" :key="tag" class="video-tag-chip"
           >{{ tag }}
@@ -104,7 +110,9 @@ function removeTag(tag: string) {
         </button>
       </div>
       <p v-if="tagError" class="form-error" role="alert">{{ tagError }}</p>
-      <p class="field-help">例如：教程、旅行、待学习。支持输入后按回车添加。</p>
+      <p class="field-help">
+        与 B 站标签一起展示。回车添加，也可用逗号分隔；自动同步会保留这些标签。
+      </p>
     </el-form-item>
     <details class="video-editor-notes" :open="!!value.notes">
       <summary>整理笔记 <span class="muted small">仅管理员和内容编辑可见</span></summary>
@@ -180,6 +188,18 @@ function removeTag(tag: string) {
   border: 1px solid #dcdfe6;
   border-radius: 6px;
   padding: 8px;
+}
+.source-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.source-tags span {
+  background: #f1f3f5;
+  color: #61666d;
+  padding: 2px 9px;
+  border-radius: 4px;
+  font-size: 12px;
 }
 .video-tags:focus-within {
   border-color: var(--accent, #00aeec);

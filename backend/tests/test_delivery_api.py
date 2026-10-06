@@ -122,7 +122,8 @@ def test_settings_allow_clearing_rate_and_validate_merged_statistics(context):
     assert response.status_code == 200 and response.json()['ingest']['download_rate_bytes'] is None
     assert client.patch(url, json={'statistics':{'account_id':account.id}}).status_code == 200
     assert client.patch(url, json={'statistics':{'enabled':True}}).status_code == 200
-    assert client.patch(url, json={'statistics':{'account_id':None}}).status_code == 422
+    assert client.patch(url, json={'statistics':{'account_id':None}}).status_code == 200
+    assert client.patch(url, json={'statistics':{'account_id':'does-not-exist'}}).status_code == 422
     response = client.patch(url, json={'statistics':{'enabled':False,'account_id':None}})
     assert response.status_code == 200 and response.json()['statistics']['account_id'] is None
 
@@ -138,7 +139,7 @@ def test_replica_actions_are_worker_jobs_and_purge_requires_retirement(context):
     assert client.delete(url).status_code == 202
     assert client.post(url + '/restore').status_code == 202
     enqueue_media_maintenance(db)
-    prepare = db.scalar(select(Job).where(Job.kind=='prepare_media'))
+    prepare = db.scalar(select(Job).where(Job.kind=='prepare_media', Job.target_id == original.id))
     assert prepare.policy['package'] is True
     assert prepare.target_id == original.id
 

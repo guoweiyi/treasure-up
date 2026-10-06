@@ -78,6 +78,8 @@ export interface Video {
   cover_url?: string;
   creators: Creator[];
   tags: string[];
+  source_tags?: string[];
+  manual_tags?: string[];
   starred: boolean;
   parts_count: number;
   playable: boolean;
@@ -110,6 +112,8 @@ export interface Comment {
   posted_at: string;
   like_count: number;
   reply_count: number;
+  is_uploader?: boolean;
+  is_pinned?: boolean;
   images: (string | { url?: string; asset_url?: string })[];
   emotes?: { text: string; asset_url: string }[];
 }

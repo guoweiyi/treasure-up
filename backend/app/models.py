@@ -34,6 +34,16 @@ class UserSession(Entity, Base):
     csrf_token: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     passkey_credential_id: Mapped[str | None] = mapped_column(ForeignKey("passkey_credentials.id", ondelete="SET NULL", use_alter=True, name="fk_sessions_passkey_credential"), index=True)
+    identity_token_id: Mapped[str | None] = mapped_column(ForeignKey("identity_tokens.id", ondelete="CASCADE"), index=True)
+
+
+class IdentityToken(Entity, Base):
+    __tablename__ = "identity_tokens"
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LoginAttempt(Entity, Base):
@@ -116,6 +126,7 @@ class Video(Entity, Base):
     source_state: Mapped[str] = mapped_column(String(40), default="available")
     capture_status: Mapped[str] = mapped_column(String(40), default="pending")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_tags: Mapped[list] = mapped_column(JSON, default=list, server_default=text("'[]'"))
 
 
 class VideoAnnotation(Entity, Base):
@@ -278,7 +289,8 @@ class SubtitleTrack(Entity, Base):
 
 class Comment(Entity, Base):
     __tablename__ = "comments"
-    __table_args__ = (UniqueConstraint("video_id", "rpid"), Index("ix_comment_tree", "video_id", "root_rpid", "posted_at"))
+    __table_args__ = (UniqueConstraint("video_id", "rpid"), Index("ix_comment_tree", "video_id", "root_rpid", "posted_at"),
+                     Index("ix_comment_pinned_order", "video_id", "is_pinned", "like_count"))
     video_id: Mapped[str] = mapped_column(ForeignKey("videos.id"), index=True)
     rpid: Mapped[str] = mapped_column(String(32))
     root_rpid: Mapped[str] = mapped_column(String(32), default="0")
@@ -289,6 +301,7 @@ class Comment(Entity, Base):
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     like_count: Mapped[int] = mapped_column(Integer, default=0)
     reply_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
 
 

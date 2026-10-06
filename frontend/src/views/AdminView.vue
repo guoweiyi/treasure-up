@@ -26,6 +26,7 @@ import 'element-plus/dist/index.css';
 import { api, write, query, errorText, statusText, date, bytes, session } from '../api';
 import type { Row, Page } from '../types';
 import AdminSettings from '../components/admin/AdminSettings.vue';
+import SetupChecklist from '../components/admin/SetupChecklist.vue';
 import StorageReplicas from '../components/admin/StorageReplicas.vue';
 import SourceMonitor from '../components/admin/SourceMonitor.vue';
 import StorageFields from '../components/admin/StorageFields.vue';
@@ -531,7 +532,8 @@ onBeforeUnmount(() => {
             @close="savedVideo = ''"
           />
           <template v-if="section === 'overview'"
-            ><div v-if="overview" class="overview-summary">
+            ><SetupChecklist :setup="overview?.setup" />
+            <div v-if="overview" class="overview-summary">
               <span
                 >视频 <strong>{{ overview.stats?.videos ?? '—' }}</strong></span
               ><span

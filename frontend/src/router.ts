@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import { loadSession, session } from './api';
+import { display, loadSession, session } from './api';
+import { requiresLogin } from './utils/accessPolicy';
 export const router = createRouter({
   history: createWebHistory(),
   scrollBehavior: () => ({ top: 0 }),
@@ -29,10 +30,12 @@ router.beforeEach(async (to) => {
     try {
       await loadSession();
     } catch {
-      if (to.meta.login) return { path: '/login', query: { next: to.fullPath } };
+      if (requiresLogin(to.path, !!to.meta.login, display.allow_guest_access))
+        return { path: '/login', query: { next: to.fullPath } };
     }
   }
-  if (!session.user && to.meta.login) return { path: '/login', query: { next: to.fullPath } };
+  if (!session.user && requiresLogin(to.path, !!to.meta.login, display.allow_guest_access))
+    return { path: '/login', query: { next: to.fullPath } };
   if (session.user && to.path === '/login') return '/';
   if (to.meta.admin && !['admin', 'editor'].includes(session.user?.role || '')) return '/';
   if (

@@ -83,13 +83,15 @@ struct AdminSettingsView: View {
                 Section("网站展示") {
                     TextField("网站名称", text: text("display", "site_name"))
                     Toggle("默认显示弹幕", isOn: flag("display", "default_danmaku"))
+                    Toggle("允许未登录用户浏览和播放", isOn: flag("display", "allow_guest_access"))
                 }
                 AdminPolicyFields(values: $ingest)
                 Section("统计与弹幕更新") {
                     Toggle("自动更新 B 站统计", isOn: flag("statistics", "enabled"))
-                    Picker("采集账号", selection: text("statistics", "account_id")) { Text(appPrompt("请选择")).tag(""); ForEach(accounts, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
+                    Picker("采集账号", selection: text("statistics", "account_id")) { Text(appPrompt("自动选择可用账号")).tag(""); ForEach(accounts, id: \.adminID) { Text($0.adminTitle).tag($0.adminID) } }
                     numeric("更新间隔（小时）", "statistics", "interval_hours", 1...720)
                     Toggle("同时刷新弹幕", isOn: flag("statistics", "refresh_danmaku"))
+                    Toggle("同时刷新评论与置顶", isOn: flag("statistics", "refresh_comments"))
                     Button("立即刷新统计") { Task { await refreshStatistics() } }.disabled(saving)
                 }
                 Section("播放与分发") {

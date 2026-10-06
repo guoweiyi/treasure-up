@@ -90,7 +90,12 @@ def test_rejects_symlinked_client_outside_artifact_directory(tmp_path):
     archive.unlink()
     external = tmp_path / "outside.zip"
     simulator_archive(external)
-    archive.symlink_to(external)
+    try:
+        archive.symlink_to(external)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows does not grant symlink creation; this security case also runs in Linux CI")
+        raise
     with pytest.raises(ValueError, match="escapes input directory"):
         release.select_clients(inputs)
 

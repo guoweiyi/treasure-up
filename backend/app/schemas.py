@@ -191,6 +191,7 @@ class ProgressInput(Input):
 class DisplaySettings(Input):
     site_name: str = Field(default="Treasure Up", max_length=100)
     default_danmaku: bool = True
+    allow_guest_access: bool = False
 
 
 class BackupSettings(Input):
@@ -202,10 +203,11 @@ class BackupSettings(Input):
 
 
 class StatisticsSettings(Input):
-    enabled: bool = False
+    enabled: bool = True
     account_id: str | None = None
     interval_hours: int = Field(default=6, ge=1, le=720)
     refresh_danmaku: bool = False
+    refresh_comments: bool = True
 
 
 class SettingsInput(Input):

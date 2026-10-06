@@ -73,6 +73,9 @@ struct RootView: View {
                 ProgressView(appPrompt("正在连接资料库…")).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !api.isConnected {
                 NavigationStack { ServerConnectionView(initialError: connectionError) }
+            } else if api.user == nil && !api.allowGuestAccess {
+                NavigationStack { LoginView(requiresLogin: true) }
+                    .id(api.baseURL.absoluteString)
             } else {
                 navigation
                     .id(api.baseURL.absoluteString + (api.user?.id ?? "guest") + (api.user?.role ?? ""))

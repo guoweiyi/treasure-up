@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Treasure Up · B站选片助手
 // @namespace    treasure-up
-// @version      1.1.0
+// @version      1.2.0
 // @description  在B站选中视频，批量加入自己的 Treasure Up 备份库。需要 Tampermonkey 5.0+。
 // @author       Treasure Up
 // @match        https://www.bilibili.com/*
@@ -16,6 +16,8 @@
 // @grant        GM.setValue
 // @grant        GM.getTab
 // @grant        GM.saveTab
+// @grant        GM_getTab
+// @grant        GM_saveTab
 // @grant        GM.xmlHttpRequest
 // @grant        GM.registerMenuCommand
 // @grant        window.onurlchange
@@ -127,14 +129,78 @@
   }
   function environmentIssue(gm) {
     if (!supportedManager(gm?.info))
-      return '需要 Tampermonkey 5.0+ 的 DOM 隔离环境。请从后台重新安装脚本；不要改为页面沙箱。';
-    if (
-      ['getValue', 'setValue', 'getTab', 'saveTab', 'xmlHttpRequest'].some(
-        (name) => typeof gm[name] !== 'function',
-      )
-    )
+      return '需要 Tampermonkey 5.0+ 的 DOM 隔离环境。请更新扩展与脚本；在 Tampermonkey 设置的「安全 → 沙盒模式」允许 DOM 后刷新 B站。不要改为页面沙箱。';
+    if (['getValue', 'setValue', 'xmlHttpRequest'].some((name) => typeof gm[name] !== 'function'))
       return '脚本权限不完整。请从后台重新安装选片助手，确认安装后刷新 B站页面。';
     return '';
+  }
+  function tabStorage(gm, legacyGet, legacySave, onFallback, timeoutMs = 2500) {
+    let memory = {},
+      volatile = false;
+    const timed = (operation) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Tab storage timeout')), timeoutMs);
+        Promise.resolve()
+          .then(operation)
+          .then(resolve, reject)
+          .finally(() => clearTimeout(timer));
+      });
+    function fallback() {
+      if (!volatile) onFallback();
+      volatile = true;
+    }
+    return {
+      async getTab() {
+        if (!volatile) {
+          try {
+            // Earlier Tampermonkey builds exposed an async getTab that returned
+            // undefined. The documented callback API works on those builds.
+            const value = await timed(() =>
+              typeof legacyGet === 'function'
+                ? new Promise((resolve) => legacyGet(resolve))
+                : gm.getTab(),
+            );
+            if (!value || typeof value !== 'object' || Array.isArray(value))
+              throw new Error('Invalid tab storage');
+            memory = value;
+          } catch {
+            fallback();
+          }
+        }
+        return { ...memory };
+      },
+      async saveTab(value) {
+        memory = { ...value };
+        if (!volatile) {
+          try {
+            await timed(() =>
+              typeof legacySave === 'function'
+                ? new Promise((resolve) => legacySave(value, resolve))
+                : gm.saveTab(value),
+            );
+          } catch {
+            fallback();
+          }
+        }
+      },
+    };
+  }
+  function reconcileMarkers(nodes, items, create, update) {
+    const visible = new Set(items.map((item) => item.bvid));
+    for (const [bvid, node] of nodes) {
+      if (!visible.has(bvid)) {
+        node.remove();
+        nodes.delete(bvid);
+      }
+    }
+    for (const item of items) {
+      let node = nodes.get(item.bvid);
+      if (!node) {
+        node = create(item);
+        nodes.set(item.bvid, node);
+      }
+      update(node, item);
+    }
   }
   // A virtualized card can keep its DOM node while its old link disappears.
   function invalidateCards(cards, root) {
@@ -360,11 +426,11 @@
       <button class="soft current" type="button" hidden>${icon('plus')}<span>加入当前视频</span></button>
       <div class="actions"><button class="soft mode" type="button" aria-pressed="false"><span class="mode-dot"></span><span class="mode-label">开启页面选片</span></button><button class="soft visible" type="button">${icon('select')}选择可见视频</button></div>
       <div class="selection-heading"><strong>已选视频 <span class="selected-count">0</span></strong><span class="muted">最多 50 个</span><button class="text-button clear" type="button">清空</button></div>
-      <div class="empty">${icon('video')}<p>把想保存的视频放进来</p><small>开启选片勾选卡片，或粘贴 BV 号</small></div><ol class="selection"></ol>
+      <div class="empty">${icon('video')}<p>把想保存的视频放进来</p><small>开启选片勾选卡片，或粘贴 BV 号</small></div><ol class="selection"></ol><p class="draft-note help" role="status" hidden>浏览器标签存储暂不可用。仍可选片并提交，刷新或离开此页会清空未提交的选择。</p>
       <details class="results" hidden open><summary>${icon('check')}上次提交结果<span class="arrow">${icon('chevron')}</span></summary><ol class="results-list"></ol></details>
       <details class="manual"><summary>${icon('paste')}粘贴 BV 号或视频链接<span class="arrow">${icon('chevron')}</span></summary><textarea class="manual-text" aria-label="BV 号或视频链接" placeholder="支持多个 BV 号或 B站视频链接，每行一个" maxlength="20000"></textarea><button class="soft manual-add" type="button">${icon('plus')}加入已选</button></details>
       <details class="help"><summary>${icon('info')}使用帮助与排查<span class="arrow">${icon('chevron')}</span></summary><p>视频页：点「加入当前视频」。列表页：开启页面选片后，点卡片左上角的 +；也可一次选择屏幕内可见视频。已选列表只在当前标签页内保留。</p><p>没有识别到视频？直播、番剧和短链接无法直接选中，请打开普通 BV 视频页，或展开上面的粘贴入口。</p><p>连接失败时，先直接打开服务地址确认可访问，再检查扩展是否允许连接此地址。公网必须使用 HTTPS；请勿绕过证书警告。</p><a class="library" hidden target="_blank" rel="noopener noreferrer">打开视频库后台 ↗</a></details>
-    </div><footer><p class="notice" role="status" aria-live="polite" hidden></p><button class="submit" type="button" disabled>${icon('send')}<span>提交到视频库</span></button><div class="footnote">只提交 BV 号 · 下载由你的服务完成</div></footer>
+    </div><footer><p class="notice" role="status" aria-live="polite" hidden></p><button class="submit" type="button" disabled>${icon('send')}<span>提交到视频库</span></button><div class="footnote">选片助手 1.2.0 · 下载由你的服务完成</div></footer>
   </section><div class="toast" role="status" hidden></div>`;
   document.documentElement.append(host);
   const $ = (selector) => shadow.querySelector(selector);
@@ -385,7 +451,12 @@
   let connectionInfo = null;
   let lastResults = [];
   const cards = new Map(),
-    pendingRoots = new Set();
+    pendingRoots = new Set(),
+    markerNodes = new Map();
+  function clearMarkers() {
+    markers.replaceChildren();
+    markerNodes.clear();
+  }
   const statuses = {
     queued: '已加入队列',
     active: '正在处理',
@@ -395,7 +466,16 @@
     daily_limit: '今日新增任务已达上限',
     failed: '未提交，请重试',
   };
-  const draft = createDraftStore(GM, (items) => {
+  let draftVolatile = false;
+  const tab = tabStorage(
+    GM,
+    typeof GM_getTab === 'function' ? GM_getTab : null,
+    typeof GM_saveTab === 'function' ? GM_saveTab : null,
+    () => {
+      draftVolatile = true;
+    },
+  );
+  const draft = createDraftStore(tab, (items) => {
     selected = items;
     render();
     schedulePositions();
@@ -428,6 +508,7 @@
         : config.token
           ? '连接已保存'
           : '首次使用 · 点击连接';
+    $('.draft-note').hidden = !draftVolatile;
     $('.fab-count').textContent = String(selected.size);
     $('.selected-count').textContent = String(selected.size);
     $('.empty').hidden = selected.size > 0;
@@ -654,28 +735,42 @@
   }
   function positionMarkers() {
     frame = 0;
-    markers.replaceChildren();
-    if (!selecting || document.hidden || document.fullscreenElement) return;
-    for (const item of visibleCards()) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'marker';
-      button.style.left = `${Math.max(5, Math.min(innerWidth - 40, item.rect.left + 7))}px`;
-      button.style.top = `${Math.max(5, item.rect.top + 7)}px`;
-      button.setAttribute(
-        'aria-label',
-        `${selected.has(item.bvid) ? '取消选择' : '选择'} ${item.title}`,
-      );
-      button.setAttribute('aria-pressed', String(selected.has(item.bvid)));
-      button.disabled = busy;
-      button.innerHTML = icon(selected.has(item.bvid) ? 'check' : 'plus');
-      button.addEventListener('click', () => {
-        if (busy) return;
-        if (selected.has(item.bvid)) void removeSelection([item.bvid]);
-        else void addCandidates([item]);
-      });
-      markers.append(button);
-    }
+    const items =
+      selecting && !document.hidden && !document.fullscreenElement ? visibleCards() : [];
+    reconcileMarkers(
+      markerNodes,
+      items,
+      (item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'marker';
+        button.addEventListener('click', () => {
+          if (busy || !ready) return;
+          // A reused/renamed card must submit its current, visible identity.
+          const current = visibleCards().find((candidate) => candidate.bvid === item.bvid);
+          if (!current) return;
+          if (selected.has(item.bvid)) void removeSelection([item.bvid]);
+          else void addCandidates([current]);
+        });
+        markers.append(button);
+        return button;
+      },
+      (button, item) => {
+        button.style.left = `${Math.max(5, Math.min(innerWidth - 40, item.rect.left + 7))}px`;
+        button.style.top = `${Math.max(5, item.rect.top + 7)}px`;
+        button.setAttribute(
+          'aria-label',
+          `${selected.has(item.bvid) ? '取消选择' : '选择'} ${item.title}`,
+        );
+        button.setAttribute('aria-pressed', String(selected.has(item.bvid)));
+        button.disabled = busy;
+        const state = selected.has(item.bvid) ? 'check' : 'plus';
+        if (button.dataset.state !== state) {
+          button.innerHTML = icon(state);
+          button.dataset.state = state;
+        }
+      },
+    );
   }
   function schedulePositions() {
     if (!frame && selecting) frame = requestAnimationFrame(positionMarkers);
@@ -717,7 +812,7 @@
     pageUrl = location.href;
     cards.clear();
     updateCurrent();
-    markers.replaceChildren();
+    clearMarkers();
     scheduleScan();
   }
   async function testConnection() {
@@ -758,7 +853,7 @@
   $('.mode').addEventListener('click', () => {
     selecting = !selecting;
     render();
-    if (!selecting) markers.replaceChildren();
+    if (!selecting) clearMarkers();
     updateObserver();
     schedulePositions();
   });
@@ -890,7 +985,7 @@
   window.addEventListener('scroll', schedulePositions, { passive: true, capture: true });
   window.addEventListener('resize', schedulePositions, { passive: true });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) markers.replaceChildren();
+    if (document.hidden) clearMarkers();
     else {
       routeChanged();
       schedulePositions();

@@ -1,13 +1,15 @@
 """Personal list locking and legacy migration on random isolated PostgreSQL DBs."""
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 import threading
+from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select, text
+from sqlalchemy import MetaData, Table, func, select, text
 
 from app.models import PersonalPlaylist, PersonalPlaylistItem, User, Video, VideoStar
 from app.personal_playlists import ItemInput, playlists, save_item, set_star
@@ -23,13 +25,24 @@ def test_old_personal_stars_migrate_to_watch_later_with_user_isolation(postgres_
     with space.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.downgrade(config, "c8412d60fa31")
-    with space.sessions() as db:
-        first, second = User(username="a", password_hash="fixture", role="reader"), User(username="b", password_hash="fixture", role="reader")
-        videos = [Video(bvid="BV0000000001"), Video(bvid="BV0000000002")]
-        db.add_all([first, second, *videos]); db.flush()
-        db.add_all([VideoStar(user_id=first.id, video_id=videos[0].id), VideoStar(user_id=second.id, video_id=videos[1].id)])
-        db.commit()
-        expected = {first.id: videos[0].id, second.id: videos[1].id}
+    with space.engine.begin() as connection:
+        # Seed the historical schema, not today's ORM (which may require
+        # columns introduced after the revision under test).
+        metadata = MetaData()
+        users = Table("app_users", metadata, autoload_with=connection, resolve_fks=False)
+        videos = Table("videos", metadata, autoload_with=connection, resolve_fks=False)
+        stars = Table("video_stars", metadata, autoload_with=connection, resolve_fks=False)
+        now = datetime.now(timezone.utc)
+        expected = {}
+        for index, username in enumerate(("a", "b"), start=1):
+            user_id, video_id = str(uuid4()), str(uuid4())
+            connection.execute(users.insert().values(id=user_id, username=username, password_hash="fixture",
+                role="reader", disabled=False, created_at=now, updated_at=now))
+            connection.execute(videos.insert().values(id=video_id, bvid=f"BV{index:010d}", title="", description="",
+                duration=0, source_state="available", capture_status="pending", metadata_json={}, created_at=now, updated_at=now))
+            connection.execute(stars.insert().values(id=str(uuid4()), user_id=user_id, video_id=video_id,
+                created_at=now, updated_at=now))
+            expected[user_id] = video_id
     with space.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "head")

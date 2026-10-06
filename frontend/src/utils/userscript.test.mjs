@@ -11,7 +11,7 @@ const core = source.match(/\/\/ CORE-BEGIN[^\n]*\n([\s\S]*?)\/\/ CORE-END/)?.[1]
 assert.ok(core, 'test the shipped single-file script, without a page-visible test export');
 const ctx = vm.createContext({ URL, setTimeout, clearTimeout });
 vm.runInContext(
-  `${core}\nglobalThis.testCore = {extractBvids,videoFromUrl,normalizeBackend,nextConfig,supportedManager,safeError,responseError,environmentIssue,invalidateCards,mergeSelection,pendingItems,createDraftStore,createClient,verifyAndSaveConnection};`,
+  `${core}\nglobalThis.testCore = {extractBvids,videoFromUrl,normalizeBackend,nextConfig,supportedManager,safeError,responseError,environmentIssue,tabStorage,reconcileMarkers,invalidateCards,mergeSelection,pendingItems,createDraftStore,createClient,verifyAndSaveConnection};`,
   ctx,
 );
 const api = ctx.testCore;
@@ -237,14 +237,105 @@ test('a failed connection replacement preserves the previously saved origin and 
   assert.equal(writes, 1);
 });
 
-test('startup diagnoses missing tab-storage grants before offering a selection that cannot persist', () => {
+test('startup requires credential/network grants; missing optional tab storage does not disable collection', () => {
   const gm = { info: { scriptHandler: 'Tampermonkey', version: '5.5.1', sandboxMode: 'dom' } };
   assert.match(api.environmentIssue(gm), /权限不完整/);
-  for (const name of ['getValue', 'setValue', 'getTab', 'saveTab', 'xmlHttpRequest'])
-    gm[name] = () => {};
+  for (const name of ['getValue', 'setValue', 'xmlHttpRequest']) gm[name] = () => {};
   assert.equal(api.environmentIssue(gm), '');
   gm.info.sandboxMode = 'raw';
   assert.match(api.environmentIssue(gm), /DOM 隔离/);
+});
+
+test('legacy tab callbacks bypass broken async implementations and preserve selection across reloads', async () => {
+  let saved = {},
+    fallback = 0;
+  const gm = {
+    getTab: async () => undefined,
+    saveTab: async () => {
+      throw new Error('unused');
+    },
+  };
+  const make = () =>
+    api.tabStorage(
+      gm,
+      (cb) => cb(native(saved)),
+      (value, cb) => {
+        saved = native(value);
+        cb();
+      },
+      () => fallback++,
+    );
+  const first = api.createDraftStore(make(), () => {});
+  await first.change({ type: 'add', items: [{ bvid: ids[0], title: 'Legacy' }] });
+  let visible;
+  await api
+    .createDraftStore(make(), (items) => {
+      visible = items;
+    })
+    .refresh();
+  assert.equal(visible.size, 1);
+  assert.equal(visible.get(ids[0]).title, 'Legacy');
+  assert.equal(fallback, 0);
+});
+
+test('unavailable, rejected and stalled tab storage fall back to bounded memory without losing selections', async () => {
+  for (const gm of [
+    {},
+    { getTab: async () => undefined },
+    {
+      getTab: async () => {
+        throw new Error('extension unavailable');
+      },
+    },
+    { getTab: () => new Promise(() => {}) },
+    {
+      getTab: async () => ({}),
+      saveTab: async () => {
+        throw new Error('quota');
+      },
+    },
+  ]) {
+    let fallback = 0,
+      visible;
+    const store = api.tabStorage(gm, null, null, () => fallback++, 5);
+    const draft = api.createDraftStore(store, (items) => {
+      visible = items;
+    });
+    await draft.refresh();
+    await draft.change({ type: 'add', items: [{ bvid: ids[0], title: 'Still usable' }] });
+    await draft.change({ type: 'add', items: [{ bvid: ids[1], title: 'Second' }] });
+    assert.equal(visible.size, 2);
+    await draft.change({ type: 'remove', bvids: [ids[0]] });
+    assert.equal(visible.size, 1);
+    assert.equal(fallback, 1);
+  }
+});
+
+test('visible markers retain their actual button nodes across layout/selection updates', () => {
+  const nodes = new Map();
+  let created = 0,
+    removed = 0;
+  const create = (item) => ({ id: ++created, bvid: item.bvid, remove: () => removed++ });
+  const update = (node, item) => {
+    node.title = item.title;
+  };
+  api.reconcileMarkers(nodes, [{ bvid: ids[0], title: 'First' }], create, update);
+  const pressed = nodes.get(ids[0]);
+  // A resize/mutation between pointerdown and pointerup must not destroy the pressed button.
+  api.reconcileMarkers(
+    nodes,
+    [{ bvid: ids[0], title: 'Renamed' }, { bvid: ids[1] }],
+    create,
+    update,
+  );
+  assert.equal(nodes.get(ids[0]), pressed);
+  assert.equal(pressed.title, 'Renamed');
+  assert.equal(created, 2);
+  api.reconcileMarkers(nodes, [{ bvid: ids[1] }], create, update);
+  assert.equal(removed, 1);
+  assert.equal(nodes.has(ids[0]), false);
+  api.reconcileMarkers(nodes, [], create, update);
+  assert.equal(nodes.size, 0);
 });
 
 test('rescanning a recycled or emptied card drops its former BV rather than selecting stale content', () => {

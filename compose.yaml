@@ -72,7 +72,8 @@ services:
     environment:
       <<: *environment
       TREASURE_ADMIN_USERNAME: ${TREASURE_ADMIN_USERNAME:-admin}
-      TREASURE_ADMIN_PASSWORD: ${TREASURE_ADMIN_PASSWORD:?Set initial admin password}
+      # Only a new database needs this; the initializer validates first-run setup.
+      TREASURE_ADMIN_PASSWORD: ${TREASURE_ADMIN_PASSWORD:-}
   api:
     <<: *backend
     depends_on:

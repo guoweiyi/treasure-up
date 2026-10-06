@@ -487,6 +487,14 @@ def _metadata(ctx, video):
     data = ctx.client.view(video.bvid)
     if str(data.get("bvid")) != video.bvid or not isinstance(data.get("pages"), list) or not data["pages"]:
         raise IngestError("稿件详情缺少分P数据", code="invalid_metadata")
+    requested_uid = ctx.policy.get("capture_creator_uid")
+    if requested_uid:
+        from app.paid_capture import paid_hint
+        if str((data.get("owner") or {}).get("mid")) != requested_uid:
+            raise IngestError("稿件作者与采集选择不一致", code="creator_changed", retryable=False)
+        paid_filter = ctx.policy.get("capture_paid_filter", "exclude")
+        if paid_filter != "all" and paid_hint(data) != (paid_filter == "only"):
+            raise IngestError("稿件充电属性已改变，请重新选择采集范围", code="capture_filter_changed", retryable=False)
     from app.library_deletion import check_video_allowed
     check_video_allowed(ctx.db, video, uid=str((data.get("owner") or {}).get("mid") or ""))
     video.aid = _id(data.get("aid"))
@@ -540,6 +548,28 @@ def _save_stats(ctx, video, raw):
     return snapshot
 
 
+def _tags(ctx, video):
+    """A separate resumable step never overwrites a user's annotations."""
+    if ctx.cp.get("tags_done"):
+        return True
+    if not ctx.request_slot():
+        return False
+    rows = ctx.client.tags(video.bvid)
+    if not isinstance(rows, list) or len(rows) > 200:
+        raise IngestError("稿件标签结构无效", code="invalid_tags")
+    tags = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("tag_name"), str):
+            raise IngestError("稿件标签内容无效", code="invalid_tags")
+        name = row["tag_name"].strip()
+        if name and len(name) <= 100 and name not in tags:
+            tags.append(name)
+    video.source_tags = tags[:50]
+    ctx.cp["tags_done"] = True
+    ctx.save()
+    return True
+
+
 def _refresh_stats(ctx, video):
     if not ctx.cp.get("stats_done"):
         ctx.guard()
@@ -548,6 +578,8 @@ def _refresh_stats(ctx, video):
             raise IngestError("稿件统计数据无效", code="invalid_stats")
         if video.aid and str(data.get("aid")) != video.aid:
             raise IngestError("统计返回稿件与保存记录不匹配", code="invalid_stats")
+        if not video.aid:
+            video.aid = _id(data.get("aid"))
         if ctx.policy.get("refresh_danmaku", False):
             if not isinstance(data.get("pages"), list):
                 raise IngestError("统计刷新缺少当前分P信息", code="invalid_metadata")
@@ -567,6 +599,13 @@ def _refresh_stats(ctx, video):
             part = ctx.db.get(VideoPart, part_id)
             if not _danmaku(ctx, video, part):
                 return False
+    if ctx.policy.get("refresh_tags", False) and not _tags(ctx, video):
+        return False
+    if ctx.policy.get("refresh_comments", False):
+        comments_done = _comments(ctx, video)
+        images_done = _images(ctx)
+        if not comments_done or not images_done:
+            return False
     return True
 
 
@@ -594,6 +633,7 @@ def _save_comment(ctx, video, raw, expected_root=None):
     comment.content, comment.posted_at = body["message"], _timestamp(raw.get("ctime"))
     comment.like_count = max(0, int(raw.get("like") or 0))
     comment.reply_count = max(0, int(raw.get("rcount") or raw.get("count") or 0))
+    comment.is_pinned = root == "0" and raw.get("is_pinned") is True
     from .comment_capture import compact
     comment.raw = compact(raw)
     ctx.db.flush()
@@ -614,13 +654,27 @@ def _save_comment(ctx, video, raw, expected_root=None):
 
 
 def _pinned(data):
+    from .comment_capture import identity
     results = list(data.get("top_replies") or [])
     top = data.get("top") or {}
     if isinstance(top, dict):
         for item in top.values():
-            if isinstance(item, dict) and item.get("rpid"):
+            if isinstance(item, dict) and (item.get("rpid_str") or item.get("rpid")):
                 results.append(item)
-    return results
+    # Deduplicate before the pin limit: upper/admin previews may repeat the
+    # same ID in both containers, as either an integer or a string.
+    pins, seen = [], set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        rid = str(int(identity(item)))
+        if rid in seen:
+            continue
+        seen.add(rid)
+        pins.append({**item, "rpid_str": rid, "is_pinned": True})
+        if len(pins) == 3:
+            break
+    return pins
 
 
 def _comments(ctx, video):
@@ -915,6 +969,15 @@ def _archive(ctx, video):
         # before this video's potentially large comment/danmaku traversal.
         if ctx.policy.get("comments", True) or ctx.policy.get("danmaku", True) or ctx.policy.get("subtitles", True):
             return False
+    try:
+        if not _tags(ctx, video):
+            return False
+    except IngestError as error:
+        if _halt(error):
+            raise
+        # Tags remain retryable metadata; an unavailable tag endpoint must not
+        # prevent the already verified video's separate media lane from running.
+        _raise_capture_errors(ctx, [error])
     for part_id in ctx.cp.get("part_ids", []):
         needs_danmaku = ctx.policy.get("danmaku", True) and not ctx.cp.get("danmaku", {}).get(part_id, {}).get("done")
         needs_subtitles = ctx.policy.get("subtitles", True) and part_id not in ctx.cp.get("subtitle_parts", [])

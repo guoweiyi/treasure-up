@@ -1,14 +1,15 @@
 """Bounded hot-comment sampling. Ranking is only over the observed sample.
 
-Existing inventory is preserved: a refresh updates saved comments and fills
-free slots, but never deletes history or silently grows beyond the policy cap.
+Ordinary refreshes preserve the inventory. New pins take precedence within the
+same root limit, replacing the lowest-liked ordinary root and its reply tree.
+Shared people/assets and the cumulative downloaded-material budget survive.
 """
 import hashlib
 import json
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 
-from app.models import Comment, CommentVersion
+from app.models import AssetRef, Comment, CommentAsset, CommentVersion
 from .client import clean_raw
 from .errors import IngestError
 
@@ -45,11 +46,39 @@ def compact(raw):
         "pictures": [{"img_src": p.get("img_src")} for p in (content.get("pictures") or [])[:20] if isinstance(p, dict)],
         "emote": {k: {"url": v.get("url")} for k, v in list((content.get("emote") or {}).items())[:100] if isinstance(v, dict)}}
     saved["member"] = {key: member[key] for key in ("mid", "uname", "name", "sign", "avatar", "face") if key in member} if isinstance(member, dict) else None
+    saved["is_pinned"] = raw.get("is_pinned") is True
     return clean_raw(saved)
 
 
 def _rank(raw):
-    return (max(0, int(raw.get("like") or 0)), int(raw.get("ctime") or 0), int(identity(raw)))
+    return (raw.get("is_pinned") is True, max(0, int(raw.get("like") or 0)), int(raw.get("ctime") or 0), int(identity(raw)))
+
+
+def _make_pin_room(ctx, video, protected):
+    """Replace one low-ranked ordinary root only when a new pin needs its slot.
+
+    People and immutable assets can be shared and must survive. Detach comment
+    refs and versions only; the existing cumulative material budget is retained,
+    so repeated pin changes cannot download an unbounded new image inventory.
+    """
+    victim = ctx.db.scalar(select(Comment).where(Comment.video_id == video.id, Comment.root_rpid == "0",
+        Comment.rpid.not_in(protected), Comment.is_pinned.is_(False))
+        .order_by(Comment.like_count, Comment.posted_at, Comment.id).limit(1))
+    if victim is None:
+        return False
+    # Initialize legacy material accounting before detaching its last comment
+    # references; otherwise an upgrade plus pin replacement could free budget
+    # for files which still occupy storage and are intentionally retained.
+    from .runner import _comment_ledger
+    _comment_ledger(ctx, video)
+    ids = list(ctx.db.scalars(select(Comment.id).where(Comment.video_id == video.id,
+        (Comment.id == victim.id) | (Comment.root_rpid == victim.rpid))))
+    ctx.db.execute(delete(AssetRef).where(AssetRef.entity_type == "comment", AssetRef.entity_id.in_(ids)))
+    ctx.db.execute(delete(CommentAsset).where(CommentAsset.comment_id.in_(ids)))
+    ctx.db.execute(delete(CommentVersion).where(CommentVersion.comment_id.in_(ids)))
+    ctx.db.execute(delete(Comment).where(Comment.id.in_(ids)))
+    ctx.db.flush()
+    return victim.rpid
 
 
 def _save_state(ctx, state):
@@ -59,10 +88,12 @@ def _save_state(ctx, state):
 
 def _finish(ctx, video, state):
     video.metadata_json = {**(video.metadata_json or {}), "comment_capture": {
-        "run_id": ctx.run.id, "ranking": "likes_within_bounded_sample", "requested_order": "hot", "retention": "preserve_existing",
+        "run_id": ctx.run.id, "ranking": "pins_then_likes_within_bounded_sample", "requested_order": "hot",
+        "retention": "preserve_existing_except_pin_priority",
         "scanned_roots": state.get("scanned", 0), "selected_roots": len(state.get("selected", [])),
         "source_end_observed": state.get("source_end", False), "end_reason": state.get("end_reason", "source_end"),
         "replies_limited": state.get("replies_limited", False),
+        "pinned_roots": len(state.get("pinned_ids", [])), "pin_replacements": state.get("pin_replacements", 0),
         "limits": {key: budget(ctx.policy, key) for key in DEFAULTS},
         "roots_in_inventory": ctx.db.scalar(select(func.count()).select_from(Comment).where(Comment.video_id == video.id, Comment.root_rpid == "0")),
         "replies_in_inventory": ctx.db.scalar(select(func.count()).select_from(Comment).where(Comment.video_id == video.id, Comment.root_rpid != "0"))}}
@@ -78,6 +109,9 @@ def collect(ctx, video, save_comment, pinned):
         state.update(roots_done=True, replies_done=True, end_reason="policy_disabled")
         return _finish(ctx, video, state)
     seen = set(state.get("seen_ids", []))
+    if "pinned_ids" not in state:
+        state["pinned_ids"] = list(ctx.db.scalars(select(Comment.rpid).where(
+            Comment.video_id == video.id, Comment.is_pinned.is_(True)).limit(3)))
     candidates = dict(state.get("candidates", {}))
     offsets = list(state.get("seen_offsets", []))
     fingerprints = list(state.get("root_fingerprints", []))
@@ -85,7 +119,15 @@ def collect(ctx, video, save_comment, pinned):
         if not ctx.request_slot():
             return False
         offset = state.get("offset", "")
-        data = ctx.client.comment_page(video.aid, offset)
+        try:
+            data = ctx.client.comment_page(video.aid, offset)
+        except IngestError as error:
+            if error.code != "comments_closed":
+                raise
+            # A disabled comment section is a terminal source state, not a
+            # broken capture. Keep the existing archive and previous pin state.
+            state.update(roots_done=True, replies_done=True, end_reason="comments_closed")
+            return _finish(ctx, video, state)
         cursor, rows = data.get("cursor"), data.get("replies")
         if not isinstance(cursor, dict) or not isinstance(cursor.get("is_end"), bool):
             raise IngestError("评论分页缺少合法结束标记", code="invalid_pagination")
@@ -105,13 +147,18 @@ def collect(ctx, video, save_comment, pinned):
         # This also works with older checkpoints that only contain seen_ids.
         if not cursor["is_end"] and (not set(page_ids).difference(seen) or fingerprint in fingerprints):
             raise IngestError("评论游标未产生新评论或重复返回同页，已保留检查点", code="pagination_loop")
-        for raw in pinned(data) + rows:
+        page_pins = pinned(data)[:3]
+        if not offset and ("top_replies" in data or "top" in data):
+            state["pinned_ids"] = [identity(raw) for raw in page_pins]
+            state["pin_state_observed"] = True
+        pin_ids = set(state.get("pinned_ids", []))
+        for raw in page_pins + rows:
             rid = identity(raw)
             if rid not in seen:
                 if len(seen) >= scan:
                     break
                 seen.add(rid)
-            candidates[rid] = compact(raw)
+            candidates[rid] = compact({**raw, "is_pinned": rid in pin_ids or raw.get("is_pinned") is True})
             # Candidates are raw only until selection, bounded independently of
             # scan size. No users, avatar tasks or comments are created here.
             if len(candidates) > top:
@@ -129,6 +176,9 @@ def collect(ctx, video, save_comment, pinned):
             state.update(offset=nxt, seen_offsets=offsets)
         _save_state(ctx, state)
     if "selected" not in state:
+        if state.get("pin_state_observed"):
+            ctx.db.execute(update(Comment).where(Comment.video_id == video.id, Comment.is_pinned.is_(True),
+                Comment.rpid.not_in(state.get("pinned_ids", []))).values(is_pinned=False))
         # Existing rows count toward inventory, even if they fall outside this
         # response sample. Legacy inventories above the new cap are not deleted.
         existing = set(ctx.db.scalars(select(Comment.rpid).where(Comment.video_id == video.id, Comment.root_rpid == "0")))
@@ -138,8 +188,13 @@ def collect(ctx, video, save_comment, pinned):
             rid = identity(raw)
             if rid not in existing:
                 if not free:
-                    continue
-                free -= 1
+                    replaced = _make_pin_room(ctx, video, state.get("pinned_ids", [])) if raw.get("is_pinned") is True else None
+                    if not replaced:
+                        continue
+                    existing.discard(replaced)
+                    state["pin_replacements"] = state.get("pin_replacements", 0) + 1
+                else:
+                    free -= 1
             save_comment(ctx, video, raw, "0")
             chosen.append(rid)
         # Legacy checkpoints may have already committed roots before upgrade.

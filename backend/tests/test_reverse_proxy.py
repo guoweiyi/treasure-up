@@ -22,7 +22,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.db import engine, SessionLocal
 from app.main import app
-from app.models import Base, User
+from app.models import Base, Setting, User
 from app.security import COOKIE_NAME, hash_password
 
 origin = os.environ["TREASURE_PASSKEY_ORIGIN"]
@@ -31,6 +31,7 @@ password = "synthetic-proxy-password-123"
 Base.metadata.create_all(engine)
 with SessionLocal() as db:
     db.add(User(username="proxy-fixture", password_hash=hash_password(password), role="admin"))
+    db.add(Setting(key="display", value={"allow_guest_access": True}))
     db.commit()
 
 # Mirror the image's Uvicorn proxy-header layer. The inner nginx overwrites

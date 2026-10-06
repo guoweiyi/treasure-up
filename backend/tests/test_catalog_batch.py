@@ -93,7 +93,7 @@ def queries(engine):
     (Video, catalog.video_views, 8),
     (Creator, catalog.creator_views, 4),
     (Collection, catalog.collection_views, 4),
-    (Comment, catalog.comment_views, 6),
+    (Comment, catalog.comment_views, 7),
 ])
 def test_page_query_count_is_constant_for_one_twenty_four_and_one_hundred_rows(library, model, mapper, expected):
     engine, sessions = library

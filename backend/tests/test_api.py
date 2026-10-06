@@ -29,7 +29,9 @@ def context(tmp_path, monkeypatch):
     with Session(engine, expire_on_commit=False) as db:
         db.add_all([User(username="admin", password_hash=hash_password("a-test-password-123"), role="admin"),
                     User(username="reader", password_hash=hash_password("a-test-password-123"), role="reader"),
-                    StorageProfile(name="Local", kind="local", config={"root": str(tmp_path / "media")}, is_default=True)])
+                    StorageProfile(name="Local", kind="local", config={"root": str(tmp_path / "media")}, is_default=True),
+                    # Legacy public-reading tests explicitly opt into guest access.
+                    Setting(key="display", value={"allow_guest_access": True})])
         db.commit()
         def dependency():
             yield db
@@ -154,7 +156,7 @@ def test_admin_secrets_defaults_pagination_and_job_validation(context):
     assert client.post("/api/v1/admin/storage", json={"name": "invalid", "kind": "local", "config": {"root": str(tmp)}}).status_code == 422
     assert client.post("/api/v1/admin/backups").status_code == 409
     assert client.get("/api/v1/admin/accounts", params={"page": 2, "page_size": 1}).json()["items"] == []
-    assert client.get("/api/v1/library/settings").json() == {"site_name": "Treasure Up", "default_danmaku": True}
+    assert client.get("/api/v1/library/settings").json() == {"site_name": "Treasure Up", "default_danmaku": True, "allow_guest_access": True}
     assert client.patch("/api/v1/admin/settings", json={"display": {"site_name": "小云的片库", "default_danmaku": False}}).status_code == 200
     assert client.get("/api/v1/library/settings").json()["site_name"] == "小云的片库"
 

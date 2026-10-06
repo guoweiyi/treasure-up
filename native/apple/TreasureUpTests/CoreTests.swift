@@ -1,4 +1,5 @@
 import XCTest
+import ImageIO
 @testable import TreasureUp
 
 final class CoreTests: XCTestCase {
@@ -154,6 +155,30 @@ final class CoreTests: XCTestCase {
     }
 
     @MainActor
+    func testGuestPolicyDefaultsToPrivateAndIdentityTokenCreatesOnlySession() async throws {
+        let recorder = RequestRecorder()
+        MockURLProtocol.store.set { request in
+            recorder.append(request)
+            switch request.url?.path {
+            case "/api/v1/auth/token-login":
+                return .init(body: "{\"user\":{\"id\":\"user-a\",\"username\":\"tester\",\"role\":\"reader\"},\"csrf_token\":\"csrf-test\"}",
+                             headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
+            default:
+                return .init(body: "{\"site_name\":\"Native Test\",\"default_danmaku\":true,\"allow_guest_access\":false}")
+            }
+        }
+        let client = makeClient()
+        XCTAssertFalse(client.allowGuestAccess)
+        try await client.login(identityToken: "tul_synthetic-token-test-only")
+        XCTAssertEqual(client.user?.role, "reader")
+        XCTAssertFalse(client.allowGuestAccess)
+        let calls = recorder.requests
+        XCTAssertEqual(calls.first?.url?.path, "/api/v1/auth/token-login")
+        XCTAssertNil(calls.last?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertTrue(client.mediaCookies(for: URL(string: "https://other.example.test/asset")!).isEmpty)
+    }
+
+    @MainActor
     func testGuestPlaybackCookieIsRestrictedToSessionRoutes() async throws {
         MockURLProtocol.store.set { _ in
             .init(body: "{}", headers: ["Set-Cookie": "treasure_viewer=guest-token; Path=/api/v1/playback-sessions; Secure; HttpOnly"])
@@ -289,6 +314,125 @@ final class CoreTests: XCTestCase {
     }
 
     @MainActor
+    func testPrivateArtworkUsesAPISessionAndNeverSendsCookieToStorage() async throws {
+        let recorder = RequestRecorder()
+        let png = try makeArtworkData(width: 48, height: 32)
+        MockURLProtocol.store.set { request in
+            recorder.append(request)
+            switch request.url?.path {
+            case "/api/v1/auth/login":
+                return .init(body: "{\"user\":{\"id\":\"user-a\",\"username\":\"tester\",\"role\":\"reader\"},\"csrf_token\":\"csrf-test\"}",
+                             headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
+            case "/api/v1/library/settings": return .init(body: "{}")
+            default: return .init(body: "", headers: ["Content-Type": "image/png"], data: png)
+            }
+        }
+        let client = makeClient()
+        try await client.login(username: "tester", password: "temporary-test-secret")
+        let privateData = try await client.data("/api/v1/assets/avatar")
+        XCTAssertEqual(privateData, png)
+        XCTAssertTrue(recorder.requests.last?.value(forHTTPHeaderField: "Cookie")?.contains("treasure_session=test-token") == true)
+        _ = try await client.data("https://storage.example.test/image.png")
+        XCTAssertNil(recorder.requests.last?.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(recorder.requests.last?.value(forHTTPHeaderField: "X-CSRF-Token"))
+    }
+
+    @MainActor
+    func testArtworkImageCacheIsBoundedAndExpiresWithoutExtendingHits() async throws {
+        let image = try await ArchiveImageDecoder.decode(makeArtworkData(width: 128, height: 64), maximumPixelSize: 64)
+        let client = makeClient()
+        let a = ArchiveImageRequest(api: client, path: "/api/v1/assets/a", maximumPixelSize: 64)
+        let b = ArchiveImageRequest(api: client, path: "/api/v1/assets/b", maximumPixelSize: 64)
+        let c = ArchiveImageRequest(api: client, path: "/api/v1/assets/c", maximumPixelSize: 64)
+        let cache = ArchiveImageCache(maximumBytes: image.byteCost * 2, maximumCount: 2, lifetime: 10)
+        let now = Date(timeIntervalSince1970: 100)
+        cache.insert(image, for: a, now: now)
+        cache.insert(image, for: b, now: now)
+        XCTAssertNotNil(cache.image(for: a, now: now.addingTimeInterval(1)))
+        cache.insert(image, for: c, now: now.addingTimeInterval(2))
+        XCTAssertNil(cache.image(for: b, now: now.addingTimeInterval(2)), "Least recently used entry must be evicted")
+        XCTAssertEqual(cache.count, 2)
+        XCTAssertEqual(cache.byteCount, image.byteCost * 2)
+        XCTAssertNotNil(cache.image(for: a, now: now.addingTimeInterval(9)))
+        XCTAssertNil(cache.image(for: a, now: now.addingTimeInterval(10)), "Cache hits must not postpone authorization refresh forever")
+        let tooSmall = ArchiveImageCache(maximumBytes: image.byteCost - 1)
+        tooSmall.insert(image, for: a)
+        XCTAssertEqual(tooSmall.count, 0)
+        XCTAssertEqual(tooSmall.byteCount, 0)
+    }
+
+    @MainActor
+    func testArtworkRequestIdentityFencesSessionAndServerChanges() async throws {
+        MockURLProtocol.store.set { request in
+            if request.url?.path == "/api/v1/server" { return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}") }
+            return .init(body: "{}")
+        }
+        let client = makeClient()
+        let before = ArchiveImageRequest(api: client, path: "/api/v1/assets/a", maximumPixelSize: 128)
+        let image = try await ArchiveImageDecoder.decode(makeArtworkData(width: 128, height: 64), maximumPixelSize: 64)
+        let cache = ArchiveImageCache()
+        cache.insert(image, for: before)
+        try await client.logout()
+        let loggedOut = ArchiveImageRequest(api: client, path: "/api/v1/assets/a", maximumPixelSize: 128)
+        XCTAssertNotEqual(before, loggedOut)
+        XCTAssertFalse(before.hasSameSession(as: loggedOut))
+        XCTAssertNil(cache.image(for: loggedOut))
+        XCTAssertEqual(cache.byteCount, 0)
+        try await client.connect("https://other.example.test")
+        let switched = ArchiveImageRequest(api: client, path: "/api/v1/assets/a", maximumPixelSize: 128)
+        XCTAssertFalse(loggedOut.hasSameSession(as: switched))
+        XCTAssertEqual(switched.path, "https://other.example.test/api/v1/assets/a")
+        let otherClient = makeClient()
+        XCTAssertFalse(before.hasSameSession(as: ArchiveImageRequest(api: otherClient, path: before.path, maximumPixelSize: 128)))
+    }
+
+    @MainActor
+    func testArchiveImageDownsamplesAndRejectsInvalidOrCancelledInput() async throws {
+        let data = try makeArtworkData(width: 1200, height: 800)
+        let image = try await ArchiveImageDecoder.decode(data, maximumPixelSize: 128)
+        XCTAssertLessThanOrEqual(image.image.width, 128)
+        XCTAssertLessThanOrEqual(image.image.height, 128)
+        XCTAssertGreaterThan(image.image.width, image.image.height)
+        XCTAssertLessThanOrEqual(image.byteCost, 128 * 128 * 8)
+        do {
+            _ = try await ArchiveImageDecoder.decode(Data("not an image".utf8), maximumPixelSize: 128)
+            XCTFail("Invalid images must remain placeholders")
+        } catch APIError.decoding { }
+        let pending = Task { try await ArchiveImageDecoder.decode(data, maximumPixelSize: 128) }
+        pending.cancel()
+        do {
+            _ = try await pending.value
+            XCTFail("Cancelled image requests cannot publish decoded content")
+        } catch is CancellationError { }
+        XCTAssertEqual(ArchiveImageRequest.pixelLimit(points: 36, scale: 3), 128)
+        XCTAssertEqual(ArchiveImageRequest.pixelLimit(points: 3000, scale: 3), 1024)
+        XCTAssertEqual(ArchiveImageRequest.pixelLimit(points: .nan, scale: 3), 64)
+    }
+
+    func testCommentUploaderAndPinnedFlagsRemainIndependentFromNames() throws {
+        let comment = try decode(JSONValue.self, """
+        {"author":{"name":"名字包含UP主"},"is_uploader":false,"is_pinned":true}
+        """)
+        XCTAssertEqual(comment["is_uploader"]?.boolValue, false)
+        XCTAssertEqual(comment["is_pinned"]?.boolValue, true)
+        let legacy = try decode(JSONValue.self, "{\"author\":{\"name\":\"UP主\"}}")
+        XCTAssertNil(legacy["is_uploader"]?.boolValue)
+    }
+
+    private func makeArtworkData(width: Int, height: Int) throws -> Data {
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.2, green: 0.6, blue: 0.5, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        let image = try XCTUnwrap(context.makeImage())
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
+    @MainActor
     private func makeClient() -> APIClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
@@ -344,6 +488,7 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
         var headers: [String: String] = [:]
         var delay: TimeInterval = 0
         var responseURL: URL?
+        var data: Data?
     }
     final class Store: @unchecked Sendable {
         private let lock = NSLock()
@@ -371,7 +516,7 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
         guard !loadingLock.withLock({ stopped }) else { return }
         let response = HTTPURLResponse(url: reply.responseURL ?? request.url!, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
+        client?.urlProtocol(self, didLoad: reply.data ?? Data(reply.body.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() { loadingLock.withLock { stopped = true } }

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { session, sessionRevision, display, write, errorText } from './api';
 import UiIcon from './components/UiIcon.vue';
 import { inNativeShell } from './client';
+import { requiresLogin } from './utils/accessPolicy';
 const route = useRoute(),
   router = useRouter();
 const error = ref('');
@@ -36,9 +37,13 @@ watch(
   { immediate: true },
 );
 watch(
-  () => session.user,
-  (user) => {
-    if (!user && session.ready && route.meta.login)
+  () => [session.user, display.allow_guest_access],
+  () => {
+    if (
+      !session.user &&
+      session.ready &&
+      requiresLogin(route.path, !!route.meta.login, display.allow_guest_access)
+    )
       void router.replace({ path: '/login', query: { next: route.fullPath } });
   },
 );

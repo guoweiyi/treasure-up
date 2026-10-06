@@ -139,7 +139,7 @@ def test_refresh_does_not_grow_full_inventory_or_delete_history(db, monkeypatch)
     assert not runner.run_job(db, another)["continuation"]
     assert set(db.scalars(select(Comment.rpid))) == {"1", "2"}
     assert db.scalar(select(Comment.like_count).where(Comment.rpid == "2")) == 80
-    assert video.metadata_json["comment_capture"]["retention"] == "preserve_existing"
+    assert video.metadata_json["comment_capture"]["retention"] == "preserve_existing_except_pin_priority"
 
 
 def test_comment_assets_are_deduplicated_thumbnails_and_emotes_have_tokens(db, monkeypatch):

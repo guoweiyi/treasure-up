@@ -16,6 +16,7 @@ from app import catalog, schemas
 from app.config import settings
 from app.db import get_db
 from app.request_limits import RequestBodyLimit
+from app.library_access import enforce_library_access
 from app.jobs import enqueue
 from app.source_labels import display_source_title
 from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, Collection, CollectionItem, Comment, Creator,
@@ -25,7 +26,8 @@ from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, C
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
                           require_admin, require_editor, reserve_password_attempt, verify_password, optional_identity)
 
-app = FastAPI(title="Treasure Up", version="0.3.2", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Treasure Up", version="0.3.2", docs_url=None, redoc_url=None, openapi_url=None,
+              dependencies=[Depends(enforce_library_access)])
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
 app.add_middleware(RequestBodyLimit)
 P = "/api/v1"
@@ -80,7 +82,7 @@ def health(db: Session = Depends(get_db)):
 def server_capabilities():
     return {"application": "treasure-up", "api_version": 1, "version": app.version,
             "features": ["catalog", "private-playback", "hls", "danmaku", "comments", "watch-progress", "source-monitoring", "userscript-ingest", "personal-playlists"],
-            "authentication": ["session-cookie", "webauthn"] if settings.passkeys_enabled else ["session-cookie"]}
+            "authentication": ["session-cookie", "identity-token", "webauthn"] if settings.passkeys_enabled else ["session-cookie", "identity-token"]}
 
 
 @app.post(P + "/auth/login")
@@ -153,13 +155,16 @@ def videos(q: str = Query("", max_length=200), creator_id: str = "", collection_
         creators = creators.where(or_(PlatformUser.display_name.ilike(pattern, escape="\\"), Creator.alias.ilike(pattern, escape="\\")))
         stmt = stmt.where(or_(Video.title.ilike(pattern, escape="\\"), VideoAnnotation.title_override.ilike(pattern, escape="\\"),
                              Video.bvid == q.strip(), Video.aid == q.strip().removeprefix("av"), Video.id.in_(creators),
-                             cast(VideoAnnotation.tags, String).ilike(pattern, escape="\\")))
+                             cast(VideoAnnotation.tags, String).ilike(pattern, escape="\\"),
+                             cast(Video.source_tags, String).ilike(pattern, escape="\\")))
     if creator_id:
         stmt = stmt.where(Video.id.in_(select(VideoCreator.video_id).where(VideoCreator.creator_id == creator_id)))
     if collection_id:
         stmt = stmt.where(Video.id.in_(select(CollectionItem.video_id).where(CollectionItem.collection_id == collection_id)))
     if tag:
-        stmt = stmt.where(cast(VideoAnnotation.tags, String).ilike(like(json.dumps(tag, ensure_ascii=False)), escape="\\"))
+        tag_pattern = like(json.dumps(tag, ensure_ascii=False))
+        stmt = stmt.where(or_(cast(VideoAnnotation.tags, String).ilike(tag_pattern, escape="\\"),
+                             cast(Video.source_tags, String).ilike(tag_pattern, escape="\\")))
     if starred:
         stmt = stmt.where(Video.id.in_(select(VideoStar.video_id).where(VideoStar.user_id == identity[0].id))) if identity else stmt.where(False)
     ordering = {"newest": Video.created_at.desc(), "oldest": Video.created_at.asc(),
@@ -258,6 +263,8 @@ def comments(video_id: str, root: str = "", q: str = Query("", max_length=200), 
     if q:
         stmt = stmt.where(Comment.content.ilike(like(q), escape="\\"))
     ordering = (Comment.like_count.desc(), Comment.posted_at.desc(), Comment.id) if sort == "likes" else (Comment.posted_at.desc(), Comment.id)
+    if not root and not q:
+        ordering = (Comment.is_pinned.desc(), *ordering)
     return catalog.page(db, stmt.order_by(*ordering), page, page_size, batch_mapper=catalog.comment_views)
 
 
@@ -747,8 +754,8 @@ def save_settings(body: schemas.SettingsInput, user=Depends(require_admin), db: 
         merged = {**(row.value if row else {}), **value}
         if key == "statistics":
             config = schemas.StatisticsSettings.model_validate(merged)
-            if config.enabled and (not config.account_id or not db.get(SourceAccount, config.account_id)):
-                raise HTTPException(422, "定时更新统计需要选择有效采集账号")
+            if config.account_id and not db.get(SourceAccount, config.account_id):
+                raise HTTPException(422, "所选统计采集账号不存在")
         if row is None:
             db.add(Setting(key=key, value=merged))
         else:
@@ -778,6 +785,11 @@ def backup_now(user=Depends(require_admin), db: Session = Depends(get_db)):
 def overview(_=Depends(require_admin), db: Session = Depends(get_db)):
     from app.backup import rpo_status
     return {"stats": catalog.stats(db), "backup_protection": rpo_status(db),
+            "setup": {
+                "account_ready": bool(db.scalar(select(SourceAccount.id).where(SourceAccount.status == "valid").limit(1))),
+                "storage_ready": bool(db.scalar(select(StorageProfile.id).where(StorageProfile.enabled.is_(True), StorageProfile.is_default.is_(True)).limit(1))),
+                "source_ready": bool(db.scalar(select(SourceSubscription.id).limit(1))),
+            },
             "jobs": catalog.job_views(db, list(db.scalars(select(Job).order_by(Job.created_at.desc(), Job.id).limit(8)))),
             "storage": [storage_view(s) for s in db.scalars(select(StorageProfile))],
             "backups": [catalog.backup_view(b) for b in db.scalars(select(BackupSet).order_by(BackupSet.created_at.desc()).limit(5))]}
@@ -821,6 +833,8 @@ def update_user(user_id: str, body: schemas.UserUpdate, user=Depends(require_adm
         else:
             setattr(item, key, value)
     db.execute(delete(UserSession).where(UserSession.user_id == item.id))
+    from app.models import IdentityToken
+    db.execute(delete(IdentityToken).where(IdentityToken.user_id == item.id))
     audit(db, user, "update", "user", item.id, {"fields": list(values)})
     commit(db)
     return {"id": item.id, "username": item.username, "role": item.role, "disabled": item.disabled}
@@ -838,3 +852,7 @@ from app.userscript_api import router as userscript_router
 app.include_router(userscript_router)
 from app.personal_playlists import router as personal_playlists_router
 app.include_router(personal_playlists_router)
+from app.identity_api import router as identity_router
+app.include_router(identity_router)
+from app.creator_capture_api import router as creator_capture_router
+app.include_router(creator_capture_router)

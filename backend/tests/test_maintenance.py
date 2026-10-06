@@ -46,6 +46,19 @@ def stats_config(db, *, enabled=False, account_id="account", interval=1):
     db.commit()
 
 
+def test_statistics_defaults_enable_refresh_with_automatically_selected_valid_account(workspace):
+    with workspace.sessions() as db:
+        video_id = add_videos(db, 1, workspace.clock.now)[0]
+        assert maintenance.enqueue_statistics(db).get("needs_account")
+        db.add_all([SourceAccount(id="invalid", name="old", secret_encrypted="fixture", status="invalid"),
+                    SourceAccount(id="valid", name="current", secret_encrypted="fixture", status="valid")])
+        db.commit()
+        assert maintenance.enqueue_statistics(db)["queued"] == 1
+        job = db.scalar(select(Job).where(Job.kind == "refresh_stats"))
+        assert job.target_id == video_id and job.account_id == "valid" and job.policy["refresh_comments"]
+        assert not job.policy["refresh_danmaku"]
+
+
 def utc(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 

@@ -123,19 +123,25 @@ def _statistics_page(db, *, manual):
             return _result(state, disabled=True)
         if not manual and state.get("next_run_at") and _date(state["next_run_at"]) > now:
             return _result(state, not_due=True)
-        if not config.account_id or not db.get(SourceAccount, config.account_id):
+        account = db.get(SourceAccount, config.account_id) if config.account_id else db.scalar(
+            select(SourceAccount).where(SourceAccount.status == "valid")
+            .order_by(SourceAccount.last_verified_at.desc().nulls_last(), SourceAccount.created_at, SourceAccount.id).limit(1))
+        if not account or account.status in {"invalid", "expired", "disabled"}:
             if manual:
                 raise ValueError("请先在系统设置中选择统计更新账号")
             return _result(state, needs_account=True)
         ingest = db.get(Setting, "ingest")
         policy = IngestPolicy.model_validate(ingest.value if ingest else {}).model_dump()
         policy["refresh_danmaku"] = config.refresh_danmaku
+        policy["refresh_comments"] = config.refresh_comments
+        policy["refresh_tags"] = True
         state = _new_batch(db, Video, Video.bvid.like("BV%"), now)
-        state.update({"manual": manual, "account_id": config.account_id, "policy": policy,
+        state.update({"manual": manual, "account_id": account.id, "policy": policy,
                       "interval_hours": config.interval_hours, "next_available_at": now.isoformat()})
 
     # Never silently switch the account or policy halfway through a batch.
-    if not db.get(SourceAccount, state["account_id"]):
+    account = db.get(SourceAccount, state["account_id"])
+    if not account or account.status in {"invalid", "expired", "disabled"}:
         return _result(state, needs_account=True)
     rows, pending = _page(db, Video, (Video.id, Video.created_at), Video.bvid.like("BV%"), state)
     targets = [video.id for video in rows]
