@@ -29,6 +29,7 @@ import AdminSettings from '../components/admin/AdminSettings.vue';
 import StorageReplicas from '../components/admin/StorageReplicas.vue';
 import SourceMonitor from '../components/admin/SourceMonitor.vue';
 import StorageFields from '../components/admin/StorageFields.vue';
+import StorageProbeResult from '../components/admin/StorageProbeResult.vue';
 import OperationResult from '../components/admin/OperationResult.vue';
 import JobDetails from '../components/admin/JobDetails.vue';
 import IngestPolicyFields from '../components/admin/IngestPolicyFields.vue';
@@ -73,7 +74,7 @@ const descriptions: Record<string, string> = {
   jobs: '下载、同步与整理进度。',
   videos: '整理标题、封面与标签。',
   creators: '管理已保存的 UP 主与投稿。',
-  storage: '配置本地、S3 或原生 OSS。切换默认位置不自动移动已有文件。',
+  storage: '管理本地目录、对象存储与云盘，设置视频的写入位置和播放方式。',
   replicas: '管理各个存储位置的视频副本。',
   backups: '查看备份记录与恢复验证结果。',
   settings: '展示设置、采集默认策略与独立备份目录。',
@@ -104,6 +105,9 @@ const statuses = [
 ];
 const storageForm = ref(storageDraft());
 const operationOpen = ref(false);
+const probeOpen = ref(false),
+  probeResult = ref<Row | null>(null),
+  probeName = ref('');
 const dialog = ref(false),
   dialogTitle = ref(''),
   dialogKind = ref(''),
@@ -171,6 +175,12 @@ const storageLabels: Record<string, string> = {
   bucket: '存储桶',
   endpoint: '服务端地址',
   public_endpoint: '播放地址',
+  public_base_url: '自定义域名 / CDN',
+  private_bucket: '私有空间',
+  delivery_mode: '播放传输方式',
+  drive_id: '云盘 / 文档库',
+  site_id: 'SharePoint 站点',
+  tenant_id: 'Microsoft 租户',
   region: '区域',
   prefix: '对象前缀',
   addressing_style: '桶寻址',
@@ -368,8 +378,24 @@ async function action(path: string, label: string, body?: unknown, confirm = fal
   try {
     const result = await write(path, body);
     showOperation(result);
-    ElMessage.success(label === '测试存储连接' ? '存储探测已排队' : '请求已提交');
+    ElMessage.success('请求已提交');
     await load(page.value);
+  } catch (e) {
+    ElMessage.error(errorText(e));
+  } finally {
+    actionBusy.value = '';
+  }
+}
+async function probeStorage(row: Row) {
+  if (actionBusy.value) return;
+  const path = `/admin/storage/${row.id}/probe`;
+  actionBusy.value = path;
+  try {
+    const result = await api<Row>(path, { method: 'POST', signal: AbortSignal.timeout(90000) });
+    probeResult.value = result;
+    probeName.value = row.name;
+    probeOpen.value = true;
+    await load(page.value, true);
   } catch (e) {
     ElMessage.error(errorText(e));
   } finally {
@@ -897,8 +923,8 @@ onBeforeUnmount(() => {
                     ><el-button
                       size="small"
                       :loading="actionBusy === `/admin/storage/${row.id}/probe`"
-                      @click="action(`/admin/storage/${row.id}/probe`, '测试存储连接')"
-                      >探测能力</el-button
+                      @click="probeStorage(row)"
+                      >测试连接</el-button
                     ><el-button size="small" @click="migrate(row)">迁移</el-button></template
                   ></el-table-column
                 ></template
@@ -974,6 +1000,7 @@ onBeforeUnmount(() => {
       </main>
     </div>
     <OperationResult v-model:open="operationOpen" :job="feedback" @completed="load(page, true)" />
+    <StorageProbeResult v-model:open="probeOpen" :result="probeResult" :name="probeName" />
     <DeletionDialog
       :target="deletionTarget"
       @close="deletionTarget = null"

@@ -132,11 +132,18 @@ class JobInput(Input):
 
 class StorageInput(Input):
     name: str = Field(min_length=1, max_length=200)
-    kind: Literal["local", "s3", "oss"]
+    kind: Literal["local", "s3", "oss", "cos", "obs", "upyun", "qiniu", "minio", "rain", "spaces", "r2", "oracle", "b2", "onedrive", "onedrive_cn", "sharepoint", "sharepoint_cn"]
     config: dict = Field(default_factory=dict)
     credentials: dict | None = None
     is_default: bool = False
     enabled: bool = True
+
+
+class StorageDiscoveryInput(Input):
+    kind: Literal["local", "s3", "oss", "cos", "obs", "upyun", "qiniu", "minio", "rain", "spaces", "r2", "oracle", "b2", "onedrive", "onedrive_cn", "sharepoint", "sharepoint_cn"]
+    config: dict = Field(default_factory=dict)
+    credentials: dict | None = None
+    profile_id: str | None = Field(default=None, max_length=100)
 
 
 class MigrationInput(Input):
@@ -170,6 +177,7 @@ class PurgeLocationInput(Input):
 class PlaybackSettings(Input):
     package_long_videos: bool = True
     min_duration_seconds: int = Field(default=300, ge=0, le=86400)
+    min_size_mb: int = Field(default=64, ge=32, le=4096)
     segment_seconds: int = Field(default=6, ge=2, le=20)
     analyze_loudness: bool = True
     probe_bytes: int = Field(default=65536, ge=16384, le=131072)

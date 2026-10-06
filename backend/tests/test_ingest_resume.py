@@ -16,6 +16,8 @@ def test_interrupted_long_media_keeps_resume_path_without_signed_url_identity(tm
     monkeypatch.setattr(settings, "scratch_dir", tmp_path / "scratch")
     monkeypatch.setattr(settings, "media_root", tmp_path / "media")
     monkeypatch.setattr(media, "_probe", lambda path: ({"codec_name": "h264", "width": 1920, "height": 1080}, {"codec_name": "aac"}, 7200))
+    verified_audio = []
+    monkeypatch.setattr(media, "_verify_audio_decode", lambda path, *args: verified_audio.append(path))
     calls, options_seen = [], []
     class Downloader:
         def __init__(self, options):
@@ -50,6 +52,7 @@ def test_interrupted_long_media_keeps_resume_path_without_signed_url_identity(tm
             media.archive_media(db, source, video, part, policy)
         variant, reused = media.archive_media(db, source, video, part, policy)
         assert calls[0] == calls[1] and not reused and variant.duration == 7200
+        assert verified_audio == [calls[1]] and variant.metadata_json["audio_decode_verified"] is True
         assert options_seen[0]["continuedl"] is True
         assert options_seen[0]["concurrent_fragment_downloads"] == 1
         assert options_seen[0]["skip_unavailable_fragments"] is False

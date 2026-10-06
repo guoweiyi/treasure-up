@@ -80,3 +80,27 @@ test('properties supplied by the catalog are accepted without guessing absent pr
     undefined,
   );
 });
+
+test('the AAC shortcut prefers the corrected mix only for the same original', () => {
+  const updated = { ...copy, id: 'updated', metadata: { ...details, audio_mix_revision: 2 } };
+  const unrelated = {
+    ...updated,
+    id: 'other',
+    metadata: { ...updated.metadata, source_variant_id: 'other-original' },
+  };
+  assert.equal(
+    sameOriginalAudioAlternative(
+      original.id,
+      [original, copy, unrelated, updated],
+      undefined,
+      current,
+    ),
+    updated,
+  );
+  assert.equal(
+    sameOriginalAudioAlternative(original.id, [original, copy, unrelated], undefined, current),
+    copy,
+  );
+  assert.match(audioVariantSuffix(updated), /新版/);
+  assert.match(audioVariantSuffix(copy), /旧版/);
+});

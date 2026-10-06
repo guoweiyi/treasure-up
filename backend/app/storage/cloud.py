@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from .base import ObjectInfo, ObjectMissing, Storage, StorageError, file_digest, safe_key
 
@@ -29,21 +29,51 @@ def _endpoint(value: str | None):
     return value
 
 
+def public_object_url(base_url, key, version_id=None):
+    base_url = _endpoint(base_url)
+    url = base_url.rstrip("/") + "/" + quote(key, safe="/")
+    return url + ("?" + urlencode({"versionId": version_id}) if version_id else "")
+
+
+def safe_oss_session():
+    """Never forward an authenticated upload/body or STS token on redirects."""
+    import oss2
+    import requests
+    from oss2.http import Response
+    from oss2.exceptions import RequestError
+
+    class Session(oss2.Session):
+        def do_request(self, request, timeout):
+            try:
+                return Response(self.session.request(
+                    request.method, request.url, data=request.data, params=request.params,
+                    headers=request.headers, stream=True, timeout=timeout, proxies=request.proxies,
+                    allow_redirects=False))
+            except requests.RequestException as error:
+                raise RequestError(error) from error
+
+    session = Session()
+    session.session.trust_env = False
+    return session
+
+
 class S3Storage(Storage):
     kind = "s3"
 
-    def __init__(self, config: dict, credentials: dict, *, client=None, signing_client=None):
+    def __init__(self, config: dict, credentials: dict, *, client=None, signing_client=None, purpose="default"):
         self.bucket = config.get("bucket")
         if not self.bucket:
             raise StorageError("S3 bucket is required")
         self.prefix = safe_key(config["prefix"].strip("/")) if config.get("prefix") else ""
         self.part_size = max(5 * 1024**2, int(config.get("part_size", 16 * 1024**2)))
+        self.config = dict(config)
         if client is None:
             import boto3
             from botocore.config import Config
             if not credentials.get("access_key_id") or not credentials.get("secret_access_key"):
                 raise StorageError("Explicit S3 credentials are required")
-            options = dict(region_name=config.get("region", "us-east-1"), aws_access_key_id=credentials["access_key_id"], aws_secret_access_key=credentials["secret_access_key"], aws_session_token=credentials.get("session_token"), config=Config(signature_version="s3v4", s3={"addressing_style": config.get("addressing_style", "virtual")}, connect_timeout=10, read_timeout=120, retries={"max_attempts": 3}))
+            quick = purpose in {"probe", "discovery"}
+            options = dict(region_name=config.get("region", "us-east-1"), aws_access_key_id=credentials["access_key_id"], aws_secret_access_key=credentials["secret_access_key"], aws_session_token=credentials.get("session_token"), config=Config(signature_version="s3v4", s3={"addressing_style": config.get("addressing_style", "virtual")}, connect_timeout=3 if quick else 10, read_timeout=5 if quick else 120, retries={"max_attempts": 0 if quick else 3}, request_checksum_calculation="when_required", response_checksum_validation="when_required"))
             client = boto3.client("s3", endpoint_url=_endpoint(config.get("endpoint")), **options)
             signing_client = boto3.client("s3", endpoint_url=_endpoint(config.get("public_endpoint") or config.get("endpoint")), **options)
         self.client = client
@@ -95,8 +125,11 @@ class S3Storage(Storage):
         try:
             if on_checkpoint:
                 on_checkpoint(dict(state))
-            existing, marker = {}, None
+            existing, marker, pages = {}, None, 0
             while True:
+                pages += 1
+                if pages > 10000:
+                    raise StorageError("S3 multipart listing exceeded its part limit")
                 try:
                     page = self.client.list_parts(**upload_args, **({"PartNumberMarker": marker} if marker else {}))
                 except Exception as error:
@@ -110,12 +143,17 @@ class S3Storage(Storage):
                     upload_args = {**args, "UploadId": state["upload_id"]}
                     if on_checkpoint:
                         on_checkpoint(dict(state))
-                    existing, marker = {}, None
+                    existing, marker, pages = {}, None, 0
                     continue
                 existing.update({p["PartNumber"]: p for p in page.get("Parts", [])})
+                if len(existing) > 10000:
+                    raise StorageError("S3 multipart listing exceeded its part limit")
                 if not page.get("IsTruncated"):
                     break
-                marker = page["NextPartNumberMarker"]
+                next_marker = page.get("NextPartNumberMarker")
+                if not isinstance(next_marker, int) or not (marker or 0) < next_marker <= 10000:
+                    raise StorageError("S3 multipart pagination did not advance")
+                marker = next_marker
             parts = []
             with Path(path).open("rb") as stream:
                 number = 1
@@ -140,6 +178,8 @@ class S3Storage(Storage):
     def presign(self, key, expires_in, *, version_id=None):
         if not 1 <= expires_in <= 3600:
             raise StorageError("Playback URL lifetime must be 1 to 3600 seconds")
+        if not self.config.get("private_bucket", True) and self.config.get("public_base_url"):
+            return public_object_url(self.config["public_base_url"], self._key(key), version_id)
         return self.signing_client.generate_presigned_url("get_object", Params=self._args(key, version_id), ExpiresIn=expires_in)
 
     def read_range(self, key, start, end, *, version_id=None):
@@ -159,9 +199,10 @@ class S3Storage(Storage):
 class OssStorage(Storage):
     kind = "oss"
 
-    def __init__(self, config: dict, credentials: dict, *, bucket=None, signing_bucket=None):
+    def __init__(self, config: dict, credentials: dict, *, bucket=None, signing_bucket=None, purpose="default"):
         self.prefix = safe_key(config["prefix"].strip("/")) if config.get("prefix") else ""
         self.part_size = max(1024 * 1024, int(config.get("part_size", 16 * 1024**2)))
+        self.config = dict(config)
         if bucket is None:
             import oss2
             from oss2.credentials import StaticCredentialsProvider
@@ -170,8 +211,10 @@ class OssStorage(Storage):
             if not credentials.get("access_key_id") or not credentials.get("access_key_secret"):
                 raise StorageError("Explicit OSS credentials are required")
             auth = oss2.ProviderAuthV4(StaticCredentialsProvider(credentials["access_key_id"], credentials["access_key_secret"], credentials.get("security_token")))
-            bucket = oss2.Bucket(auth, _endpoint(config["endpoint"]), config["bucket"], region=config["region"], connect_timeout=10)
-            signing_bucket = oss2.Bucket(auth, _endpoint(config.get("public_endpoint") or config["endpoint"]), config["bucket"], region=config["region"], connect_timeout=10)
+            timeout = (3, 5) if purpose in {"probe", "discovery"} else 10
+            session = safe_oss_session()
+            bucket = oss2.Bucket(auth, _endpoint(config["endpoint"]), config["bucket"], region=config["region"], connect_timeout=timeout, session=session)
+            signing_bucket = oss2.Bucket(auth, _endpoint(config.get("public_base_url") or config.get("public_endpoint") or config["endpoint"]), config["bucket"], region=config["region"], connect_timeout=timeout, is_cname=bool(config.get("public_base_url")), session=session)
         self.bucket = bucket
         self.signing_bucket = signing_bucket or bucket
 
@@ -217,8 +260,11 @@ class OssStorage(Storage):
         try:
             if on_checkpoint:
                 on_checkpoint(dict(state))
-            existing, marker = {}, ""
+            existing, marker, pages = {}, "", 0
             while True:
+                pages += 1
+                if pages > 10000:
+                    raise StorageError("OSS multipart listing exceeded its part limit")
                 try:
                     page = self.bucket.list_parts(object_key, state["upload_id"], marker=marker)
                 except Exception as error:
@@ -229,12 +275,21 @@ class OssStorage(Storage):
                     state = {"key": key, "sha256": sha, "part_size": part_size, "upload_id": result.upload_id}
                     if on_checkpoint:
                         on_checkpoint(dict(state))
-                    existing, marker = {}, ""
+                    existing, marker, pages = {}, "", 0
                     continue
                 existing.update({p.part_number: p for p in page.parts})
+                if len(existing) > 10000:
+                    raise StorageError("OSS multipart listing exceeded its part limit")
                 if not page.is_truncated:
                     break
-                marker = page.next_marker
+                next_marker = page.next_marker
+                try:
+                    advancing = int(marker or 0) < int(next_marker) <= 10000
+                except (ValueError, TypeError):
+                    advancing = False
+                if not advancing:
+                    raise StorageError("OSS multipart pagination did not advance")
+                marker = next_marker
             parts = []
             with Path(path).open("rb") as stream:
                 number = 1
@@ -259,6 +314,8 @@ class OssStorage(Storage):
     def presign(self, key, expires_in, *, version_id=None):
         if not 1 <= expires_in <= 3600:
             raise StorageError("Playback URL lifetime must be 1 to 3600 seconds")
+        if not self.config.get("private_bucket", True) and self.config.get("public_base_url"):
+            return public_object_url(self.config["public_base_url"], self._key(key), version_id)
         return self.signing_bucket.sign_url("GET", self._key(key), expires_in, params=self._params(version_id), slash_safe=True)
 
     def delete(self, key, *, version_id=None):

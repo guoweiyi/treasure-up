@@ -54,6 +54,7 @@ const form = reactive<Row>({
   playback: {
     package_long_videos: true,
     min_duration_seconds: 300,
+    min_size_mb: 64,
     segment_seconds: 6,
     analyze_loudness: true,
     probe_bytes: 65536,
@@ -226,7 +227,7 @@ onMounted(load);
     <section class="admin-panel">
       <h2>播放与分发</h2>
       <div class="settings-switches">
-        <el-checkbox v-model="form.playback.package_long_videos">为长视频准备原码流分片</el-checkbox
+        <el-checkbox v-model="form.playback.package_long_videos">自动准备原码流分片</el-checkbox
         ><el-checkbox v-model="form.playback.analyze_loudness">分析音量平衡参数</el-checkbox>
       </div>
       <div class="form-two-columns">
@@ -235,6 +236,11 @@ onMounted(load);
             v-model="form.playback.min_duration_seconds"
             :min="0"
             :max="86400" /></el-form-item
+        ><el-form-item label="或文件体积达到（MiB）"
+          ><el-input-number
+            v-model="form.playback.min_size_mb"
+            :min="32"
+            :max="4096" /></el-form-item
         ><el-form-item label="目标分片时长（秒）"
           ><el-input-number
             v-model="form.playback.segment_seconds"
@@ -249,8 +255,7 @@ onMounted(load);
         /></el-form-item>
       </div>
       <p class="field-help">
-        HLS
-        使用原码流分片，改善起播与跳转，不会自动降画质。音量分析不修改原始文件；播放器可选衰减，空间音频或多声道音频绕过。
+        达到时长或体积任一条件即准备分片，原档与兼容版本均适用。使用原码流，改善起播与跳转，不会自动降画质。音量分析不修改原始文件；播放器可选衰减，空间音频或多声道音频绕过。
       </p>
     </section>
     <section class="admin-panel">

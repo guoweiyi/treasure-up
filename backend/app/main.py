@@ -584,33 +584,16 @@ def storage_view(s):
 
 
 def validate_storage(body):
-    permitted = {"root", "prefix", "endpoint", "public_endpoint", "region", "bucket", "addressing_style", "read_priority", "part_size"}
-    if set(body.config) - permitted:
-        raise HTTPException(422, "存储配置含未知字段；凭据请使用独立凭据字段")
-    for key in permitted - {"read_priority", "part_size"}:
-        if key in {"endpoint", "public_endpoint"} and body.config.get(key) is None:
-            continue
-        if key in body.config and not isinstance(body.config[key], str):
-            raise HTTPException(422, "存储地址、目录和名称须为文本")
-    if "read_priority" in body.config and (not isinstance(body.config["read_priority"], int) or not 0 <= body.config["read_priority"] <= 10000):
-        raise HTTPException(422, "读取优先级须为0至10000的整数，数值越小越优先")
-    if "part_size" in body.config and (not isinstance(body.config["part_size"], int) or not 5 * 1024**2 <= body.config["part_size"] <= 512 * 1024**2):
-        raise HTTPException(422, "分片大小须为5至512MiB")
+    from app.storage.base import StorageError
+    from app.storage.configuration import validate_configuration
+    try:
+        validate_configuration(body.kind, body.config)
+    except StorageError as error:
+        raise HTTPException(422, str(error)) from None
     if body.kind == "local":
         root = Path(body.config.get("root", str(settings.media_root))).resolve()
         if not root.is_relative_to(settings.media_root.resolve()):
             raise HTTPException(422, "本地存储目录必须位于已挂载媒体根目录内")
-    else:
-        if not body.config.get("bucket"):
-            raise HTTPException(422, "请填写存储桶名称")
-        from app.storage.cloud import _endpoint
-        from app.storage.base import StorageError
-        try:
-            for key in ("endpoint", "public_endpoint"):
-                if body.config.get(key):
-                    _endpoint(body.config[key])
-        except StorageError:
-            raise HTTPException(422, "服务地址须为完整的 HTTP(S) 地址，不要包含账号、路径或参数") from None
 
 
 @app.get(P + "/admin/storage")
@@ -653,9 +636,12 @@ def write_storage(db, body, item=None):
         if credentials is None and (item is None or item.kind != body.kind or not item.secret_encrypted):
             raise HTTPException(422, "请填写此存储服务的访问凭据")
         if credentials is not None:
-            secret_name = "secret_access_key" if body.kind == "s3" else "access_key_secret"
-            if not all(isinstance(credentials.get(key), str) and credentials[key].strip() for key in ("access_key_id", secret_name)):
-                raise HTTPException(422, "请完整填写访问密钥 ID 和访问密钥")
+            from app.storage.configuration import validate_credentials
+            from app.storage.base import StorageError
+            try:
+                validate_credentials(body.kind, credentials)
+            except StorageError as error:
+                raise HTTPException(422, str(error)) from None
     if body.is_default:
         for existing in previous_defaults:
             existing.is_default = False
@@ -682,6 +668,34 @@ def new_storage(body: schemas.StorageInput, user=Depends(require_admin), db: Ses
     return storage_view(item)
 
 
+@app.post(P + "/admin/storage/discover")
+def discover_storage(body: schemas.StorageDiscoveryInput, _=Depends(require_admin), db: Session = Depends(get_db)):
+    from app.security import decrypt_secret
+    from app.storage.base import StorageError
+    from app.storage.configuration import validate_configuration, validate_credentials
+    from app.storage.discovery import discover_storage as discover
+    credentials = body.credentials
+    if credentials is None and body.profile_id:
+        existing = required(db, StorageProfile, body.profile_id)
+        if existing.kind != body.kind:
+            raise HTTPException(422, "更换存储类型后，请重新填写对应的访问凭据")
+        try:
+            credentials = json.loads(decrypt_secret(existing.secret_encrypted)) if existing.secret_encrypted else {}
+        except Exception:
+            raise HTTPException(503, "无法读取已保存的存储凭据，请重新填写") from None
+    try:
+        validate_configuration(body.kind, body.config, discovery=True)
+        validate_credentials(body.kind, credentials or {})
+    except StorageError as error:
+        raise HTTPException(422, str(error)) from None
+    try:
+        return discover(body.kind, body.config, credentials or {})
+    except Exception:
+        # Bucket-scoped credentials may allow playback but not bucket listing.
+        # Manual entry remains available; provider errors must not leak secrets.
+        raise HTTPException(422, "无法列出存储空间，请检查服务地址、凭据与列举权限；也可以手动填写名称") from None
+
+
 @app.patch(P + "/admin/storage/{profile_id}")
 def update_storage(profile_id: str, body: schemas.StorageInput, user=Depends(require_admin), db: Session = Depends(get_db)):
     item = write_storage(db, body, required(db, StorageProfile, profile_id))
@@ -690,13 +704,14 @@ def update_storage(profile_id: str, body: schemas.StorageInput, user=Depends(req
     return storage_view(item)
 
 
-@app.post(P + "/admin/storage/{profile_id}/probe", status_code=202)
+@app.post(P + "/admin/storage/{profile_id}/probe")
 def probe(profile_id: str, user=Depends(require_admin), db: Session = Depends(get_db)):
-    required(db, StorageProfile, profile_id)
-    job = enqueue(db, "probe_storage", profile_id)
-    audit(db, user, "probe", "storage", profile_id, {"job_id": job.id})
+    from app.storage.probe import probe_now
+    profile = required(db, StorageProfile, profile_id)
+    result = probe_now(profile)
+    audit(db, user, "probe", "storage", profile_id, {"status": result["status"], "checks": result["checks"]})
     commit(db)
-    return catalog.job_view(job)
+    return result
 
 
 @app.post(P + "/admin/storage/{profile_id}/migrate")

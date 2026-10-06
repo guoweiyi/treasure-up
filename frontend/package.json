@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/patch-hls-progressive.mjs",
+    "pretest": "node scripts/patch-hls-progressive.mjs --check",
+    "prebuild": "node scripts/patch-hls-progressive.mjs --check",
     "dev": "vite --host 127.0.0.1",
     "typecheck": "vue-tsc --noEmit",
     "test": "node --test src/player/*.test.mjs src/utils/*.test.mjs",

@@ -44,8 +44,10 @@ def test_extended_probe_has_fixed_budget_and_existing_timeout(monkeypatch):
 @pytest.mark.parametrize('problem', ['none', 'channels', 'packets'])
 def test_hls_extended_probe_does_not_accept_changed_channels_or_audio_packets(db, monkeypatch, problem):
     _, _, archive = archive_fixture(db)
-    video = {'codec_type': 'video', 'index': 0, 'codec_name': 'hevc', 'width': 3840, 'height': 2160}
-    audio = {'codec_type': 'audio', 'index': 1, 'codec_name': 'eac3', 'channels': 8, 'channel_layout': '7.1', 'sample_rate': '48000'}
+    video = {'codec_type': 'video', 'index': 0, 'codec_name': 'hevc', 'width': 3840, 'height': 2160,
+             'avg_frame_rate': '60000/1001', 'bit_rate': '8000000'}
+    audio = {'codec_type': 'audio', 'index': 1, 'codec_name': 'eac3', 'channels': 8, 'channel_layout': '7.1',
+             'sample_rate': '48000', 'bit_rate': '1024000'}
     calls = []
     def probe(path, **kwargs):
         calls.append((path.name, kwargs.get('extended', False)))
@@ -61,15 +63,25 @@ def test_hls_extended_probe_does_not_accept_changed_channels_or_audio_packets(db
     ec3 = {'joc': True, 'complexity_index_type_a': 16, 'substreams': [[0, 6, 0, 0, 7, 1, 1, 16]]}
     monkeypatch.setattr(hls, 'probe_media', probe)
     monkeypatch.setattr(hls, 'run_tool', mux)
+    # This test isolates the post-mux preservation gates; real fragment layout
+    # and timestamps are covered by the FFmpeg integration tests.
+    monkeypatch.setattr(hls, 'fragment_movie_timescale', lambda _: 48000)
+    monkeypatch.setattr(hls, 'finalize_fragmented_hls', lambda *a, **k: None)
     monkeypatch.setattr(media, 'inspect_dolby', lambda *a, **k: {'ec3': ec3, 'dolby_atmos': True})
     monkeypatch.setattr(hls, 'ec3_configuration', lambda path: ec3)
     monkeypatch.setattr(hls, 'preserve_ec3_configuration', lambda *a, **k: False)
-    monkeypatch.setattr(hls, 'packet_digest', lambda path, kind, **k:
-        'changed' if problem == 'packets' and path.suffix == '.m3u8' and kind == 'audio' else 'unchanged')
+    monkeypatch.setattr(hls, 'stream_copy_digests', lambda path, **k: {'video': 'unchanged', 'audio':
+        'changed' if problem == 'packets' and path.suffix == '.m3u8' else 'unchanged'})
     if problem == 'none':
         result = hls.package_variant(db, archive.id)
         assert result.metadata_json['hls_audio_probe']['probesize_bytes'] == 33554432
         assert result.metadata_json['payloads_verified']
+        assert result.metadata_json['fps'] == pytest.approx(60000 / 1001)
+        assert result.metadata_json['video_bitrate_bps'] == 8_000_000
+        assert result.metadata_json['audio_bitrate_bps'] == 1_024_000
+        assert result.metadata_json['total_bitrate_bps'] == len(b'archive fixture') * 8 / 600
+        assert len(calls) == 3 and calls[0][1] is False
+        assert calls[1:] == [('index.m3u8', False), ('index.m3u8', True)]
     else:
         with pytest.raises(tools.PlaybackError, match='channels' if problem == 'channels' else 'payload'):
             hls.package_variant(db, archive.id)

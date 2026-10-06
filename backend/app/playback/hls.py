@@ -17,6 +17,7 @@ from app.storage.service import ingest_file, read_asset_bytes
 from .source import source_scope
 from .tools import PlaybackError, probe_media, run_tool
 from .ec3 import ec3_configuration, preserve_ec3_configuration
+from .fragments import fragment_movie_timescale, segment_mux_options, finalize_fragmented_hls
 
 _INDEX_CACHE = OrderedDict()
 _CACHE_BYTES = 0
@@ -34,7 +35,7 @@ def dovi_configuration(stream):
 def packet_digest(path, kind, *, check_active=None):
     output, _ = run_tool([str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-protocol_whitelist", "file,crypto,data",
         "-i", str(path), "-map", "0:v:0" if kind == "video" else "0:a:0", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"],
-        check_active=check_active, capture=True)
+        check_active=check_active, capture=True, reject_errors=True)
     value = output.decode("ascii").strip()
     if not re.fullmatch(r"SHA256=[0-9a-f]{64}", value):
         raise PlaybackError("Media packet verification did not produce a valid digest")
@@ -45,7 +46,7 @@ def flac_streaminfo_digest(path, *, check_active=None):
     """FFprobe exposes the MP4 dfLa STREAMINFO as exactly 34 extradata bytes."""
     raw, _ = run_tool([str(settings.ffprobe_path), "-v", "error", "-protocol_whitelist", "file,crypto,data",
         "-select_streams", "a:0", "-show_entries", "stream=codec_name,extradata_size,extradata_hash",
-        "-show_data_hash", "sha256", "-of", "json", str(path)], check_active=check_active, timeout=120, capture=True)
+        "-show_data_hash", "sha256", "-of", "json", str(path)], check_active=check_active, timeout=120, capture=True, reject_errors=True)
     try:
         streams = json.loads(raw)["streams"]
         stream = streams[0]
@@ -58,17 +59,19 @@ def flac_streaminfo_digest(path, *, check_active=None):
         raise PlaybackError("FLAC STREAMINFO configuration could not be verified") from None
 
 
-def stream_copy_digests(path, *, check_active=None):
-    """Hash both compressed streams in one read, without decoding long FLAC audio."""
+def stream_copy_digests(path, *, check_active=None, include_audio=True):
+    """Hash selected compressed streams in one read, without decoding the media."""
+    maps = ["-map", "0:v:0"] + (["-map", "0:a:0"] if include_audio else [])
     raw, _ = run_tool([str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-protocol_whitelist", "file,crypto,data",
-        "-i", str(path), "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-"],
-        check_active=check_active, capture=True)
+        "-i", str(path), *maps, "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-"],
+        check_active=check_active, capture=True, reject_errors=True)
     try:
         lines = raw.decode("ascii").strip().splitlines()
-        if len(lines) != 2:
+        expected = [(0, "v", "video")] + ([(1, "a", "audio")] if include_audio else [])
+        if len(lines) != len(expected):
             raise ValueError()
         result = {}
-        for line, (number, kind, name) in zip(lines, [(0, "v", "video"), (1, "a", "audio")]):
+        for line, (number, kind, name) in zip(lines, expected):
             match = re.fullmatch(rf"{number},{kind},SHA256=([0-9a-f]{{64}})", line)
             if not match:
                 raise ValueError()
@@ -178,11 +181,14 @@ def package_asset_ids(index):
     return list(dict.fromkeys([index["init_asset_id"], *(s["asset_id"] for s in index["segments"])]))
 
 
-def render_manifest(index, url_for_asset):
+def render_manifest(index, url_for_asset, *, allow_external=False):
     """URLs are generated for the authenticated session, never stored in the index."""
     validate_index(index)
     def uri(asset_id):
         value = str(url_for_asset(asset_id))
+        if allow_external and value.startswith(("https://", "http://")):
+            from app.storage.delivery import validate_delivery_url
+            return validate_delivery_url(value)
         if not value.startswith("/") or value.startswith("//") or any(c in value for c in '\r\n"\\'):
             raise PlaybackError("Manifest routes must be same-origin API paths")
         return value
@@ -201,7 +207,7 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
         raise PlaybackError("A source media variant is required")
     if not isinstance(segment_seconds, int) or not 2 <= segment_seconds <= 30:
         raise PlaybackError("HLS segment target must be between 2 and 30 seconds")
-    format_key = f"hls-copy-v2:{segment_seconds}:" + source_variant.asset_id
+    format_key = f"hls-copy-v3:{segment_seconds}:" + source_variant.asset_id
     existing = db.scalar(select(MediaVariant).where(MediaVariant.part_id == source_variant.part_id,
         MediaVariant.kind == "hls", MediaVariant.format_key == format_key))
     if existing:
@@ -238,10 +244,13 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
             arguments += ["-tag:v", "hvc1"]
         if audios and audios[0].get("codec_name") == "eac3":
             arguments += ["-tag:a", "ec-3"]
-        arguments += ["-f", "hls", "-hls_segment_type", "fmp4", "-hls_segment_options", "movflags=+write_colr:strict=unofficial",
-            "-hls_time", str(segment_seconds), "-hls_playlist_type", "vod", "-hls_list_size", "0", "-hls_fmp4_init_filename", "init.mp4",
-            "-hls_segment_filename", str(folder / "segment_%06d.m4s"), str(folder / "index.m3u8")]
-        run_tool(arguments, check_active=guard)
+        # A GOP-aligned HLS segment can still be read progressively: retain one
+        # MOV context and put ~1-second moof/mdat pairs inside each segment.
+        # Do not pass frag_duration to hlsenc: it can put media inside init.mp4.
+        arguments += segment_mux_options(folder, segment_seconds=segment_seconds,
+            movie_timescale=fragment_movie_timescale([*videos, *audios]))
+        run_tool(arguments, check_active=guard, reject_errors=True)
+        finalize_fragmented_hls(folder, check_active=guard)
         init_name, segments = parse_generated_playlist((folder / "index.m3u8").read_text(encoding="utf-8"))
         if audio_evidence.get("ec3"):
             restored = preserve_ec3_configuration(folder / init_name, audio_evidence["ec3"], check_active=guard)
@@ -280,7 +289,6 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
                 for field in ("bits_per_raw_sample", "sample_fmt"):
                     if original.get(field) is None or candidates[0].get(field) != original[field]:
                         raise PlaybackError(f"FLAC stream property could not be preserved: {field}")
-        payload_hashes = {}
         if dovi:
             init_probe = probe_media(folder / init_name, check_active=guard)
             init_video = next((s for s in init_probe["streams"] if s.get("codec_type") == "video"), {})
@@ -291,18 +299,14 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
             streaminfo = flac_streaminfo_digest(source, check_active=guard)
             if flac_streaminfo_digest(folder / init_name, check_active=guard) != streaminfo:
                 raise PlaybackError("FLAC STREAMINFO configuration was not preserved")
-            payload_hashes = stream_copy_digests(source, check_active=guard)
-            if stream_copy_digests(folder / "index.m3u8", check_active=guard) != payload_hashes:
-                raise PlaybackError("HLS stream-copy payload verification failed")
             audio_evidence["flac"] = {"streaminfo_sha256": streaminfo, "streaminfo_verified": True,
                 "bits_per_sample": int(audios[0]["bits_per_raw_sample"]), "sample_rate": int(audios[0]["sample_rate"]),
                 "channels": audios[0]["channels"], "payload_verified": True}
-        elif dovi or (audios and audios[0].get("codec_name") == "eac3"):
-            for kind in (["video", "audio"] if audios else ["video"]):
-                before = packet_digest(source, kind, check_active=guard)
-                if packet_digest(folder / "index.m3u8", kind, check_active=guard) != before:
-                    raise PlaybackError("HLS stream-copy payload verification failed")
-                payload_hashes[kind] = before
+        # Ordinary AAC/AC-3 needs the same preservation check as FLAC/EC-3.
+        # Hash audio and video together: one read of each input, even for DOVI.
+        payload_hashes = stream_copy_digests(source, check_active=guard, include_audio=bool(audios))
+        if stream_copy_digests(folder / "index.m3u8", check_active=guard, include_audio=bool(audios)) != payload_hashes:
+            raise PlaybackError("HLS stream-copy payload verification failed")
         duration = sum(segment["duration"] for segment in segments)
         original_duration = float(probe.get("format", {}).get("duration") or source_variant.duration)
         if abs(duration - original_duration) > 2:
@@ -317,22 +321,30 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
         index = {"schema": "treasure.hls.v1", "source_asset_id": source_variant.asset_id, "stream_copy": True,
             "init_asset_id": initialization.id, "segments": rows, "target_duration": math.ceil(max(s["duration"] for s in rows)),
             "duration": duration, "video_codec": videos[0]["codec_name"], "audio_codec": audios[0]["codec_name"] if audios else "",
-            "segment_target_seconds": segment_seconds, "segment_boundary": "source_keyframes"}
+            "segment_target_seconds": segment_seconds, "segment_boundary": "source_keyframes",
+            "fragment_target_seconds": 1, "packaging_version": 3}
         index_path = folder / "index.json"
         index_path.write_text(json.dumps(index, ensure_ascii=True, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         index_asset = ingest_file(db, index_path, kind="hls_index", mime_type="application/json", profile_id=profile_id)
         for asset_id, purpose in [(source_variant.asset_id, "hls_source"), (initialization.id, "hls_init"), *[(row["asset_id"], "hls_segment") for row in rows]]:
             if not db.scalar(select(AssetRef).where(AssetRef.asset_id == asset_id, AssetRef.entity_type == "asset", AssetRef.entity_id == index_asset.id, AssetRef.purpose == purpose)):
                 db.add(AssetRef(asset_id=asset_id, entity_type="asset", entity_id=index_asset.id, purpose=purpose))
+        from app.ingest.media import _measured_properties
+        from app.media_properties import merge_media_properties
+        # Reuse the already completed source probe. HLS is stream-copy, so these
+        # measurements describe its actual source, never a sibling compatibility file.
+        measurements = _measured_properties(videos[0], audios[0] if audios else {}, original_duration, source.stat().st_size)
         result = MediaVariant(part_id=source_variant.part_id, asset_id=index_asset.id, kind="hls", format_key=format_key,
             quality=source_variant.quality, width=source_variant.width, height=source_variant.height,
             video_codec=source_variant.video_codec, audio_codec=source_variant.audio_codec, duration=duration,
-            metadata_json={**(source_variant.metadata_json or {}), **audio_evidence, "source_variant_id": source_variant.id,
+            metadata_json=merge_media_properties(source_variant.metadata_json, measurements,
+                {**audio_evidence, "source_variant_id": source_variant.id,
                 "source_asset_id": source_variant.asset_id, "stream_copy": True,
                 "source_kind": source_variant.kind, "segment_target_seconds": segment_seconds,
+                "fragment_target_seconds": 1, "packaging_version": 3,
                 "dovi": dovi, "dolby_vision": bool(dovi.get("dv_profile", 0) > 0 and dovi.get("rpu_present_flag") == 1),
                 "payload_hashes": payload_hashes,
-                "payloads_verified": bool(payload_hashes), "spatial_audio_output_verified": False})
+                "payloads_verified": bool(payload_hashes), "spatial_audio_output_verified": False}))
         db.add(result)
         guard()
         db.flush()

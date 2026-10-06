@@ -12,6 +12,7 @@ annotated-types==0.8.0
 anyio==4.15.1
 billiard==4.3.0
 boto3==1.43.108
+esdk-obs-python==3.26.6
 botocore==1.43.108
 celery==5.6.3
 certifi==2026.7.22

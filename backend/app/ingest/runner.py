@@ -1022,6 +1022,8 @@ def _download(ctx, video):
         variant = ctx.db.get(MediaVariant, archives.get(part_id)) if archives.get(part_id) else None
         if variant is None:
             raise IngestError("原档检查点对应媒体不存在", code="missing_archive", retryable=False)
+        from app.maintenance import enqueue_variant_preparation
+        enqueue_variant_preparation(ctx.db, variant)
         if ctx.policy.get("create_compatible_copy", True):
             playback = enqueue(ctx.db, "create_playback", variant.id, policy=dict(ctx.policy),
                 dedupe_key="playback:" + variant.id, frozen_policy=True)
@@ -1048,11 +1050,10 @@ def _create_playback(db, job):
             ctx.stage("compatible_copy", part_id=part.id)
             playback, reused = ensure_playback_variant(db, part, archive, ctx.policy, guard=ctx.guard)
             _ref(db, playback.asset_id, "media_variant", playback.id, "playback")
-            if (playback.metadata_json or {}).get("compatibility_mode") == "audio_only":
-                # AAC has different audio packets from the original. Its HLS
-                # and loudness belong to this derivative, never the archive.
-                from app.maintenance import enqueue_variant_preparation
-                preparation = enqueue_variant_preparation(db, playback)
+            # Every compatible rendition needs its own segmentation/loudness
+            # decisions; older H.264 copies must not fall back to giant files.
+            from app.maintenance import enqueue_variant_preparation
+            preparation = enqueue_variant_preparation(db, playback)
             _playback_state(ctx, video, archive, job, "complete")
             _ingest_state(ctx, video, playback_error=None, playback_reason=None)
             ctx.run.status, ctx.run.finished_at = "visible_traversal_complete", _now()

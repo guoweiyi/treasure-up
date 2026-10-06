@@ -30,7 +30,7 @@ export function sameOriginalAudioAlternative(
   // Only a registered original's explicit derived copy is an eligible shortcut.
   // Never select another original/quality, an HLS package, or an unrelated AAC.
   if (selected?.kind !== 'archive') return undefined;
-  return variants.find((variant) => {
+  const candidates = variants.filter((variant) => {
     const details = properties(variant, media);
     return (
       variant.kind === 'playback' &&
@@ -38,6 +38,12 @@ export function sameOriginalAudioAlternative(
       audioOnlyCopy(details)
     );
   });
+  // Old copies remain selectable, but the shortcut should prefer the corrected
+  // stereo mix once it has been explicitly prepared for this same original.
+  return (
+    candidates.find((variant) => properties(variant, media).audio_mix_revision === 2) ||
+    candidates[0]
+  );
 }
 export function audioCompatibilityMessage(
   media: MeasuredMedia | undefined,
@@ -50,6 +56,7 @@ export function audioCompatibilityMessage(
 }
 export function audioVariantSuffix(variant: Variant, media: Properties) {
   const value = properties(variant, media);
-  if (variant.kind === 'playback' && audioOnlyCopy(value)) return 'AAC 立体声 · 原视频流';
+  if (variant.kind === 'playback' && audioOnlyCopy(value))
+    return `AAC 立体声 · 原视频流（${value.audio_mix_revision === 2 ? '新版' : '旧版'}）`;
   return variant.kind === 'playback' ? '兼容副本' : '原档';
 }

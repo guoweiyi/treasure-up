@@ -282,7 +282,8 @@ def _gc_scope(db, sha):
 
 def _gc_asset(db, asset_id, guard, publish):
     from app.backup import protected_asset_ids
-    from app.storage.base import ObjectMissing, StorageError, content_key
+    from app.storage.base import ObjectMissing, StorageError
+    from app.storage.naming import is_managed_key
     from app.storage.service import get_adapter
     from app.storage.lifecycle import _same_physical_object
     sha = db.scalar(select(Asset.sha256).where(Asset.id == asset_id))
@@ -302,8 +303,8 @@ def _gc_asset(db, asset_id, guard, publish):
             if location.state == "deleted":
                 continue
             guard()
-            if location.object_key != content_key(asset.sha256):
-                raise StorageError("Only registered content-addressed objects can be removed")
+            if not is_managed_key(location.object_key, asset.sha256):
+                raise StorageError("Only registered immutable objects can be removed")
             profile = db.get(StorageProfile, location.storage_profile_id)
             if not profile or not profile.enabled:
                 raise StorageError("Enable the storage node before retrying deletion")

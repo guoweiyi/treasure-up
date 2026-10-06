@@ -46,6 +46,22 @@ def test_new_profile_can_follow_old_unsupported_result_without_resetting_it(cont
     assert old.status == 'succeeded' and old.result['compatibility'] == 'unsupported'
 
 
+def test_new_mix_profile_does_not_reuse_completed_legacy_copy_job(context):
+    client, db, tmp = context
+    _, _, original, _ = seed_media(db, tmp)
+    old = Job(kind='create_playback', target_id=original.id,
+        dedupe_key=f'compatible-v2:{original.id}:{original.asset_id}',
+        status='succeeded', result={'variant_id': 'legacy-copy'})
+    db.add(old); db.commit(); login(client)
+    response = client.post(f'/api/v1/admin/variants/{original.id}/compatible')
+    assert response.status_code == 202 and response.json()['id'] != old.id
+    job = db.get(Job, response.json()['id'])
+    assert job.dedupe_key == f'compatible-v3:{original.id}:{original.asset_id}'
+    assert client.post(f'/api/v1/admin/variants/{original.id}/compatible').json()['id'] == job.id
+    db.refresh(old)
+    assert old.status == 'succeeded' and old.result['variant_id'] == 'legacy-copy'
+
+
 @pytest.mark.parametrize('protocol', ['file', 'hls'])
 def test_stereo_playback_uses_its_own_assets_and_never_inherits_atmos(context, protocol):
     client, db, tmp = context

@@ -1,0 +1,22 @@
+{
+  "version": "1.7.3",
+  "patch": "treasure-progressive-timeline-v1",
+  "files": {
+    "src/remux/passthrough-remuxer.ts": {
+      "original": "5c06e0d40d1ab4706888556169cf553faffb63408cc22d8a22920334af132a1d",
+      "patched": "c0d394f1b7c57fe3a7ddc25a231b5b38220c7dcdfa211e6659597a6a1b5a0799"
+    },
+    "dist/hls.mjs": {
+      "original": "11e668e41247b44b5807a10264f36e2edd9eaaa681167c46c9a681bd3757059b",
+      "patched": "9e76495b4b817e7ac96c3c63197694c682c5ca50d19b24eb6440c6dc88ff2bb5"
+    },
+    "dist/hls.js": {
+      "original": "81b783697c4a08d7e7218303665f49e04b72dda1c67ff9677719586fcfe25fb7",
+      "patched": "6fae193526c79f00b9e54cbb0d84472e02b22c3563e78aad88d00eae52e44cbe"
+    },
+    "dist/hls.worker.js": {
+      "original": "42794b9ca89d78c54407c6a0e46cdcde9fbd976e476259428e506be857cb16ea",
+      "patched": "65cef0b4c91dcbb08be572e40c7234fcd1702bf23457186dc35b0b2add3a2086"
+    }
+  }
+}

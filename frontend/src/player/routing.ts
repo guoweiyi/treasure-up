@@ -1,4 +1,4 @@
-import { api, session, write } from '../api';
+import { api, session, write } from '../api.ts';
 import type { Playback, PlaybackRoute } from '../types';
 
 const observations = new Map<string, number>();
@@ -73,7 +73,7 @@ export async function createPlayback(
 ) {
   const create = () =>
     api<Playback>('/playback-sessions', { method: 'POST', body: JSON.stringify(input), signal });
-  let data = await create();
+  const data = await create();
   const routes = data.routes?.filter((route) => route.status !== 'unavailable') || [];
   if (!measure || input.route_id || routes.length < 2 || signal.aborted) return data;
   const pending = routes
@@ -84,15 +84,11 @@ export async function createPlayback(
     )
     .slice(0, 3);
   if (!pending.length) return data;
-  let recorded = false;
   onProbe(true);
-  try {
-    // All probes share one short measurement window; each reads at most its byte budget.
-    const results = await Promise.all(pending.map((route) => probe(data, route, signal)));
-    recorded = results.some(Boolean);
-    if (recorded && !signal.aborted) data = await create();
-  } finally {
-    onProbe(false);
-  }
+  // Measurements improve subsequent automatic selections without delaying playback
+  // or replacing a stream that has already begun playing.
+  void Promise.allSettled(pending.map((route) => probe(data, route, signal))).finally(() => {
+    if (!signal.aborted) onProbe(false);
+  });
   return data;
 }

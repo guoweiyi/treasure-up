@@ -61,6 +61,8 @@ def test_hevc_conversion_preserves_original_and_reuses_verified_copy(original, m
         invocations.append((args, maximum, timeout))
         output.write_bytes(b"h264-aac-media")
     monkeypatch.setattr(media, "_run_ffmpeg", convert)
+    verified_audio = []
+    monkeypatch.setattr(media, "_verify_audio_decode", lambda path, *args: verified_audio.append(path.name))
     playback, reused = media.ensure_playback_variant(db, part, archive, {"max_download_bytes": 100, "transcode_timeout_seconds": 60})
     db.commit()
     assert not reused and playback.asset_id != archive.asset_id
@@ -69,6 +71,9 @@ def test_hevc_conversion_preserves_original_and_reuses_verified_copy(original, m
     assert read_asset_bytes(db, playback.asset_id) == b"h264-aac-media"
     assert invocations[0][1:] == (100, 60)
     assert "libx264" in invocations[0][0] and "aac_low" in invocations[0][0]
+    assert media.AAC_STEREO_FILTER in invocations[0][0] and "-xerror" in invocations[0][0]
+    assert verified_audio == ["playback.mp4"]
+    assert playback.metadata_json["audio_mix_revision"] == 2
     again, reused = media.ensure_playback_variant(db, part, archive, {})
     assert again.id == playback.id and reused and len(invocations) == 1
     metadata = db.get(Video, part.video_id).metadata_json["media_properties"][archive.id]
@@ -143,7 +148,7 @@ def test_full_decode_verification_releases_process_on_cancel_or_lease_loss(tmp_p
     def start(arguments, **options):
         commands.append(arguments)
         assert options["stdin"] is subprocess.DEVNULL
-        assert options["stderr"] is subprocess.DEVNULL
+        assert hasattr(options["stderr"], "fileno")
         return process
     monkeypatch.setattr(media.subprocess, "Popen", start)
     calls = [0]

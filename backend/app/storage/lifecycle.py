@@ -5,7 +5,8 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models import Asset, AssetLocation, AssetRef, BackupSet, StorageProfile
-from .base import ObjectMissing, StorageError, content_key, safe_key
+from .base import ObjectMissing, StorageError, safe_key
+from .naming import is_managed_key
 from .service import get_adapter, utcnow
 from .locking import content_lock
 
@@ -116,8 +117,8 @@ def _purge_locked(db, location_id, guard):
     asset, location = _lock_asset(db, location_id)
     if location.state not in {"retired", "deleted"}:
         raise StorageError("Retire this storage location before permanent deletion")
-    if location.object_key != content_key(asset.sha256):
-        raise StorageError("Permanent deletion is restricted to registered content-addressed objects")
+    if not is_managed_key(location.object_key, asset.sha256):
+        raise StorageError("Permanent deletion is restricted to registered immutable objects")
     if location.state == "deleted":
         return {"location_id": location.id, "state": "deleted", "bytes": asset.size,
                 "physical_reclamation": "previously_deleted"}

@@ -9,17 +9,22 @@ import { loadPlayerEngines } from '../player/engineLoader';
 import { loadDanmaku } from '../player/danmakuLoader';
 import { preloadProgress, validResumePosition } from '../player/resumeProgress';
 import { emptyRuntimeStats } from '../player/runtimeStats';
+import LoadingTransfer from '../player/LoadingTransfer.vue';
+import { bufferedAhead, shouldRecoverStall } from '../player/bufferPolicy';
 import type { MeasuredMedia } from '../player/mediaInfo';
 import { sameOriginalAudioAlternative } from '../player/audioAlternatives';
 import AudioCompatibilityNotice from './AudioCompatibilityNotice.vue';
 import { createEndGuard } from '../player/queue';
 import { createPlayback } from '../player/routing';
+import { createUrlRenewal } from '../player/urlRenewal';
+import { createRouteRecovery } from '../player/routeRecovery';
 import {
   createProtocolFallback,
   loadWithProtocolFallback,
   MediaLoadError,
   mediaFailureKind,
   recoveryStartState,
+  withProtocolPreference,
   type PlaybackInput,
 } from '../player/playbackRecovery';
 import { canUseElementFullscreen } from '../player/nativePlayback';
@@ -49,6 +54,7 @@ const emit = defineEmits<{
   variant: [id: string];
   ended: [partId: string];
   playing: [value: boolean];
+  routing: [value: { playback: Playback | null; routeId: string; busy: boolean }];
 }>();
 const runtimeStats = ref(emptyRuntimeStats());
 const endGuard = createEndGuard();
@@ -56,15 +62,24 @@ const container = ref<HTMLDivElement>(),
   error = ref(''),
   note = ref(''),
   progressError = ref(''),
+  mediaLoading = ref(true),
   busy = ref(false),
   variantId = ref(''),
   subtitle = ref(''),
   playback = ref<Playback | null>(null),
   dmCount = ref<number | null>(null);
 const routeId = ref(''),
+  playbackProtocol = ref<'auto' | 'file'>('auto'),
   volumeBalance = ref(false),
   probing = ref(false),
   switching = ref(false);
+watch([playback, routeId, busy, switching], () => {
+  emit('routing', {
+    playback: playback.value,
+    routeId: routeId.value,
+    busy: busy.value || switching.value,
+  });
+});
 const playableVariants = computed(() =>
   props.part.variants.filter((variant) => variant.kind !== 'hls'),
 );
@@ -98,7 +113,10 @@ let danmakuLoading: DanmakuPlugin | null = null;
 let danmakuReloadRequested = false;
 let rejectMediaLoad: ((error: Error) => void) | null = null;
 const protocolFallback = createProtocolFallback();
+const routeRecovery = createRouteRecovery();
 let renewal = 0;
+let waitingSince = 0;
+let stallTimer: ReturnType<typeof setInterval> | undefined;
 let renewalController: AbortController | null = null;
 type PlaybackSnapshot = {
   position: number;
@@ -137,9 +155,22 @@ let art: Artplayer | null = null,
   resize: ResizeObserver | null = null,
   request = 0,
   lastSaved = 0,
-  recoveries = 0,
   renewing = false,
   activePartId = '';
+const urlRenewal = createUrlRenewal(
+  () =>
+    !!art && !art.video.paused && !art.video.ended && !renewing && !busy.value && !document.hidden,
+  () => {
+    void renew();
+  },
+);
+watch(
+  () => playback.value?.url_expires_at,
+  (value) => urlRenewal.set(value),
+);
+function refreshVisiblePlayback() {
+  if (!document.hidden) urlRenewal.check();
+}
 const family = computed(() => fontFamily(prefs));
 const shadow = computed(() => textShadow(prefs));
 const style = computed(() => ({
@@ -302,6 +333,9 @@ function resetSettings(tab: 'playback' | 'danmaku') {
   selectSubtitle();
   routeId.value = '';
   variantId.value = '';
+  routeRecovery.reset();
+  playbackProtocol.value = 'auto';
+  protocolFallback.reset();
   void renew();
 }
 async function saveProgress() {
@@ -348,10 +382,50 @@ function handleMediaFailure(kind: 'network' | 'media', message: string) {
     else error.value = message;
     return;
   }
-  if (recoveries === 0) {
-    recoveries = 1;
-    void renew();
-  } else error.value = '当前节点暂时无法播放，已更新过一次地址。可手动重试或切换节点。';
+  const recovery = routeRecovery.claim(
+    activePartId,
+    variantId.value,
+    routeId.value,
+    playback.value,
+  );
+  if (recovery) void renew(recovery);
+  else error.value = '当前播放连接暂时不可用，已自动尝试恢复。可手动重试或切换节点。';
+}
+function clearBuffering() {
+  mediaLoading.value = false;
+  waitingSince = 0;
+}
+function checkBufferingRoute() {
+  if (!art || !waitingSince || busy.value || renewing || error.value || routeId.value) return;
+  const video = art.video;
+  if (video.paused && !video.seeking && !startupPlayRequested) {
+    clearBuffering();
+    return;
+  }
+  if (
+    !playback.value?.routes?.some(
+      (route) => route.id !== playback.value?.selected_route_id && route.status !== 'unavailable',
+    )
+  )
+    return;
+  if (
+    !shouldRecoverStall({
+      elapsedMs: performance.now() - waitingSince,
+      paused: video.paused,
+      readyState: video.readyState,
+      bufferedSeconds: bufferedAhead(video),
+      bytesPerSecond: runtimeStats.value.transfer.bytesPerSecond,
+      activeRequests: runtimeStats.value.transfer.activeRequests,
+      transferState: runtimeStats.value.transfer.state,
+      bitrateBps:
+        currentMedia.value.total_bitrate_bps ||
+        (currentMedia.value.video_bitrate_bps || 0) + (currentMedia.value.audio_bitrate_bps || 0),
+      playbackRate: video.playbackRate,
+    })
+  )
+    return;
+  const recovery = routeRecovery.claim(activePartId, variantId.value, '', playback.value);
+  if (recovery) void renew(recovery);
 }
 function switchMedia(player: Artplayer, url: string) {
   return new Promise<void>((resolve, reject) => {
@@ -363,14 +437,36 @@ function switchMedia(player: Artplayer, url: string) {
         new MediaLoadError(mediaFailureKind(video.error?.code), '当前浏览器无法播放此归档版本'),
       );
     const cancel = (reason: Error) => finish(reason);
-    const timeout = setTimeout(
-      () => finish(new Error('播放加载超时，请重试或选择其他节点')),
-      20000,
-    );
+    const began = performance.now();
+    let progressed = began,
+      previousBytes = -1,
+      previousBufferedEnd = 0,
+      previousReady = 0;
+    const timeout = setInterval(() => {
+      const at = performance.now(),
+        bytes = runtimeStats.value.transfer.transferredBytes;
+      let end = 0;
+      try {
+        if (video.buffered.length) end = video.buffered.end(video.buffered.length - 1);
+      } catch {
+        /* Source replacement can invalidate a TimeRanges snapshot. */
+      }
+      if (
+        bytes !== previousBytes ||
+        end > previousBufferedEnd + 0.01 ||
+        video.readyState > previousReady
+      )
+        progressed = at;
+      previousBytes = bytes;
+      previousBufferedEnd = end;
+      previousReady = video.readyState;
+      if (at - progressed >= 25000 || at - began >= 120000)
+        finish(new MediaLoadError('network', '播放加载超时，请重试或选择其他节点'));
+    }, 1000);
     function finish(reason?: Error) {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      clearInterval(timeout);
       video.removeEventListener('canplay', ready);
       video.removeEventListener('error', failed);
       if (rejectMediaLoad === cancel) rejectMediaLoad = null;
@@ -386,12 +482,18 @@ function switchMedia(player: Artplayer, url: string) {
 }
 function selectRoute(value: string) {
   routeId.value = value;
-  recoveries = 0;
+  routeRecovery.reset();
   void renew();
 }
 function selectVariant(value: string) {
   variantId.value = value;
-  recoveries = 0;
+  routeRecovery.reset();
+  void renew();
+}
+function selectProtocol(value: 'auto' | 'file') {
+  playbackProtocol.value = value;
+  protocolFallback.reset();
+  routeRecovery.reset();
   void renew();
 }
 async function renew(input?: PlaybackInput) {
@@ -410,6 +512,8 @@ async function renew(input?: PlaybackInput) {
   renewalSnapshot = snapshot;
   renewing = true;
   switching.value = true;
+  mediaLoading.value = true;
+  waitingSince = 0;
   const currentPlayer = art,
     key = request,
     id = activePartId;
@@ -418,11 +522,14 @@ async function renew(input?: PlaybackInput) {
   error.value = '';
   try {
     const data = await loadWithProtocolFallback(
-      input || {
-        part_id: id,
-        variant_id: variantId.value || undefined,
-        route_id: routeId.value || undefined,
-      },
+      withProtocolPreference(
+        input || {
+          part_id: id,
+          variant_id: variantId.value || undefined,
+          route_id: routeId.value || undefined,
+        },
+        playbackProtocol.value,
+      ),
       protocolFallback,
       {
         current,
@@ -469,11 +576,22 @@ async function renew(input?: PlaybackInput) {
     );
     if (!data || !current()) return;
   } catch (e) {
-    if (current()) error.value = `无法恢复播放：${errorText(e)}`;
+    if (current()) {
+      const recovery =
+        e instanceof MediaLoadError && e.kind === 'network'
+          ? routeRecovery.claim(id, variantId.value, routeId.value, playback.value)
+          : null;
+      if (recovery) {
+        void renew(recovery);
+        return;
+      }
+      error.value = `无法恢复播放：${errorText(e)}`;
+    }
   } finally {
     if (current()) {
       renewing = false;
       switching.value = false;
+      clearBuffering();
       renewalSnapshot = null;
     }
   }
@@ -502,13 +620,15 @@ async function setup() {
   initialProgress = resumeAtStart;
   rejectMediaLoad?.(new Error('播放内容已切换'));
   busy.value = true;
+  mediaLoading.value = true;
+  waitingSince = 0;
   error.value = '';
   note.value = '';
   progressError.value = '';
   dmCount.value = null;
   subtitle.value = '';
   playback.value = null;
-  recoveries = 0;
+  routeRecovery.reset();
   renewing = false;
   switching.value = false;
   runtimeStats.value = emptyRuntimeStats();
@@ -534,6 +654,7 @@ async function setup() {
           part_id: partAtStart,
           variant_id: variantId.value || undefined,
           route_id: routeId.value || undefined,
+          protocol: playbackProtocol.value,
         },
         playbackController.signal,
         (value) => {
@@ -659,22 +780,59 @@ async function setup() {
       }
     });
     art.on('video:playing', () => {
-      if (key === request) emit('playing', true);
+      if (key === request) {
+        clearBuffering();
+        emit('playing', true);
+      }
+    });
+    art.on('video:canplay', () => {
+      if (key === request) clearBuffering();
+    });
+    art.on('video:loadeddata', () => {
+      if (key === request && art?.video.paused && !startupPlayRequested && !renewing)
+        clearBuffering();
+    });
+    art.on('video:loadstart', () => {
+      if (key === request) mediaLoading.value = true;
+    });
+    art.on('video:seeking', () => {
+      if (key === request) {
+        mediaLoading.value = true;
+        waitingSince = performance.now();
+      }
+    });
+    art.on('video:seeked', () => {
+      if (key === request && art && art.video.readyState >= 3) clearBuffering();
     });
     art.on('video:play', () => {
-      if (key === request && !renewing) startupPlayRequested = true;
+      if (key === request && !renewing) {
+        startupPlayRequested = true;
+        if (art && art.video.readyState < 3) {
+          mediaLoading.value = true;
+          waitingSince ||= performance.now();
+        }
+        urlRenewal.check();
+      }
     });
     art.on('video:waiting', () => {
-      if (key === request) emit('playing', false);
+      if (key === request) {
+        if (art?.video.paused && !renewing && !startupPlayRequested) return;
+        mediaLoading.value = true;
+        waitingSince ||= performance.now();
+        mediaAdapter.onWaiting();
+        emit('playing', false);
+      }
     });
     art.on('video:pause', () => {
       if (key !== request) return;
       if (!renewing) startupPlayRequested = false;
+      if (!renewing) clearBuffering();
       emit('playing', false);
       void saveProgress();
     });
     art.on('video:timeupdate', () => {
       if (key !== request || !art) return;
+      urlRenewal.check();
       endGuard.rearm(endKey, art.currentTime, art.duration, art.video.ended);
       if (Date.now() - lastSaved > 15000) {
         lastSaved = Date.now();
@@ -683,6 +841,7 @@ async function setup() {
     });
     art.on('video:error', () => {
       if (key !== request) return;
+      clearBuffering();
       emit('playing', false);
       handleMediaFailure(
         mediaFailureKind(art?.video.error?.code),
@@ -704,7 +863,10 @@ async function setup() {
   } catch (e) {
     if (key === request) error.value = errorText(e);
   } finally {
-    if (key === request) busy.value = false;
+    if (key === request) {
+      busy.value = false;
+      if (error.value) clearBuffering();
+    }
   }
 }
 async function replay() {
@@ -719,6 +881,7 @@ async function replay() {
 }
 defineExpose({
   replay,
+  selectRoute,
   isEnded: (partId: string) => activePartId === partId && !!art?.video.ended,
 });
 function selectSubtitle() {
@@ -739,6 +902,8 @@ watch(
   },
 );
 onMounted(() => {
+  stallTimer = setInterval(checkBufferingRoute, 1000);
+  document.addEventListener('visibilitychange', refreshVisiblePlayback);
   screenQuery = window.matchMedia('(max-width: 700px)');
   screenQuery.addEventListener('change', screenChanged);
   screenChanged();
@@ -748,6 +913,9 @@ onMounted(() => {
   });
 });
 onBeforeUnmount(() => {
+  clearInterval(stallTimer);
+  urlRenewal.stop();
+  document.removeEventListener('visibilitychange', refreshVisiblePlayback);
   emit('playing', false);
   screenQuery?.removeEventListener('change', screenChanged);
   closeSettings();
@@ -768,9 +936,11 @@ onBeforeUnmount(() => {
   <section class="archive-player" aria-label="视频播放">
     <div ref="container" class="player-stage"></div>
     <Teleport :to="playerHost || 'body'" :disabled="!playerHost">
-      <div v-if="busy || switching" class="player-loading" role="status">
-        {{ switching ? '正在切换播放…' : '正在准备播放…' }}
-      </div>
+      <LoadingTransfer
+        v-if="!error && (busy || switching || mediaLoading)"
+        :phase="switching ? 'switching' : busy ? 'preparing' : 'buffering'"
+        :transfer="busy ? null : runtimeStats.transfer"
+      />
       <div v-if="error" class="player-error-overlay" role="alert" @click.stop @keydown.stop>
         <span>{{ error }}</span>
         <div>
@@ -829,6 +999,7 @@ onBeforeUnmount(() => {
               :variant-id="variantId"
               :subtitle="subtitle"
               :route-id="routeId"
+              :protocol="playbackProtocol"
               :balance="volumeBalance"
               :busy="busy || switching"
               :rate="playbackRate"
@@ -838,6 +1009,7 @@ onBeforeUnmount(() => {
               :runtime-stats="runtimeStats"
               @variant="selectVariant"
               @route="selectRoute"
+              @protocol="selectProtocol"
               @balance="volumeBalance = $event"
               @subtitle="
                 subtitle = $event;

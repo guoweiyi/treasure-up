@@ -18,8 +18,13 @@ class PlaybackError(StorageError):
 MAX_TOOL_OUTPUT = 8 * 1024**2
 
 
-def run_tool(arguments, *, check_active=None, timeout=7200, capture=False):
-    """Poll cancellation while tools run; never expose raw tool diagnostics publicly."""
+def run_tool(arguments, *, check_active=None, timeout=7200, capture=False, reject_errors=False):
+    """Poll cancellation; optionally reject any diagnostic from a -v error command.
+
+    Some FFmpeg versions return success after decoder errors, even with -xerror.
+    Callers using stderr for measurements must leave this option disabled.
+    Raw diagnostics are never included in public exceptions.
+    """
     guard = check_active or (lambda: None)
     guard()
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
@@ -43,6 +48,8 @@ def run_tool(arguments, *, check_active=None, timeout=7200, capture=False):
             check_output_limit()
             if process.returncode:
                 raise PlaybackError("Media processing failed; original asset remains unchanged")
+            if reject_errors and os.fstat(errors.fileno()).st_size:
+                raise PlaybackError("Media processing reported errors; original asset remains unchanged")
             output.seek(0)
             errors.seek(0)
             return output.read(MAX_TOOL_OUTPUT), errors.read(MAX_TOOL_OUTPUT)
@@ -62,7 +69,7 @@ def probe_media(path: Path, *, check_active=None, extended=False):
     budget = ["-probesize", "33554432", "-analyzeduration", "10000000"] if extended else []
     raw, _ = run_tool([str(settings.ffprobe_path), "-v", "error", "-protocol_whitelist", "file,crypto,data", *budget,
         "-show_streams", "-show_format", "-of", "json", str(path)],
-        check_active=check_active, timeout=120, capture=True)
+        check_active=check_active, timeout=120, capture=True, reject_errors=True)
     try:
         result = json.loads(raw)
         if not isinstance(result.get("streams"), list):

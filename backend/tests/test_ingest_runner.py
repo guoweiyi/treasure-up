@@ -345,6 +345,8 @@ def test_media_is_reused_before_second_download(db, monkeypatch):
             Path(self.params["outtmpl"]["default"].replace("%(ext)s", "mp4")).write_bytes(b"test-mp4")
     monkeypatch.setattr(yt_dlp, "YoutubeDL", Downloader)
     monkeypatch.setattr(media, "_probe", lambda path: ({"codec_name": "h264", "width": 1920, "height": 1080}, {"codec_name": "aac"}, 10))
+    verified_audio = []
+    monkeypatch.setattr(media, "_verify_audio_decode", lambda path, *args: verified_audio.append(path))
     video = Video(bvid="BV1234567890", aid="123")
     db.add(video); db.flush()
     part = VideoPart(video_id=video.id, cid="11", position=1, duration=10)
@@ -356,6 +358,7 @@ def test_media_is_reused_before_second_download(db, monkeypatch):
     second, reused2 = media.archive_media(db, client, video, part, {})
     assert first.id == second.id and not reused1 and reused2
     assert downloads == ["80"]
+    assert len(verified_audio) == 1
     assert not list(settings.scratch_dir.glob("treasure-media-*/cookies.txt"))
 
 

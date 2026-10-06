@@ -128,9 +128,10 @@ def _video_view(db, video, note, people, parts, variants, latest_stats, *, detai
     result["ingest_state"] = (video.metadata_json or {}).get("ingest_state", {})
     if capture is not None:
         result["capture_status"], result["ingest_state"] = capture
+    from app.media_properties import merge_media_properties
     properties = dict((video.metadata_json or {}).get("media_properties", {}))
     for variant in variants:
-        properties[variant.id] = {**properties.get(variant.id, {}), **(variant.metadata_json or {})}
+        properties[variant.id] = merge_media_properties(properties.get(variant.id), variant.metadata_json)
     result["media_properties"] = properties
     access = (video.metadata_json or {}).get("access")
     charging = access.get("upower_exclusive") if isinstance(access, dict) else None

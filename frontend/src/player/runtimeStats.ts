@@ -1,4 +1,5 @@
 import { unknownAudioSupport, type AudioCapability } from './audioCapabilities.ts';
+import { emptyTransferSnapshot, type TransferSnapshot } from './transferMeter.ts';
 export interface RuntimeStats {
   engine: string;
   mime: string | null;
@@ -12,6 +13,7 @@ export interface RuntimeStats {
   hostIsFinal: boolean;
   networkBps: number | null;
   networkSampleAt: number | null;
+  transfer: TransferSnapshot;
   audioSupport: { ec3: AudioCapability; spatial: AudioCapability };
 }
 export const emptyRuntimeStats = (): RuntimeStats => ({
@@ -27,6 +29,7 @@ export const emptyRuntimeStats = (): RuntimeStats => ({
   hostIsFinal: false,
   networkBps: null,
   networkSampleAt: null,
+  transfer: emptyTransferSnapshot(),
   audioSupport: unknownAudioSupport(),
 });
 export function deliveryHost(url: string, base = 'http://localhost') {

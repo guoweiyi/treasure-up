@@ -12,6 +12,7 @@ from app.backup import BackupError, _postgres_environment, create_backup, decryp
 from app.config import settings
 from app.models import Asset, AssetLocation, BackupSet, Base, IntegrationToken, Setting, SourceAccount, StorageProfile, User
 from app.storage.service import ingest_file, read_asset_bytes, utcnow
+from app.storage.naming import MediaName
 
 
 @pytest.fixture
@@ -54,6 +55,25 @@ def test_encryption_detects_corruption_truncation_and_wrong_context(tmp_path, mo
     encrypted.write_bytes(changed)
     with pytest.raises(BackupError):
         decrypt_to(encrypted, None, master, "asset:test")
+
+
+def test_readable_media_name_survives_backup_restore(backup_fixture, tmp_path):
+    db, _, _, _ = backup_fixture
+    source = tmp_path / "named.mp4"
+    source.write_bytes(b"readable archive bytes")
+    asset = ingest_file(db, source, kind="media", mime_type="video/mp4",
+        media_name=MediaName("稿件名", "UP名字", "BV1d7hx6yEiE"))
+    db.commit()
+    before = db.scalar(select(AssetLocation.object_key).where(AssetLocation.asset_id == asset.id))
+    backup = create_backup(db)
+    target_url = f"sqlite:///{tmp_path / 'named-restored.sqlite'}"
+    restore_backup(tmp_path / "independent", backup.id, target_url, tmp_path / "named-restored")
+    engine = create_engine(target_url)
+    with Session(engine) as restored:
+        ready = restored.scalar(select(AssetLocation.object_key).where(AssetLocation.asset_id == asset.id, AssetLocation.state == "ready"))
+        assert ready == before
+        assert read_asset_bytes(restored, asset.id) == source.read_bytes()
+    engine.dispose()
 
 
 def test_roundtrip_without_primary_media_or_database(backup_fixture, tmp_path):

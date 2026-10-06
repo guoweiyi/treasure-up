@@ -6,6 +6,14 @@ export type PlaybackInput = {
   route_id?: string;
   protocol?: 'auto' | 'hls' | 'file';
 };
+export function withProtocolPreference(
+  input: PlaybackInput,
+  preference: 'auto' | 'file',
+): PlaybackInput {
+  // Explicit file comparison must survive a recovery from the previous HLS
+  // attachment when the first file-session request failed before replacing it.
+  return preference === 'file' ? { ...input, protocol: 'file' } : { protocol: 'auto', ...input };
+}
 export class MediaLoadError extends Error {
   kind: 'network' | 'media';
   constructor(kind: 'network' | 'media', message: string) {

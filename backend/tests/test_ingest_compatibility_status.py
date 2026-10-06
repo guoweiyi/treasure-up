@@ -147,3 +147,22 @@ def test_audio_only_preparation_reuses_its_job_without_reviving_stopped_work(db,
     assert second["prepare_job_id"] == preparation.id and preparation.status == prior_status
     assert original_preparation.status == "succeeded" and preparation.id != original_preparation.id
     assert db.scalar(select(func.count()).select_from(Job).where(Job.kind == "prepare_media")) == 2
+
+
+@pytest.mark.parametrize("duration,size,expected", [(450, 100, True), (120, 70 * 1024**2, True), (120, 10 * 1024**2, False)])
+def test_h264_compatibility_gets_own_preparation_without_audio_only_marker(db, monkeypatch, duration, size, expected):
+    _, part, archive, job = saved_archive(db)
+    copy_asset = Asset(sha256="b" * 64, size=size, kind="media", mime_type="video/mp4")
+    db.add(copy_asset); db.flush()
+    copy = MediaVariant(part_id=part.id, asset_id=copy_asset.id, kind="playback", format_key="h264-aac-sdr-v1",
+                        video_codec="h264", audio_codec="aac", duration=duration)
+    db.add(copy); db.commit()
+    monkeypatch.setattr(runner, "ensure_playback_variant", lambda *a, **k: (copy, False))
+    result = runner.run_job(db, job)
+    prepared = db.get(Job, result["prepare_job_id"])
+    assert prepared.target_id == copy.id
+    assert prepared.policy["package"] is expected
+    assert prepared.policy["analyze_loudness"]
+    again = runner.run_job(db, job)
+    assert again["prepare_job_id"] == prepared.id
+    assert db.scalar(select(func.count()).select_from(Job).where(Job.kind == "prepare_media")) == 1

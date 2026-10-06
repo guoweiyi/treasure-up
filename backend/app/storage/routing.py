@@ -144,15 +144,23 @@ def resolve_on_profile(db, asset_id, profile_id, *, expires_in=300):
     for location in locations:
         try:
             adapter = get_adapter(profile)
-            if adapter.head(location.object_key, version_id=location.version_id).size != asset.size:
-                continue
+            local = isinstance(adapter, LocalStorage)
+            ttl = max(1, min(3600, int(expires_in)))
+            playback_url = getattr(adapter, "playback_url", None)
+            if not local and callable(playback_url):
+                # Graph returns size and its download capability in the same
+                # metadata response; a preceding HEAD duplicated that request.
+                url = playback_url(location.object_key, asset.size, ttl, version_id=location.version_id)
+            else:
+                if adapter.head(location.object_key, version_id=location.version_id).size != asset.size:
+                    continue
+                url = None if local else adapter.presign(location.object_key, ttl, version_id=location.version_id)
             result = {"asset_id": asset.id, "size": asset.size, "mime_type": asset.mime_type, "sha256": asset.sha256,
                       "location_id": location.id, "profile_id": profile.id, "kind": profile.kind}
-            if isinstance(adapter, LocalStorage):
+            if local:
                 result.update(path=adapter.path_for(location.object_key), expires_at=None)
             else:
-                ttl = max(1, min(3600, int(expires_in)))
-                result.update(url=adapter.presign(location.object_key, ttl, version_id=location.version_id), expires_at=_now() + timedelta(seconds=ttl))
+                result.update(url=url, expires_at=_now() + timedelta(seconds=ttl))
             return result
         except Exception:
             continue

@@ -9,6 +9,7 @@ httpx>=0.28,<1
 cryptography>=50.0.2,<51
 boto3>=1.35,<2
 oss2>=2.19,<3
+esdk-obs-python>=3.26.6,<4
 yt-dlp>=2026.8.19
 pytest>=8,<10
 webauthn>=3.0.1,<4

@@ -17,6 +17,7 @@ from app import catalog, schemas
 from app.config import settings
 from app.db import get_db
 from app.jobs import enqueue
+from app.media_properties import merge_media_properties, with_source_file_average
 from app.playback_limits import check_playback_creation, playback_creation_slot
 from app.models import (Asset, AssetLocation, AuditLog, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job,
                         MediaVariant, PlaybackSession, Setting, StorageObservation, StorageProfile,
@@ -98,6 +99,8 @@ def create_playback(body: schemas.PlaybackInput, request: Request, identity=Depe
 
 def _create_playback(body, user, db, client_digest):
     from app.storage.routing import playback_routes, choose_route
+    from app.storage.delivery import direct_profile, direct_urls
+    from app.storage.base import StorageError
     part = required(db, VideoPart, body.part_id)
     variants = list(db.scalars(select(MediaVariant).where(MediaVariant.part_id == body.part_id).order_by(MediaVariant.created_at.desc())))
     base = next((v for v in variants if v.id == body.variant_id), None) if body.variant_id else next(
@@ -120,14 +123,43 @@ def _create_playback(body, user, db, client_digest):
             raise HTTPException(409, "对应原档不可用")
     session = PlaybackSession(user_id=user.id, variant_id=selected.id, protocol="hls" if selected.kind == "hls" else "file",
                               state={}, expires_at=utcnow() + timedelta(hours=4))
-    _, asset_ids, index = session_assets(db, session)
-    try:
+    def plan(candidate):
+        session.variant_id = candidate.id
+        session.protocol = "hls" if candidate.kind == "hls" else "file"
+        _, asset_ids, index = session_assets(db, session)
         routes = playback_routes(db, asset_ids, user_id=user.id)
         session.profile_id = choose_route(routes, route_id=body.route_id)
-    except Exception:
-        raise HTTPException(503, "没有完整可用的存储节点，请检查媒体副本") from None
+        return index, routes
+    try:
+        index, routes = plan(selected)
+    except (StorageError, HTTPException):
+        # Packaging is an automatic transport preference, not a requirement to
+        # copy every segment before an existing original on this node can play.
+        # Keep the exact chosen source/quality; explicit HLS remains strict.
+        if body.protocol != "auto" or selected.kind != "hls" or base.kind == "hls":
+            raise HTTPException(503, "没有完整可用的存储节点，请检查媒体副本") from None
+        selected = base
+        try:
+            index, routes = plan(selected)
+        except (StorageError, HTTPException):
+            raise HTTPException(503, "没有完整可用的存储节点，请检查媒体副本") from None
     row = db.get(Setting, "playback")
     config = schemas.PlaybackSettings.model_validate(row.value if row else {})
+    try:
+        direct = direct_profile(db, session.profile_id, bulk=bool(index))
+    except Exception:
+        raise HTTPException(503, "所选存储节点暂不可用，请重新选择") from None
+    direct_url, url_expiry = None, None
+    if direct:
+        if index:
+            # The small authenticated playlist will issue fresh segment URLs.
+            url_expiry = utcnow() + timedelta(seconds=3600)
+        else:
+            try:
+                urls, url_expiry = direct_urls(db, direct, [selected.asset_id])
+                direct_url = urls[selected.asset_id]
+            except Exception:
+                raise HTTPException(503, "无法生成云端播放地址，请检查存储源的外网访问设置") from None
     probe_asset_id = index["segments"][0]["asset_id"] if index else selected.asset_id
     routes = [dict(route) for route in routes]
     probe_ids = []
@@ -153,8 +185,11 @@ def _create_playback(body, user, db, client_digest):
         if media_source is None:
             media_source = next((v for v in variants if v.kind != "hls" and v.asset_id == metadata.get("source_asset_id")), selected)
     properties = (video.metadata_json or {}).get("media_properties", {})
-    media = {**properties.get(media_source.id, {}), **(media_source.metadata_json or {}),
-             **properties.get(selected.id, {}), **metadata}
+    media = merge_media_properties(properties.get(media_source.id), media_source.metadata_json,
+                                   properties.get(selected.id), metadata)
+    if media_source.kind != "hls":
+        source_asset = required(db, Asset, media_source.asset_id)
+        media = with_source_file_average(media, size=source_asset.size, duration=media_source.duration)
     media.update(width=selected.width or media_source.width, height=selected.height or media_source.height,
                  video_codec=selected.video_codec or media_source.video_codec,
                  audio_codec=selected.audio_codec or media_source.audio_codec,
@@ -162,7 +197,9 @@ def _create_playback(body, user, db, client_digest):
                  segment_count=len(index["segments"]) if index else None)
     url = f"/api/v1/playback-sessions/{session.id}/manifest.m3u8" if index else f"/api/v1/playback-sessions/{session.id}/assets/{selected.asset_id}"
     return {"id": session.id, "session_id": session.id, "asset_id": selected.asset_id, "variant_id": selected.id,
-            "source_variant_id": media_source.id, "protocol": session.protocol, "url": url,
+            "source_variant_id": media_source.id, "protocol": session.protocol, "url": direct_url or url,
+            "direct": bool(direct), "url_expires_at": url_expiry,
+            "delivery": "direct" if direct else ("local" if db.get(StorageProfile, session.profile_id).kind == "local" else "redirect"),
             "expires_at": session.expires_at, "routes": routes, "selected_route_id": session.profile_id,
             "media": media, "loudness": media.get("loudness"),
             "danmaku_url": f"/api/v1/parts/{body.part_id}/danmaku",
@@ -173,11 +210,22 @@ def _create_playback(body, user, db, client_digest):
 @router.get("/playback-sessions/{session_id}/manifest.m3u8")
 def manifest(session_id: str, identity=Depends(playback_identity), db: Session = Depends(get_db)):
     from app.playback import render_manifest
+    from app.storage.delivery import direct_profile, direct_urls
+    from app.storage.base import StorageError
     session = owned_session(db, session_id, identity[0])
-    _, _, index = session_assets(db, session)
+    _, allowed, index = session_assets(db, session)
     if index is None:
         raise HTTPException(404, "此会话不是分片播放")
-    value = render_manifest(index, lambda asset_id: f"/api/v1/playback-sessions/{session.id}/assets/{asset_id}")
+    try:
+        direct = direct_profile(db, session.profile_id, bulk=True)
+        if direct:
+            ttl = min(3600, max(1, int((session.expires_at.replace(tzinfo=timezone.utc) - utcnow()).total_seconds())))
+            urls, _ = direct_urls(db, direct, allowed, expires_in=ttl)
+            value = render_manifest(index, urls.__getitem__, allow_external=True)
+        else:
+            value = render_manifest(index, lambda asset_id: f"/api/v1/playback-sessions/{session.id}/assets/{asset_id}")
+    except StorageError:
+        raise HTTPException(503, "无法生成云端分片地址，请重试或切换存储节点") from None
     return Response(value, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "private, no-store"})
 
 
@@ -359,7 +407,7 @@ def compatible(variant_id: str, user=Depends(require_admin), db: Session = Depen
         # A new processing profile can recover old explicitly unsupported HDR
         # results without resetting the successful historical task or archive.
         job = enqueue(db, "create_playback", variant.id, policy=policy, frozen_policy=True,
-                      dedupe_key=f"compatible-v2:{variant.id}:{variant.asset_id}")
+                      dedupe_key=f"compatible-v3:{variant.id}:{variant.asset_id}")
     audit(db, user, "prepare_compatible", "media_variant", variant.id, {"job_id": job.id})
     db.commit()
     return catalog.job_view(job)

@@ -241,3 +241,138 @@ def test_empty_library_finishes_without_pending_loop_and_legacy_due_state_works(
         media = maintenance.enqueue_media_maintenance(db)
         assert media["queued"] == 0 and not media["remaining_pending"]
         assert maintenance.enqueue_media_maintenance(db)["not_due"]
+
+
+def test_media_includes_large_short_archives_and_every_compatible_copy(workspace):
+    ws = workspace
+    with ws.sessions() as db:
+        ids = add_videos(db, 4, ws.clock.now - timedelta(days=1), media=True)
+        db.add(Setting(key="playback", value={"analyze_loudness": False, "min_size_mb": 64}))
+        for ident in ids:
+            db.get(MediaVariant, ident).duration = 120
+        db.get(Asset, ids[0]).size = 64 * 1024**2
+        db.get(Asset, ids[1]).size = 64 * 1024**2 - 1
+        compatible = db.get(MediaVariant, ids[2]); compatible.kind = "playback"
+        compatible.video_codec, compatible.audio_codec, compatible.duration = "h264", "aac", 450
+        excluded = db.get(MediaVariant, ids[3]); excluded.kind = "hls"
+        excluded.duration = 1200; db.get(Asset, ids[3]).size = 200 * 1024**2
+        db.commit()
+        assert maintenance.enqueue_media_maintenance(db)["queued"] == 2
+        prepared = list(db.scalars(select(Job).where(Job.kind == "prepare_media")))
+        assert {job.target_id for job in prepared} == {ids[0], ids[2]}
+        assert all(job.policy["package"] for job in prepared)
+        assert all(not job.policy["analyze_loudness"] for job in prepared)
+
+
+def test_old_analysis_only_job_does_not_block_new_size_triggered_package(workspace):
+    ws = workspace
+    with ws.sessions() as db:
+        ident = add_videos(db, 1, ws.clock.now - timedelta(days=1), media=True)[0]
+        variant = db.get(MediaVariant, ident); variant.duration = 120
+        previous = maintenance.enqueue_variant_preparation(db, variant)
+        assert previous.policy["package"] is False
+        previous.status = "succeeded"
+        db.get(Asset, ident).size = 200 * 1024**2
+        db.commit()
+        assert maintenance.enqueue_media_maintenance(db)["queued"] == 1
+        newer = db.scalar(select(Job).where(Job.id != previous.id))
+        assert newer.policy["package"] is True
+        newer.status = "succeeded"; db.commit()
+        ws.clock.now += timedelta(minutes=1)
+        assert maintenance.enqueue_media_maintenance(db)["queued"] == 0
+        assert db.scalar(select(func.count()).select_from(Job)) == 2
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "paused", "blocked"])
+def test_media_maintenance_respects_existing_preparation_and_pause(workspace, state):
+    ws = workspace
+    with ws.sessions() as db:
+        ident = add_videos(db, 1, ws.clock.now - timedelta(days=1), media=True)[0]
+        prior = jobs.enqueue(db, "prepare_media", ident, dedupe_key="manual-preparation", policy={"package": True})
+        prior.status = state; db.commit()
+        assert maintenance.enqueue_media_maintenance(db)["queued"] == 0
+        assert maintenance.enqueue_variant_preparation(db, db.get(MediaVariant, ident)).id == prior.id
+        assert db.scalar(select(func.count()).select_from(Job)) == 1
+        assert prior.status == state
+
+
+@pytest.mark.parametrize("entry", ["maintenance", "single"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_small_existing_hls_upgrades_once_only_when_packaging_enabled(workspace, entry, enabled):
+    ws = workspace
+    with ws.sessions() as db:
+        ident = add_videos(db, 1, ws.clock.now - timedelta(days=1), media=True)[0]
+        variant = db.get(MediaVariant, ident)
+        variant.duration = 120
+        db.add(Setting(key="playback", value={"package_long_videos": enabled, "analyze_loudness": False}))
+        index = Asset(sha256="f" * 64, size=300, kind="hls_index")
+        db.add(index); db.flush()
+        db.add(MediaVariant(part_id=variant.part_id, asset_id=index.id, kind="hls", duration=120,
+            format_key=f"hls-copy-v2:6:{variant.asset_id}", metadata_json={"source_asset_id":variant.asset_id}))
+        old = jobs.enqueue(db, "prepare_media", ident, policy={"package": True, "analyze_loudness": False},
+                           dedupe_key=f"prepare:v2:{ident}:{variant.asset_id}:6:1:0")
+        old.status = "succeeded"; db.commit()
+        if entry == "single":
+            result = maintenance.enqueue_variant_preparation(db, variant)
+            assert bool(result) is enabled
+            db.commit()
+        else:
+            assert maintenance.enqueue_media_maintenance(db)["queued"] == int(enabled)
+        jobs_now = list(db.scalars(select(Job).where(Job.id != old.id)))
+        assert len(jobs_now) == int(enabled)
+        if enabled:
+            assert jobs_now[0].dedupe_key.startswith("prepare:v3:") and jobs_now[0].policy["package"]
+            jobs_now[0].status = "succeeded"; db.commit()
+        ws.clock.now += timedelta(minutes=1)
+        assert maintenance.enqueue_media_maintenance(db)["queued"] == 0
+        assert db.scalar(select(func.count()).select_from(Job)) == 1 + int(enabled)
+
+
+def test_small_existing_hls_with_packaging_disabled_keeps_completed_analysis_key(workspace):
+    ws = workspace
+    with ws.sessions() as db:
+        ident = add_videos(db, 1, ws.clock.now - timedelta(days=1), media=True)[0]
+        variant = db.get(MediaVariant, ident); variant.duration = 120
+        db.add(Setting(key="playback", value={"package_long_videos": False, "analyze_loudness": True}))
+        db.add(MediaVariant(part_id=variant.part_id, asset_id=variant.asset_id, kind="hls", duration=120,
+            format_key="old-package", metadata_json={"source_asset_id":variant.asset_id}))
+        previous = maintenance.enqueue_variant_preparation(db, variant)
+        assert previous.dedupe_key.startswith("prepare:v2:") and previous.policy["package"] is False
+        previous.status = "succeeded"; db.commit()
+        assert maintenance.enqueue_media_maintenance(db)["queued"] == 0
+        assert maintenance.enqueue_variant_preparation(db, variant).id == previous.id
+        assert db.scalar(select(func.count()).select_from(Job)) == 1
+
+
+@pytest.mark.parametrize("entry", ["maintenance", "single"])
+def test_existing_hls_is_scoped_to_part_even_with_deduplicated_source_asset(workspace, entry):
+    ws = workspace
+    with ws.sessions() as db:
+        ids = add_videos(db, 2, ws.clock.now - timedelta(days=1), media=True)
+        first, other = [db.get(MediaVariant, ident) for ident in ids]
+        first.duration = other.duration = 120
+        other.asset_id = first.asset_id
+        db.add(Setting(key="playback", value={"analyze_loudness": False}))
+        db.add(MediaVariant(part_id=first.part_id, asset_id=first.asset_id, kind="hls", duration=120,
+            format_key="old-package", metadata_json={"source_asset_id": first.asset_id}))
+        db.commit()
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+        event.listen(ws.engine, "before_cursor_execute", capture)
+        try:
+            if entry == "maintenance":
+                assert maintenance.enqueue_media_maintenance(db)["queued"] == 1
+            else:
+                assert maintenance.enqueue_variant_preparation(db, other) is None
+                assert maintenance.enqueue_variant_preparation(db, first) is not None
+                db.commit()
+        finally:
+            event.remove(ws.engine, "before_cursor_execute", capture)
+        prepared = list(db.scalars(select(Job)))
+        assert len(prepared) == 1 and prepared[0].target_id == first.id
+        lookups = [query for query in statements if "JSON_EXTRACT" in query]
+        assert len(lookups) == (1 if entry == "maintenance" else 2)
+        for query in lookups:
+            predicates = query.split("WHERE", 1)[1]
+            assert "media_variants.part_id IN" in predicates or "media_variants.part_id =" in predicates

@@ -52,6 +52,7 @@ def mock_conversion(monkeypatch, *, fault=None):
     monkeypatch.setattr(media, "_probe", probe)
     monkeypatch.setattr(media, "probe_media", lambda *a, **k: {"streams": [VIDEO, EC3, *([EC3] if fault == "tracks" else [])]})
     monkeypatch.setattr(media, "_run_ffmpeg", convert)
+    monkeypatch.setattr(media, "_verify_audio_decode", lambda *a: None)
     monkeypatch.setattr(media, "_packet_hash", lambda path, *a: "changed" if fault == "packets" and path.name == "playback.mp4" else "original-packets")
     return commands
 
@@ -66,7 +67,7 @@ def test_hdr_ec3_gets_audio_only_copy_before_sdr_rejection_and_reuses_it(origina
     commands = mock_conversion(monkeypatch)
     fallback, reused = media.ensure_playback_variant(db, part, archive, {})
     assert not reused and fallback.asset_id != archive.asset_id
-    assert fallback.format_key == "video-copy-aac-v1:" + archive.asset_id
+    assert fallback.format_key == "video-copy-aac-v2:" + archive.asset_id
     data = fallback.metadata_json
     assert data["source_variant_id"] == archive.id and data["compatibility_mode"] == "audio_only"
     assert data["video_stream_copy"] and data["audio_transcoded"] and data["video_payload_verified"]
@@ -78,6 +79,8 @@ def test_hdr_ec3_gets_audio_only_copy_before_sdr_rejection_and_reuses_it(origina
     assert properties["compatibility_mode"] == "audio_only" and properties["dolby_atmos"] is False
     assert commands[0][commands[0].index("-c:v") + 1] == "copy"
     assert "-vf" not in commands[0] and "hvc1" in commands[0]
+    assert media.AAC_STEREO_FILTER in commands[0]
+    assert data["audio_mix_revision"] == 2 and data["audio_decode_verified"] is True
     monkeypatch.setattr(media, "_probe", lambda *a: pytest.fail("verified rendition must reuse"))
     again, reused = media.ensure_playback_variant(db, part, archive, {})
     assert reused and again.id == fallback.id and len(commands) == 1

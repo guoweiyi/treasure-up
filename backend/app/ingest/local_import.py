@@ -11,6 +11,7 @@ from app.config import settings
 from app.models import (CaptureRun, Creator, DanmakuSnapshot, MediaVariant,
     PlatformUser, UserSnapshot, Video, VideoCreator, VideoPart)
 from app.storage.service import ingest_file
+from app.storage.naming import MediaName
 from .errors import IngestError
 from .media import _probe
 from .runner import _now, _ref
@@ -86,7 +87,9 @@ def import_local(db, path, metadata, danmaku_path=None):
             raise IngestError("本地弹幕必须是普通文件", code="invalid_import", retryable=False)
         normalized = _danmaku_data(dm_path, metadata.get("danmaku_mode_space", "bilibili"))
     mime = {".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm", ".flv": "video/x-flv", ".mov": "video/quicktime"}.get(path.suffix.lower(), "application/octet-stream")
-    asset = ingest_file(db, path, kind="media", mime_type=mime)
+    asset = ingest_file(db, path, kind="media", mime_type=mime, media_name=MediaName(
+        title=str(metadata.get("title") or path.stem), creator=str(owner.get("name") or "") if isinstance(owner, dict) else "",
+        bvid=bvid or "", position=position, part_title=str(metadata.get("part_title") or "")))
     identity = "local_" + asset.sha256[:24]
     bvid, cid = bvid or identity, cid or identity
     video = db.scalar(select(Video).where(Video.bvid == bvid))

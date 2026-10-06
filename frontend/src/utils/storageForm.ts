@@ -1,13 +1,68 @@
 type Values = Record<string, any>;
+export const storageProviders = [
+  { kind: 'local', name: '本地目录 / NAS', group: '本地' },
+  { kind: 'oss', name: '阿里云 OSS', group: '对象存储' },
+  { kind: 'cos', name: '腾讯云 COS', group: '对象存储' },
+  { kind: 'obs', name: '华为云 OBS', group: '对象存储' },
+  { kind: 'upyun', name: '又拍云', group: '对象存储' },
+  { kind: 'qiniu', name: '七牛云', group: '对象存储' },
+  { kind: 'minio', name: 'MinIO', group: '对象存储' },
+  { kind: 'rain', name: '雨云 Rain S3', group: '对象存储' },
+  { kind: 'spaces', name: 'DigitalOcean Spaces', group: '对象存储' },
+  { kind: 'r2', name: 'Cloudflare R2', group: '对象存储' },
+  { kind: 'oracle', name: 'Oracle 对象存储', group: '对象存储' },
+  { kind: 'b2', name: 'Backblaze B2', group: '对象存储' },
+  { kind: 's3', name: 'Amazon S3 / S3 兼容协议', group: '对象存储' },
+  { kind: 'onedrive', name: 'OneDrive', group: '云盘' },
+  { kind: 'onedrive_cn', name: 'OneDrive · 世纪互联', group: '云盘' },
+  { kind: 'sharepoint', name: 'SharePoint', group: '云盘' },
+  { kind: 'sharepoint_cn', name: 'SharePoint · 世纪互联', group: '云盘' },
+] as const;
+export type StorageKind = (typeof storageProviders)[number]['kind'];
+export const graphStorage = (kind: string) =>
+  ['onedrive', 'onedrive_cn', 'sharepoint', 'sharepoint_cn'].includes(kind);
+export const s3Storage = (kind: string) =>
+  ['s3', 'cos', 'minio', 'rain', 'spaces', 'r2', 'oracle', 'b2', 'qiniu'].includes(kind);
+export function storageCredentialFields(kind: StorageKind) {
+  if (graphStorage(kind))
+    return [
+      { key: 'client_id', label: '应用 ID · Client ID', required: true },
+      { key: 'client_secret', label: '应用密钥 · Client Secret（可选）', required: false },
+      { key: 'refresh_token', label: '刷新令牌 · Refresh Token', required: true },
+    ];
+  if (kind === 'upyun')
+    return [
+      { key: 'operator', label: '操作员', required: true },
+      { key: 'password', label: '操作员密码', required: true },
+      { key: 'token_secret', label: 'URL 防盗链密钥（私有播放时填写）', required: false },
+    ];
+  if (kind === 'local') return [];
+  const native = kind === 'oss';
+  return [
+    { key: 'access_key_id', label: kind === 'cos' ? 'Secret ID' : 'Access Key ID', required: true },
+    {
+      key: native ? 'access_key_secret' : 'secret_access_key',
+      label: native ? 'Access Key Secret' : 'Secret Access Key',
+      required: true,
+    },
+    ...(['qiniu'].includes(kind)
+      ? []
+      : [
+          {
+            key: native ? 'security_token' : 'session_token',
+            label: '临时安全令牌（可选）',
+            required: false,
+          },
+        ]),
+  ];
+}
 export function storageKindName(kind: string) {
-  return (
-    ({ local: '本地目录', s3: 'S3 兼容存储', oss: '阿里云 OSS' } as Record<string, string>)[kind] ||
-    '其他存储'
-  );
+  return storageProviders.find((provider) => provider.kind === kind)?.name || '其他存储';
 }
 export type StorageDraft = {
   name: string;
-  kind: 'local' | 's3' | 'oss';
+  kind: StorageKind;
+  id?: string;
   config: Values;
   credentials: Values;
   is_default: boolean;
@@ -21,6 +76,7 @@ export type StorageDraft = {
 export function storageDraft(row?: Values): StorageDraft {
   return {
     name: row?.name || '',
+    id: row?.id,
     kind: row?.kind || 'local',
     config: { ...row?.config },
     credentials: {},
@@ -40,7 +96,7 @@ export function changeStorageKind(draft: StorageDraft, kind: StorageDraft['kind'
   draft.credentials = {};
   draft.credentialsChangedKind = true;
 }
-function endpoint(value: unknown, label: string) {
+function endpoint(value: unknown, label: string, allowPath = false) {
   if (!value) return;
   try {
     const url = new URL(String(value));
@@ -51,11 +107,13 @@ function endpoint(value: unknown, label: string) {
       url.password ||
       url.search ||
       url.hash ||
-      !['', '/'].includes(url.pathname)
+      (!allowPath && !['', '/'].includes(url.pathname))
     )
       throw new Error();
   } catch {
-    throw new Error(`${label}须为完整 HTTP(S) 地址，不能包含账号、路径或查询参数`);
+    throw new Error(
+      `${label}须为完整 HTTP(S) 地址，不能包含账号、${allowPath ? '' : '路径或'}查询参数`,
+    );
   }
 }
 export function storagePayload(draft: StorageDraft) {
@@ -68,16 +126,21 @@ export function storagePayload(draft: StorageDraft) {
   const keys =
     draft.kind === 'local'
       ? ['root', 'read_priority']
-      : [
-          'bucket',
-          'endpoint',
-          'public_endpoint',
-          'region',
-          'prefix',
-          'read_priority',
-          'part_size',
-          ...(draft.kind === 's3' ? ['addressing_style'] : []),
-        ];
+      : graphStorage(draft.kind)
+        ? ['drive_id', 'site_id', 'tenant_id', 'prefix', 'read_priority', 'delivery_mode']
+        : [
+            'bucket',
+            'endpoint',
+            'public_endpoint',
+            'public_base_url',
+            'private_bucket',
+            'delivery_mode',
+            'region',
+            'prefix',
+            'read_priority',
+            'part_size',
+            ...(s3Storage(draft.kind) ? ['addressing_style'] : []),
+          ];
   for (const key of keys) {
     const value = draft.config[key];
     if (value !== '' && value != null)
@@ -116,11 +179,30 @@ export function storagePayload(draft: StorageDraft) {
     if (draft.credentialsChangedKind) result.credentials = {};
     return result;
   }
-  if (!config.bucket) throw new Error('请填写存储桶名称');
-  if (draft.kind === 'oss' && (!config.endpoint || !config.region))
-    throw new Error('原生 OSS 需要填写 Endpoint 和 Region');
+  if (graphStorage(draft.kind)) {
+    if (!config.drive_id) throw new Error('请选择云盘 / 文档库，或填写 Drive ID');
+    if (draft.kind.startsWith('sharepoint') && !config.site_id)
+      throw new Error('请填写 SharePoint 站点');
+  } else if (!config.bucket)
+    throw new Error(draft.kind === 'upyun' ? '请填写服务名称' : '请填写存储桶名称');
+  if (draft.kind === 'oss' && !config.endpoint && !config.region)
+    throw new Error('阿里云 OSS 需要填写 API 服务地址或区域');
   endpoint(config.endpoint, 'Endpoint');
   endpoint(config.public_endpoint, '播放 Endpoint');
+  endpoint(config.public_base_url, '自定义播放域名');
+  if (draft.kind === 'upyun' && !config.public_base_url)
+    throw new Error('请填写此服务的自定义播放域名');
+  if (config.delivery_mode && !['auto', 'direct', 'redirect'].includes(config.delivery_mode))
+    throw new Error('请选择有效的播放方式');
+  if (config.private_bucket === false && !config.public_base_url)
+    throw new Error('公开 / CDN 播放需要填写自定义播放域名');
+  if (
+    s3Storage(draft.kind) &&
+    draft.kind !== 'qiniu' &&
+    config.public_base_url &&
+    config.private_bucket !== false
+  )
+    throw new Error('此服务的私有播放请填写签名外网地址；使用 CDN 时请选择公开域名 / CDN');
   if (
     config.prefix &&
     (String(config.prefix).includes('\\') ||
@@ -129,10 +211,10 @@ export function storagePayload(draft: StorageDraft) {
         .some((p) => p === '.' || p === '..'))
   )
     throw new Error('对象前缀不能包含反斜杠或上级目录');
-  const secretKey = draft.kind === 's3' ? 'secret_access_key' : 'access_key_secret';
-  const tokenKey = draft.kind === 's3' ? 'session_token' : 'security_token';
+  const fields = storageCredentialFields(draft.kind);
   const credentials = Object.fromEntries(
-    ['access_key_id', secretKey, tokenKey]
+    fields
+      .map((field) => field.key)
       .filter((key) => typeof draft.credentials[key] === 'string' && draft.credentials[key].trim())
       .map((key) => [key, draft.credentials[key].trim()]),
   );
@@ -142,9 +224,38 @@ export function storagePayload(draft: StorageDraft) {
     draft.credentialsChangedKind ||
     !draft.hasCredentials
   ) {
-    if (!credentials.access_key_id || !credentials[secretKey])
-      throw new Error('请完整填写 Access Key ID 与密钥；留空仅能保留同类型的现有凭据');
+    if (fields.some((field) => field.required && !credentials[field.key]))
+      throw new Error('请完整填写此类型的访问凭据；全部留空可保留现有凭据');
     result.credentials = credentials;
+    if (draft.kind === 'upyun' && config.private_bucket !== false && !credentials.token_secret)
+      throw new Error('又拍云私有播放需要填写 URL 防盗链密钥，或选择公开域名播放');
   }
   return result;
+}
+export function storageDiscoveryPayload(draft: StorageDraft) {
+  const credentials = Object.fromEntries(
+    Object.entries(draft.credentials)
+      .filter(
+        ([key, value]) =>
+          storageCredentialFields(draft.kind).some((field) => field.key === key) &&
+          typeof value === 'string' &&
+          value.trim(),
+      )
+      .map(([key, value]) => [key, value.trim()]),
+  );
+  const retain =
+    draft.editing &&
+    draft.hasCredentials &&
+    !draft.credentialsChangedKind &&
+    !Object.keys(credentials).length;
+  if (
+    !retain &&
+    storageCredentialFields(draft.kind).some((field) => field.required && !credentials[field.key])
+  )
+    throw new Error('请先完整填写访问凭据');
+  return {
+    kind: draft.kind,
+    config: { ...draft.config },
+    ...(retain ? { profile_id: draft.id } : { credentials }),
+  };
 }

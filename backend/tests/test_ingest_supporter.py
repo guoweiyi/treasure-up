@@ -78,6 +78,7 @@ def test_supporter_uses_explicit_full_playurl_and_official_formats_without_ssr(d
     monkeypatch.setattr(yt_dlp.YoutubeDL, "process_info", write_fixture)
     monkeypatch.setattr(media, "_probe", lambda _: ({"codec_name": "h264", "width": 3840, "height": 1634,
         "avg_frame_rate": "60/1"}, {"codec_name": "aac"}, 1588))
+    monkeypatch.setattr(media, "_verify_audio_decode", lambda *a: None)
     variant, reused = media.archive_media(db, Client(), video, part, {"quality": "best"})
     assert not reused and variant.video_codec == "h264" and calls == [(video.bvid, "999")]
     assert video.metadata_json["access"]["upower_exclusive"] is True

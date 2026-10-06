@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,13 +22,18 @@ class IntegrityError(StorageError):
 
 
 def safe_key(key: str) -> str:
-    if not isinstance(key, str) or len(key) > 1024 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", key):
+    # Keep URL delimiters, controls, bidi markers and Windows path syntax out of
+    # keys, while allowing readable CJK names. Providers escape these as URLs.
+    if (not isinstance(key, str) or not key or len(key.encode("utf-8", errors="surrogatepass")) > 1024
+            or not re.match(r"[A-Za-z0-9]", key)
+            or any(not (character in "._/- []()" or unicodedata.category(character)[0] in "LNM"
+                        or unicodedata.category(character) == "So") for character in key)):
         raise StorageError("Invalid storage key")
     parts = key.split("/")
-    if any(p in ("", ".", "..") or p.endswith((".", " ")) for p in parts):
+    if any(p in ("", ".", "..") or p.endswith((".", " ")) or p.startswith(" ") or len(p.encode("utf-8")) > 255 for p in parts):
         raise StorageError("Invalid storage key")
     reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-    if any(p.split(".")[0].upper() in reserved for p in parts):
+    if any(unicodedata.normalize("NFKC", p.split(".")[0]).rstrip(" .").upper() in reserved for p in parts):
         raise StorageError("Invalid storage key")
     return key
 

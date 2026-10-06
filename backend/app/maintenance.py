@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from sqlalchemy import select, text, tuple_
 
-from app.models import Job, MediaVariant, Setting, SourceAccount, Video, utcnow
+from app.models import Asset, Job, MediaVariant, Setting, SourceAccount, Video, utcnow
 from app.schemas import IngestPolicy, PlaybackSettings, StatisticsSettings
 
 
@@ -164,25 +164,39 @@ def enqueue_media_maintenance(db):
     return _locked_schedule(db, 87213003, lambda: _media_page(db))
 
 
-def _preparation_demand(variant, config):
-    package = config.package_long_videos and variant.duration >= config.min_duration_seconds
+def _preparation_demand(variant, config, *, size=0, has_package=False):
+    package = config.package_long_videos and (
+        has_package or variant.duration >= config.min_duration_seconds or size >= config.min_size_mb * 1024**2)
     if not package and not config.analyze_loudness:
         return None
-    key = (f"prepare:v2:{variant.id}:{variant.asset_id}:{config.segment_seconds}:"
+    # Rebuild older HLS once, in the existing bounded queue; analysis-only work
+    # keeps its key and completed loudness measurements are reused by the worker.
+    version = "v3" if package else "v2"
+    key = (f"prepare:{version}:{variant.id}:{variant.asset_id}:{config.segment_seconds}:"
            f"{int(package)}:{int(config.analyze_loudness)}")
     return variant.id, key, {"package": package, "analyze_loudness": config.analyze_loudness,
                              "segment_seconds": config.segment_seconds}
 
 
 def enqueue_variant_preparation(db, variant):
-    """Prepare one explicitly created derivative; never scan/requeue history."""
+    """Prepare one saved rendition; never revive stopped work or overlap it."""
     from app.jobs import enqueue
+    if variant.kind not in {"archive", "playback"}:
+        return None
     row = db.get(Setting, "playback")
     config = PlaybackSettings.model_validate(row.value if row else {})
-    demand = _preparation_demand(variant, config)
+    size = db.scalar(select(Asset.size).where(Asset.id == variant.asset_id))
+    has_package = config.package_long_videos and db.scalar(select(MediaVariant.id).where(
+        MediaVariant.part_id == variant.part_id, MediaVariant.kind == "hls",
+        MediaVariant.metadata_json["source_asset_id"].as_string() == variant.asset_id).limit(1)) is not None
+    demand = _preparation_demand(variant, config, size=size or 0, has_package=has_package)
     if demand is None:
         return None
     variant_id, key, policy = demand
+    active = db.scalar(select(Job).where(Job.kind == "prepare_media", Job.target_id == variant_id,
+                                        Job.status.in_(_ACTIVE_STATUSES)).order_by(Job.created_at, Job.id).limit(1))
+    if active:
+        return active
     return enqueue(db, "prepare_media", variant_id, policy=policy, dedupe_key=key)
 
 
@@ -202,23 +216,35 @@ def _media_page(db):
             return _result(state, disabled=True)
         if state.get("next_run_at") and _date(state["next_run_at"]) > now:
             return _result(state, not_due=True)
-        state = _new_batch(db, MediaVariant, MediaVariant.kind == "archive", now)
+        state = _new_batch(db, MediaVariant, MediaVariant.kind.in_(("archive", "playback")), now)
         state["policy"] = config.model_dump()
 
     config = PlaybackSettings.model_validate(state["policy"])
     rows, pending = _page(db, MediaVariant,
-                          (MediaVariant.id, MediaVariant.created_at, MediaVariant.asset_id, MediaVariant.duration),
-                          MediaVariant.kind == "archive", state)
+                          (MediaVariant.id, MediaVariant.created_at, MediaVariant.part_id,
+                           MediaVariant.asset_id, MediaVariant.duration),
+                          MediaVariant.kind.in_(("archive", "playback")), state)
+    asset_ids = [variant.asset_id for variant in rows]
+    part_ids = list({variant.part_id for variant in rows})
+    sizes = dict(db.execute(select(Asset.id, Asset.size).where(Asset.id.in_(asset_ids))).all()) if rows else {}
+    source_asset = MediaVariant.metadata_json["source_asset_id"].as_string()
+    packaged = set(db.execute(select(MediaVariant.part_id, source_asset).where(
+        MediaVariant.part_id.in_(part_ids), MediaVariant.kind == "hls",
+        source_asset.in_(asset_ids)).distinct()).all()) if rows and config.package_long_videos else set()
     demands = []
     for variant in rows:
-        demand = _preparation_demand(variant, config)
+        demand = _preparation_demand(variant, config, size=sizes.get(variant.asset_id, 0),
+                                     has_package=(variant.part_id, variant.asset_id) in packaged)
         if demand:
             demands.append(demand)
     keys = [key for _, key, _ in demands]
     existing = set(db.scalars(select(Job.dedupe_key).where(Job.dedupe_key.in_(keys)))) if keys else set()
+    targets = [variant_id for variant_id, _, _ in demands]
+    active = set(db.scalars(select(Job.target_id).where(Job.kind == "prepare_media", Job.target_id.in_(targets),
+                                                       Job.status.in_(_ACTIVE_STATUSES)))) if targets else set()
     count = 0
     for variant_id, key, policy in demands:
-        if key not in existing:
+        if key not in existing and variant_id not in active:
             enqueue(db, "prepare_media", variant_id, policy=policy, dedupe_key=key)
             count += 1
     _advance(state, rows, pending, count, now, timedelta(minutes=1))

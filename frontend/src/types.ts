@@ -46,6 +46,7 @@ export interface MediaProperties {
   source_variant_id?: string;
   video_stream_copy?: boolean;
   audio_transcoded?: boolean;
+  audio_mix_revision?: number;
   audio_codec?: string | null;
   audio_channels?: number | null;
 }
@@ -120,6 +121,9 @@ export interface Danmaku {
   size?: number;
 }
 export interface Playback {
+  direct?: boolean;
+  delivery?: 'direct' | 'local' | 'redirect';
+  url_expires_at?: string | null;
   id?: string;
   session_id?: string;
   asset_id: string;

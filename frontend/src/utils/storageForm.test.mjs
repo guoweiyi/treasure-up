@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { storageDraft, storagePayload, changeStorageKind } from './storageForm.ts';
+import {
+  storageDraft,
+  storagePayload,
+  changeStorageKind,
+  storageDiscoveryPayload,
+  storageProviders,
+  storageCredentialFields,
+} from './storageForm.ts';
 const saved = (config = {}) => ({
   id: 'test',
   name: '云端',
@@ -78,4 +85,79 @@ test('tuning bounds and disabled default fail before submission', () => {
   draft.enabled = false;
   draft.is_default = true;
   assert.throws(() => storagePayload(draft), /必须启用/);
+});
+test('discovery can use saved credentials but never crosses a provider boundary', () => {
+  const draft = storageDraft(saved());
+  assert.deepEqual(storageDiscoveryPayload(draft), {
+    kind: 's3',
+    config: { bucket: 'test-bucket' },
+    profile_id: 'test',
+  });
+  draft.credentials.secret_access_key = 'partial';
+  assert.throws(() => storageDiscoveryPayload(draft), /完整填写/);
+  draft.credentials.access_key_id = ' new-key ';
+  draft.credentials.irrelevant = 'not-forwarded';
+  assert.deepEqual(storageDiscoveryPayload(draft).credentials, {
+    secret_access_key: 'partial',
+    access_key_id: 'new-key',
+  });
+  assert.equal(storageDiscoveryPayload(draft).profile_id, undefined);
+  changeStorageKind(draft, 'onedrive');
+  assert.throws(() => storageDiscoveryPayload(draft), /完整填写/);
+  draft.credentials = { client_id: 'app', refresh_token: 'refresh' };
+  assert.deepEqual(storageDiscoveryPayload(draft).credentials, draft.credentials);
+});
+test('every advertised provider has the expected credential form and can form a payload', () => {
+  assert.equal(storageProviders.length, 17);
+  for (const provider of storageProviders) {
+    const draft = storageDraft();
+    changeStorageKind(draft, provider.kind);
+    draft.name = provider.name;
+    draft.config = {
+      bucket: 'example',
+      endpoint: 'https://api.example.test',
+      region: 'test-region',
+      public_base_url: 'https://video.example.test',
+      private_bucket: false,
+      drive_id: 'drive',
+      site_id: 'example.sharepoint.com:/sites/video',
+    };
+    draft.credentials = Object.fromEntries(
+      storageCredentialFields(provider.kind)
+        .filter((field) => field.required)
+        .map((field) => [field.key, 'test-only']),
+    );
+    if (provider.kind === 'upyun') draft.credentials.token_secret = 'test-only';
+    const payload = storagePayload(draft);
+    assert.equal(payload.kind, provider.kind);
+    assert.equal(payload.config.delivery_mode, undefined);
+    if (provider.kind.startsWith('onedrive') || provider.kind.startsWith('sharepoint')) {
+      assert.equal(payload.config.bucket, undefined);
+      assert.equal(payload.credentials.refresh_token, 'test-only');
+    }
+  }
+});
+test('public CDN access is explicit, preserves false, and requires an uncredentialed URL', () => {
+  const draft = storageDraft(
+    saved({
+      private_bucket: false,
+      public_base_url: 'https://cdn.example.test',
+      delivery_mode: 'direct',
+    }),
+  );
+  assert.equal(storagePayload(draft).config.private_bucket, false);
+  draft.config.public_base_url = '';
+  assert.throws(() => storagePayload(draft), /公开/);
+  for (const domain of [
+    'javascript:alert(1)',
+    'https://user:secret@cdn.example.test',
+    'https://cdn.example.test?token=secret',
+    'https://cdn.example.test/path',
+  ]) {
+    draft.config.public_base_url = domain;
+    assert.throws(() => storagePayload(draft), /HTTP/);
+  }
+  draft.config.public_base_url = 'https://cdn.example.test';
+  draft.config.delivery_mode = 'invalid';
+  assert.throws(() => storagePayload(draft), /播放方式/);
 });

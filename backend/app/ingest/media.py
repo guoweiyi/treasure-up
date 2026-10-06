@@ -21,10 +21,16 @@ from sqlalchemy import select
 from app.config import settings
 from app.models import Asset, MediaVariant, Video
 from app.playback.ec3 import ec3_configuration, elementary_joc_complexity, preserve_ec3_configuration
-from app.playback.tools import PlaybackError, probe_media
+from app.playback.tools import MAX_TOOL_OUTPUT, PlaybackError, probe_media
 from app.storage.service import ingest_file, materialize_asset, resolve_asset
+from app.storage.naming import media_name_for_part
 from .client import UA, retry_after
 from .errors import IngestError
+
+
+# Normalize the float downmix explicitly: implicit -ac 2 can sum correlated
+# surround channels above full scale. Leave 1 dB for AAC reconstruction overshoot.
+AAC_STEREO_FILTER = "aresample=out_chlayout=stereo:rematrix_maxval=1,volume=-1dB"
 
 
 class _SilentLogger:
@@ -387,14 +393,21 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None, author
             raise IngestError("媒体时长与分P元数据不符", code="duration_mismatch")
         if policy.get("verify_decode", False):
             _verify_decode(path, int(policy.get("verify_timeout_seconds", 7200)), guard)
+        elif astream:
+            # Container metadata and packet hashes cannot detect damaged audio
+            # frames. Decode every audio track before publishing a new archive.
+            _verify_audio_decode(path, int(policy.get("verify_timeout_seconds", 7200)), guard)
+        dolby["audio_decode_verified"] = bool(astream)
         mime = {".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm", ".flv": "video/x-flv"}[path.suffix.lower()]
-        asset = ingest_file(db, path, kind="media", mime_type=mime, profile_id=policy.get("storage_profile_id"))
+        asset = ingest_file(db, path, kind="media", mime_type=mime, profile_id=policy.get("storage_profile_id"),
+            media_name=media_name_for_part(db, part, video=video))
         variant = existing or MediaVariant(part_id=part.id, kind="archive", format_key=fingerprint)
         variant.asset_id = asset.id
         variant.quality = str(info.get("format_note") or info.get("quality") or info.get("height") or "source")
         variant.width, variant.height = vstream.get("width"), vstream.get("height")
         variant.video_codec, variant.audio_codec = vstream.get("codec_name"), astream.get("codec_name")
         variant.duration = duration
+        variant.metadata_json = {**(variant.metadata_json or {}), "audio_decode_verified": bool(astream)}
         db.add(variant)
         db.flush()
         _record_source_properties(db, part, variant, vstream, **dolby, **merge_evidence,
@@ -529,29 +542,36 @@ def _stop_process(process):
 
 
 def _run_ffmpeg(arguments, output, maximum, timeout, guard):
-    """Poll the real process so cancellation, lease expiry and budgets interrupt it."""
+    """Reject logged errors even when FFmpeg exits zero; retain bounded diagnostics."""
     guard()
-    try:
-        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        raise IngestError("播放副本转换工具无法启动", code="missing_dependency", retryable=False) from None
-    started = time.monotonic()
-    try:
-        while True:
-            guard()
-            if time.monotonic() - started > timeout:
-                raise IngestError("播放副本转换超过时间预算", code="conversion_timeout")
-            if output is not None and output.exists() and output.stat().st_size > maximum:
-                raise IngestError("播放副本超过媒体大小预算", code="media_budget", retryable=False)
-            status = process.poll()
-            if status is not None:
-                if status != 0:
-                    raise IngestError("播放副本转换失败，原始归档已保留", code="conversion_failed")
-                return
-            time.sleep(0.2)
-    finally:
-        _stop_process(process)
+    # Every production caller uses -v error. Do not expose decoder output (which
+    # may contain paths) or buffer it in memory. Inspect the file during polling
+    # and once more after exit, including a process that finishes immediately.
+    with tempfile.TemporaryFile() as errors:
+        try:
+            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=errors)
+        except OSError:
+            raise IngestError("播放副本转换工具无法启动", code="missing_dependency", retryable=False) from None
+        started = time.monotonic()
+        try:
+            while True:
+                guard()
+                if time.monotonic() - started > timeout:
+                    raise IngestError("播放副本转换超过时间预算", code="conversion_timeout")
+                if output is not None and output.exists() and output.stat().st_size > maximum:
+                    raise IngestError("播放副本超过媒体大小预算", code="media_budget", retryable=False)
+                status = process.poll()
+                error_size = os.fstat(errors.fileno()).st_size
+                if error_size > MAX_TOOL_OUTPUT:
+                    raise IngestError("媒体处理诊断超过大小限制", code="conversion_failed")
+                if status is not None:
+                    if status != 0 or error_size:
+                        raise IngestError("媒体处理检测到错误，未发布新文件，原始归档已保留", code="conversion_failed")
+                    return
+                time.sleep(0.2)
+        finally:
+            _stop_process(process)
 
 
 def _verify_decode(path, timeout, guard):
@@ -564,6 +584,18 @@ def _verify_decode(path, timeout, guard):
     except IngestError as error:
         if error.code in {"conversion_failed", "conversion_timeout"}:
             raise IngestError("媒体完整解码验证失败或超过时间预算", code="decode_failed") from None
+        raise
+
+
+def _verify_audio_decode(path, timeout, guard):
+    """Decode all audio to EOF without paying for full video decoding."""
+    command = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-xerror", "-i", str(path),
+               "-map", "0:a", "-vn", "-sn", "-dn", "-f", "null", "-"]
+    try:
+        _run_ffmpeg(command, None, 0, timeout, guard)
+    except IngestError as error:
+        if error.code in {"conversion_failed", "conversion_timeout"}:
+            raise IngestError("音频完整解码验证失败或超过时间预算，未发布新文件", code="audio_decode_failed") from None
         raise
 
 
@@ -580,7 +612,8 @@ def _audio_compatible_copy(source, output, video, audio, duration, maximum, time
         raise IngestError("未知杜比视界配置，未生成兼容副本", code="dolby_metadata_missing", retryable=False)
     arguments = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-n", "-xerror", "-i", str(source),
         "-map", "0:v:0", "-map", "0:a:0", "-sn", "-dn", "-map_metadata", "0", "-c:v", "copy",
-        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ac", "2", "-threads", "2",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ac", "2",
+        "-af", AAC_STEREO_FILTER, "-threads", "2",
         "-strict", "unofficial", "-movflags", "+faststart+write_colr"]
     if video.get("codec_name") == "hevc":
         arguments += ["-tag:v", "hvc1"]
@@ -599,9 +632,12 @@ def _audio_compatible_copy(source, output, video, audio, duration, maximum, time
     digest = _packet_hash(source, "video", guard)
     if _packet_hash(output, "video", guard) != digest:
         raise IngestError("音频兼容副本改变了视频码流，未发布", code="payload_verification_failed")
+    _verify_audio_decode(output, timeout, guard)
     evidence = {**_colour_properties(converted_video), "compatibility_mode": "audio_only",
         "video_stream_copy": True, "audio_transcoded": True, "source_audio_codec": audio["codec_name"],
         "audio_codec": "aac", "audio_profile": "LC", "audio_channels": 2, "audio_channel_layout": "stereo",
+        "audio_decode_verified": True, "audio_downmix": "normalized_stereo", "audio_headroom_db": 1,
+        "audio_mix_revision": 2,
         "dolby_atmos": False, "ec3": {}, "dovi": dovi, "spatial_audio_output_verified": False,
         "video_payload_hash": digest, "video_payload_verified": True}
     return converted_video, converted_audio, converted_duration, evidence
@@ -610,8 +646,8 @@ def _audio_compatible_copy(source, output, video, audio, duration, maximum, time
 def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
     """Preserve the archive; prefer picture-preserving AAC for EC-3 audio."""
     guard()
-    audio_key = "video-copy-aac-v1:" + archive.asset_id
-    key = "h264-aac-sdr-v1:" + archive.asset_id
+    audio_key = "video-copy-aac-v2:" + archive.asset_id
+    key = "h264-aac-sdr-v2:" + archive.asset_id
     existing = None
     for candidate_key in ([audio_key] if archive.audio_codec == "eac3" else [audio_key, key]):
         candidate = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id,
@@ -663,15 +699,16 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
             vstream, astream, duration, evidence = _audio_compatible_copy(
                 source, output, vstream, astream, duration, maximum, timeout, guard)
             evidence.update(source_variant_id=archive.id, source_asset_id=archive.asset_id)
-            asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"))
+            asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"),
+                media_name=media_name_for_part(db, part, variant="playback"))
         elif compatible:
             asset = original_asset
         else:
             output = folder / "playback.mp4"
-            arguments = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-n", "-i", str(source),
+            arguments = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-n", "-xerror", "-i", str(source),
                 "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-c:v", "libx264", "-preset", "medium",
                 "-crf", "20", "-threads", "2", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
-                "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ac", "2",
+                "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ac", "2", "-af", AAC_STEREO_FILTER,
                 "-movflags", "+faststart", str(output)]
             _run_ffmpeg(arguments, output, maximum, timeout, guard)
             if not output.is_file() or not 0 < output.stat().st_size <= maximum:
@@ -684,7 +721,14 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
                 or abs(converted_duration - duration) > 2
                 or converted_color["hdr"] or converted_color["wide_gamut"]):
                 raise IngestError("播放副本编解码、时长或色彩验证失败", code="invalid_playback")
-            asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"))
+            if converted_audio:
+                _verify_audio_decode(output, timeout, guard)
+            evidence.update(source_variant_id=archive.id, source_asset_id=archive.asset_id,
+                audio_transcoded=bool(astream), audio_decode_verified=bool(converted_audio))
+            if converted_audio:
+                evidence.update(audio_downmix="normalized_stereo", audio_headroom_db=1, audio_mix_revision=2)
+            asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"),
+                media_name=media_name_for_part(db, part, variant="playback"))
             vstream, astream, duration = converted_video, converted_audio, converted_duration
         variant = existing or MediaVariant(part_id=part.id, kind="playback", format_key=key)
         variant.asset_id, variant.quality = asset.id, archive.quality

@@ -23,6 +23,8 @@ import SaveToList from '../components/SaveToList.vue';
 import UiIcon from '../components/UiIcon.vue';
 import ContentBadges from '../components/ContentBadges.vue';
 import PartSelector from '../player/PartSelector.vue';
+import PlaybackNodeMenu from '../player/PlaybackNodeMenu.vue';
+import type { Playback } from '../types';
 import { count } from '../utils/format';
 const route = useRoute(),
   router = useRouter(),
@@ -38,6 +40,11 @@ const player = ref<InstanceType<typeof ArchivePlayer>>(),
   resume = ref(true),
   transitioning = ref(false);
 const preferences = ref<QueuePreferences>(readQueuePreferences(null));
+const routing = ref<{ playback: Playback | null; routeId: string; busy: boolean }>({
+  playback: null,
+  routeId: '',
+  busy: true,
+});
 const scope = computed(() => playlistScope(route.query));
 const currentVideoId = computed(() => String(route.params.id));
 const queue = usePlaylist(scope, currentVideoId, (scope, page, signal) =>
@@ -127,6 +134,7 @@ async function load() {
   video.value = null;
   actionError.value = '';
   activeVariantId.value = '';
+  routing.value = { playback: null, routeId: '', busy: true };
   error.value = '';
   try {
     const data = await api<VideoDetail>(`/videos/${id}`, { signal: controller.signal });
@@ -252,6 +260,7 @@ onBeforeUnmount(() => {
           @variant="activeVariantId = $event"
           @ended="ended"
           @playing="playing = $event"
+          @routing="routing = $event"
         />
         <div v-else class="unavailable-player">
           <UiIcon name="play" /><span>此分 P 还没有可播放的归档</span>
@@ -263,6 +272,12 @@ onBeforeUnmount(() => {
           aria-label="当前播放规格"
         >
           <span>{{ archiveSpecification }}</span>
+          <PlaybackNodeMenu
+            :playback="routing.playback"
+            :route-id="routing.routeId"
+            :busy="routing.busy"
+            @select="player?.selectRoute($event)"
+          />
         </div>
         <div class="video-actionbar">
           <div

@@ -6,6 +6,7 @@ import {
   MediaLoadError,
   mediaFailureKind,
   recoveryStartState,
+  withProtocolPreference,
 } from './playbackRecovery.ts';
 
 const hls = {
@@ -27,6 +28,62 @@ test('startup fallback keeps autoplay intent and normal renewal keeps explicit p
   assert.deepEqual(recoveryStartState(37, true, false, true), { position: 37, paused: true });
   assert.deepEqual(recoveryStartState(37, false, false, false), { position: 37, paused: false });
   assert.equal(recoveryStartState(Infinity, true, false, false).position, 0);
+});
+
+test('manual file comparison keeps the selected version and route without needing a decode error', async () => {
+  const recovery = createProtocolFallback();
+  const calls = [];
+  let restores = 0;
+  const input = {
+    part_id: 'part',
+    variant_id: file.variant_id,
+    route_id: 'chosen-node',
+    protocol: 'file',
+  };
+  const result = await loadWithProtocolFallback(input, recovery, {
+    current: () => true,
+    create: async (selection) => {
+      calls.push(selection);
+      return file;
+    },
+    attach: async (data) => assert.equal(data, file),
+    restore: async () => {
+      restores++;
+    },
+  });
+  assert.equal(result, file);
+  assert.deepEqual(calls, [input]);
+  assert.equal(restores, 1);
+});
+
+test('explicit file preference wins over a network recovery from the previous HLS attachment', () => {
+  const stale = { part_id: 'part', variant_id: file.variant_id, route_id: 'node', protocol: 'hls' };
+  assert.deepEqual(withProtocolPreference(stale, 'file'), { ...stale, protocol: 'file' });
+  assert.equal(stale.protocol, 'hls');
+  const fallback = { ...stale, protocol: 'file' };
+  assert.deepEqual(withProtocolPreference(fallback, 'auto'), fallback);
+  assert.equal(withProtocolPreference({ part_id: 'part' }, 'auto').protocol, 'auto');
+});
+
+test('returning to automatic selection clears a previous file fallback for comparison', async () => {
+  const recovery = createProtocolFallback();
+  recovery.claim('part', hls);
+  recovery.reset();
+  const result = await loadWithProtocolFallback(
+    { part_id: 'part', variant_id: file.variant_id, protocol: 'auto' },
+    recovery,
+    {
+      current: () => true,
+      create: async (selection) => {
+        assert.equal(selection.protocol, 'auto');
+        return hls;
+      },
+      attach: async (data) => assert.equal(data, hls),
+      restore: async () => {},
+    },
+  );
+  assert.equal(result, hls);
+  assert.ok(recovery.claim('part', hls));
 });
 
 test('initial HLS decode failure claims the same original once and stays file on route renewal', async () => {

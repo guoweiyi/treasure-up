@@ -1,4 +1,5 @@
 .DS_Store
+/dist/
 *.p12
 *.mobileprovision
 ios-simulator.zip

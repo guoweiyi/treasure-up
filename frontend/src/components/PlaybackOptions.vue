@@ -15,6 +15,7 @@ const props = defineProps<{
   variantId: string;
   subtitle: string;
   routeId: string;
+  protocol: 'auto' | 'file';
   balance: boolean;
   busy: boolean;
   rate: number;
@@ -24,6 +25,7 @@ const props = defineProps<{
 }>();
 defineEmits<{
   route: [value: string];
+  protocol: [value: 'auto' | 'file'];
   balance: [value: boolean];
   variant: [value: string];
   subtitle: [value: string];
@@ -129,6 +131,17 @@ const routeChoices = computed(() => [
     <p v-if="!routeId && selectedRoute" class="player-setting-help">
       当前：{{ selectedRoute.name }}
     </p>
+    <PlayerChoice
+      label="播放方式"
+      :model-value="protocol"
+      :choices="[
+        { value: 'auto', label: '自动选择' },
+        { value: 'file', label: '文件直读' },
+      ]"
+      :disabled="busy"
+      @update:model-value="$emit('protocol', $event as 'auto' | 'file')"
+    />
+    <p class="player-setting-help">声音异常时可切换文件直读对照，画质和音轨保持不变。</p>
     <div class="player-setting-grid">
       <label
         >音量 <output>{{ Math.round(volume * 100) }}%</output

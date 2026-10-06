@@ -92,6 +92,9 @@ def test_prepare_shares_one_verified_copy_and_cleans_on_all_exits(job_sessions, 
     monkeypatch.setattr(loudness, 'probe_media', probe)
     monkeypatch.setattr(loudness, 'run_tool', lambda *a, **k: (b'', b'{"input_i":-16,"input_tp":-2}'))
     monkeypatch.setattr(hls, 'run_tool', package)
+    monkeypatch.setattr(hls, 'fragment_movie_timescale', lambda _: 48000)
+    monkeypatch.setattr(hls, 'finalize_fragmented_hls', lambda *a, **k: None)
+    monkeypatch.setattr(hls, 'stream_copy_digests', lambda *a, **k: {'video': 'unchanged', 'audio': 'unchanged'})
     outcome = jobs.run_job_id(prepare(job_sessions, variant_id))
     assert outcome['status'] == ('lease_lost' if failure == 'cancel' else 'failed' if failure else 'succeeded')
     assert copies == [asset_id]

@@ -104,6 +104,8 @@ def test_flac_changed_properties_or_payload_are_never_published(db, monkeypatch,
         return result
     monkeypatch.setattr(hls, 'probe_media', probe)
     monkeypatch.setattr(hls, 'run_tool', mux)
+    monkeypatch.setattr(hls, 'fragment_movie_timescale', lambda _: 48000)
+    monkeypatch.setattr(hls, 'finalize_fragmented_hls', lambda *a, **k: None)
     monkeypatch.setattr(hls, 'stream_copy_digests', digests)
     monkeypatch.setattr(hls, 'flac_streaminfo_digest', lambda path, **kw: 'b' * 64
                         if problem == 'streaminfo' and path.name == 'init.mp4' else 'a' * 64)

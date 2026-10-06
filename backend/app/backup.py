@@ -32,6 +32,7 @@ from app.config import settings
 from app.models import Asset, AssetLocation, BackupSet, IntegrationToken, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession, PasskeyChallenge, PasskeyAttempt
 from app.storage.base import IntegrityError, StorageError, content_key, file_digest, safe_key
 from app.storage.local import LocalStorage
+from app.storage.naming import is_managed_key
 from app.storage.service import copy_asset_to, utcnow
 
 MAGIC = b"TUPBK1\n"
@@ -383,6 +384,14 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             raise BackupError("Backup database format does not match restore target")
         verify_backup(destination, backup_id, key=key)
         master, source, target = _master_key(key), LocalStorage(destination), LocalStorage(root)
+        restore_keys = {asset["id"]: content_key(asset["sha256"]) for asset in manifest["assets"]}
+        digests = {asset["id"]: asset["sha256"] for asset in manifest["assets"]}
+        # Restore at most one replica per asset, preserving readable media names
+        # from the authenticated snapshot without trusting arbitrary file paths.
+        for location in sorted(manifest.get("source_locations", []), key=lambda item: item.get("object_key", "")):
+            asset_id, object_key = location.get("asset_id"), location.get("object_key", "")
+            if asset_id in digests and object_key.startswith("videos/") and is_managed_key(object_key, digests[asset_id]):
+                restore_keys[asset_id] = object_key
         with tempfile.TemporaryDirectory(prefix="treasure-restore-") as directory:
             temporary = Path(directory)
             dump = temporary / "database.dump"
@@ -396,7 +405,7 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
                     actual = decrypt_to(source.path_for(asset["backup_key"]), stream, master, f"asset:{asset['sha256']}", max_bytes=asset["size"])
                 if actual != (asset["sha256"], asset["size"]):
                     raise IntegrityError("Media backup changed during restore")
-                target.put_file(path, content_key(asset["sha256"]), asset["mime_type"])
+                target.put_file(path, restore_keys[asset["id"]], asset["mime_type"])
                 path.unlink()
             if engine.dialect.name == "postgresql":
                 _run_postgres(["pg_restore", "--no-password", "--no-owner", "--no-acl", "--exit-on-error", "--single-transaction", "--dbname", make_url(database_url).database, str(dump)], database_url)
@@ -438,7 +447,7 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             restored.add(profile)
             restored.flush()
             for asset in manifest["assets"]:
-                restored.add(AssetLocation(asset_id=asset["id"], storage_profile_id=profile.id, object_key=content_key(asset["sha256"]), state="ready", checksum=asset["sha256"], verified_at=utcnow()))
+                restored.add(AssetLocation(asset_id=asset["id"], storage_profile_id=profile.id, object_key=restore_keys[asset["id"]], state="ready", checksum=asset["sha256"], verified_at=utcnow()))
             backup_setting = restored.get(Setting, "backup")
             if backup_setting:
                 backup_setting.value = {**backup_setting.value, "enabled": False, "destination": ""}
