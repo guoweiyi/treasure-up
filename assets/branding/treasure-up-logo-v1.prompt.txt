@@ -1,0 +1,14 @@
+Generated with: built-in image_gen tool
+Design: Treasure Up video archive mascot logo, version 1
+
+Use case: logo-brand.
+Asset type: one finished square 1:1 app logo for Treasure Up, a private Bilibili video archive and collection project. Produce a single image, not a grid, not a presentation sheet. Aim for 1024x1024 or higher square resolution.
+Primary request: original cute minimalist anime chibi mascot logo. The concept is a little guardian lovingly holding a video treasure/archive box, visually expressing that favorite videos are safely collected and cherished.
+Style reference described by the user: a soft pastel blue-haired chibi avatar with oversized simple dark-blue oval eyes, tiny rosy cheeks, very simplified face and gentle airy colors. Borrow only this broad visual language. Invent a clearly different character, hairstyle, accessories, pose and composition; do not recreate that portrait, its costume, halo-like hair decoration, earrings, or diagonal crop.
+Subject and composition: centered front-facing compact mascot, huge round head and tiny body, short fluffy icy blue bob with a distinctive simple asymmetrical fringe. Two large clean indigo oval eyes, pale cream face, two soft pink blush ovals, a tiny contented smile. One small simple pink rectangular hair clip. Two tiny mitten hands hug the sides of ONE small rounded video archive treasure box immediately below the face. Box is pastel cyan and blue with a simple lid seam, and one prominent pink rounded badge with a white right-facing play triangle on its front. The head and box overlap into one coherent compact silhouette; face is dominant, box is secondary. Character occupies about 80% of square with generous equal safe margins and no cut-off elements.
+Bilibili-inspired atmosphere: fresh cyan/blue with small pink accents, friendly youthful anime community feeling and clear video playback cue. Maintain an original project identity. Do not use the Bilibili wordmark or its official television face mark.
+Style/medium: polished flat vector-like illustration, clean smooth closed shapes, slightly rounded medium-weight muted indigo outlines, restrained 2-tone cel shading, very little detail, almost sticker-like. Simple and recognizable at 64px. Charming rather than generic corporate. No photorealism, no 3D, no complex hair strands or textures, no busy anime costume.
+Background: solid very pale milky blue covering the entire square, no border, no drop shadow, no scene.
+Palette: pale periwinkle and icy blue hair, creamy face, muted deep blue eyes/outlines, soft cyan archive box, small sakura pink accents. Keep good contrast and crisp edges.
+Text: none. No letters, no words, no watermark.
+Avoid: extra objects, scattered stars, floating UI symbols, detailed clothing, animal ears, television antennae, official platform logo, giant download arrow, multiple characters, illegible tiny details, circular badge framing.
