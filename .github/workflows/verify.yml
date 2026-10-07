@@ -45,7 +45,7 @@ jobs:
           python3 deploy/setup.py
           docker compose build
           VERSION=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
-          docker build -f deploy/Dockerfile.installer -t "treasure-up-installer:$VERSION" .
+          docker build -f deploy/Dockerfile.setup -t "treasure-up-setup:$VERSION" .
           docker compose pull postgres redis
       - name: Verify a source-free Docker-only installation
         env:

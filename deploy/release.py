@@ -17,9 +17,6 @@ CLIENTS = (
     ("ios-unsigned", ".ipa", "ios-unsigned.ipa"),
 )
 
-DEPLOYMENT_FILES = (
-    "compose.yaml", "compose.light.yaml", "compose.setup.yaml", ".env.example",
-)
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 REGISTRY_VERSION = r"(treasure-up-(?:backend|web):)[0-9]+\.[0-9]+\.[0-9]+"
 
@@ -131,9 +128,8 @@ def prepare(root, version, channel, *, automatic_notes=False):
             if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,38}", namespace):
                 raise ValueError("Invalid Docker Hub namespace")
             planned[notes] = (f"# Treasure Up v{version}\n\n{release_changes(subjects)}\n\n"
-                              "Docker 安装，无需下载源码或 ZIP：\n\n```sh\n"
-                              "docker run --rm -it -v /var/run/docker.sock:/var/run/docker.sock "
-                              f"{namespace}/treasure-up:{version}\n```\n\n"
+                              "使用 Docker Compose 2.34 或更新版本安装，无需下载源码或 ZIP：\n\n```sh\n"
+                              f"docker compose -f oci://docker.io/{namespace}/treasure-up:{version} up -d\n```\n\n"
                               f"iPhone / iPad 请下载 `treasure-up-v{version}-ios-unsigned.ipa`，自行签名后安装；步骤见附件 `IOS-INSTALL.md`。\n\n"
                               "升级前请备份数据库和配置，保留原数据卷，不要执行 `docker compose down -v`。\n")
         else:
@@ -227,25 +223,6 @@ def select_clients(artifacts):
     return selected
 
 
-def deployment_content(name, source, images):
-    """Resolve YAML anchors, remove build recipes, and pin runtime images by digest."""
-    if name not in {"compose.yaml", "compose.setup.yaml"}:
-        return source
-    import yaml
-    config = yaml.safe_load(source)
-    if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
-        raise ValueError(f"Invalid deployment compose: {name}")
-    config = {key: value for key, value in config.items() if not key.startswith("x-")}
-    for service in config["services"].values():
-        service.pop("build", None)
-        value = service.get("image", "")
-        for component in ("backend", "web"):
-            if f"treasure-up-{component}:" in value:
-                service["image"] = images["images"][component]["reference"]
-                break
-    return yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-
-
 def validate_device_metadata(artifacts, commit, ipa):
     metadata_path = artifacts / "treasure-up-ios-unsigned/ios-device-build.json"
     if metadata_path.is_symlink() or not metadata_path.resolve().is_relative_to(artifacts.resolve()):
@@ -291,22 +268,22 @@ def package(root, tag, artifacts, output, images_file=None, repository=None, run
         (output / filename).write_bytes(content)
     (output / "ios-device-build.json").write_text(json.dumps(device, indent=2) + "\n", encoding="utf-8")
     if images is not None:
+        from compose_release import release_compose
+        compose = release_compose(root, context(tag, repository, commit, run_id, namespace), images)
+        (output / "compose.yaml").write_bytes(compose)
         (output / "release-images.json").write_text(json.dumps(images, indent=2) + "\n", encoding="utf-8")
         prefix = f"treasure-up-{tag}/"
         with zipfile.ZipFile(output / f"treasure-up-{tag}-docker.zip", "w", zipfile.ZIP_DEFLATED) as bundle:
-            for name in DEPLOYMENT_FILES:
-                content = subprocess.check_output(["git", "show", f"{commit}:{name}"], cwd=root).decode("utf-8")
-                bundle.writestr(prefix + name, deployment_content(name, content, images))
+            bundle.writestr(prefix + "compose.yaml", compose)
             bundle.writestr(prefix + "release-images.json", json.dumps(images, indent=2) + "\n")
             bundle.writestr(prefix + "README.txt", f"Treasure Up {tag}\n\n需要 Docker Engine / Docker Desktop 和 Docker Compose v2。无需 Python、Git 或编译。\n\n"
-                            "首次安装（Linux）:\n  docker compose -f compose.setup.yaml run --rm --user \"$(id -u):$(id -g)\" setup\n"
-                            "首次安装（Windows / macOS Docker Desktop）:\n  docker compose -f compose.setup.yaml run --rm setup\n"
-                            "启动:\n  docker compose pull\n  docker compose up -d --wait\n"
-                            "访问 http://localhost:8788，使用初始化时显示的管理员账密。\n"
-                            "设置 HTTPS 地址：在 setup 命令后加 --origin https://video.example.com\n"
-                            "局域网 / NAS：在 setup 命令后加 --origin http://192.168.1.20:8788 --bind-address 0.0.0.0（替换为实际地址）。\n"
-                            "轻量模式：docker compose -f compose.yaml -f compose.light.yaml up -d --wait\n\n"
-                            "升级先备份并保留 .env 和所有数据卷。覆盖此包的配置文件后重新 pull / up。\n"
+                            "启动:\n  docker compose up -d --wait\n"
+                            "查看管理员账密（交互式终端）:\n  docker compose run --rm setup --show-login\n"
+                            "访问 http://localhost:8788。配置与密码保存在命名卷中，容器不挂载 Docker socket。\n"
+                            "自定义地址：在同目录 .env 填写 TREASURE_PUBLIC_ORIGIN=https://video.example.com，\n"
+                            "局域网访问同时设置 TREASURE_BIND_ADDRESS=0.0.0.0，修改端口可填写 TREASURE_PORT。\n"
+                            "然后执行 docker compose up -d --force-recreate 读取新设置。\n\n"
+                            "升级先备份并保留配置和数据卷，替换 compose.yaml 后重新 up。\n"
                             "镜像已固定为经测试的不可变摘要。不要执行 docker compose down -v。\n")
     assets = []
     for path in sorted(output.iterdir()):

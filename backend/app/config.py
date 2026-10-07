@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     x_accel_prefix: str = ""
     dev_sqlite: bool = False
     allowed_hosts: str = "localhost,127.0.0.1"
+    trusted_origins: str = ""
     lease_seconds: int = 180
     login_limit: int = 10
     login_window_seconds: int = 300

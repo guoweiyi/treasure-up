@@ -7,8 +7,7 @@ import re
 import subprocess
 import tempfile
 
-# Promote the entry point last, after its versioned runtime images are available.
-COMPONENTS = ("backend", "web", "installer")
+COMPONENTS = ("backend", "web", "setup")
 ARCHES = ("amd64", "arm64")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
@@ -38,8 +37,7 @@ def context(tag, repository, revision, run_id, namespace=None):
 def image_name(ctx, component):
     if component not in COMPONENTS:
         raise ValueError("Unexpected image component")
-    repository = "treasure-up" if component == "installer" else f"treasure-up-{component}"
-    return f"docker.io/{ctx['namespace']}/{repository}"
+    return f"docker.io/{ctx['namespace']}/treasure-up-{component}"
 
 
 def require_digest(value):
@@ -48,8 +46,11 @@ def require_digest(value):
     return value
 
 
-def inspect_digest(reference, *, missing=False):
-    result = subprocess.run(["docker", "buildx", "imagetools", "inspect", reference, "--format", "{{.Manifest.Digest}}"], capture_output=True, text=True)
+def inspect_digest(reference, *, missing=False, artifact=False):
+    arguments = ["docker", "buildx", "imagetools", "inspect", reference]
+    if not artifact:
+        arguments += ["--format", "{{.Manifest.Digest}}"]
+    result = subprocess.run(arguments, capture_output=True, text=True)
     if result.returncode:
         # Only an explicit registry 404 can mean an unused version. Auth, network
         # and unknown errors must never authorize overwriting a tag.
@@ -59,6 +60,13 @@ def inspect_digest(reference, *, missing=False):
         if missing and (missing_reference or missing_manifest):
             return None
         raise ValueError(f"Unable to inspect {reference}")
+    if artifact:
+        # Buildx ignores Go templates for non-image OCI manifests. Its standard
+        # descriptor output has exactly one unindented top-level Digest field.
+        values = re.findall(r"^Digest:\s+(sha256:[0-9a-f]{64})\s*$", result.stdout, re.MULTILINE)
+        if len(values) != 1:
+            raise ValueError("Unable to identify the Compose artifact digest")
+        return require_digest(values[0])
     return require_digest(result.stdout.strip())
 
 
@@ -236,7 +244,8 @@ def reuse_published_images(ctx, output):
     return True
 
 
-def promote(ctx, path, channel):
+def promote(ctx, path, channel, compose_path):
+    from compose_release import channel_may_advance, copy_compose, prepare_compose
     if channel not in {"preview", "stable"}:
         raise ValueError("Invalid release channel")
     data = read_images(path, ctx)
@@ -247,11 +256,14 @@ def promote(ctx, path, channel):
         previous = inspect_digest(f"{value['image']}:{version}", missing=True)
         if previous is not None and previous != value["digest"]:
             raise ValueError("A version tag already points to a different digest; publish a new version")
+    artifact = prepare_compose(ctx, compose_path, data)
+    advance_compose = channel_may_advance(ctx, artifact, channel)
     for component in COMPONENTS:
         value = data["images"][component]
         command("docker", "buildx", "imagetools", "create", "--tag", f"{value['image']}:{version}", value["reference"])
         if inspect_digest(f"{value['image']}:{version}") != value["digest"]:
             raise ValueError("Published image digest changed unexpectedly")
+    copy_compose(artifact, version, immutable=True)
     alias = "latest" if channel == "stable" else "preview"
     for component in COMPONENTS:
         value = data["images"][component]
@@ -264,6 +276,8 @@ def promote(ctx, path, channel):
         command("docker", "buildx", "imagetools", "create", "--tag", target, value["reference"])
         if inspect_digest(target) != value["digest"]:
             raise ValueError("Channel image digest changed unexpectedly")
+    if advance_compose:
+        copy_compose(artifact, alias)
 
 
 def main():
@@ -277,6 +291,7 @@ def main():
     parser.add_argument("--arch", choices=ARCHES)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--compose", type=Path)
     parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
     args = parser.parse_args()
     try:
@@ -285,8 +300,8 @@ def main():
             push_candidates(ctx, args.arch, args.output)
         elif args.action == "merge" and args.input and args.output:
             merge(ctx, args.input, args.output)
-        elif args.action == "promote" and args.input:
-            promote(ctx, args.input, args.channel)
+        elif args.action == "promote" and args.input and args.compose:
+            promote(ctx, args.input, args.channel, args.compose)
         elif args.action == "reuse" and args.output:
             reused = reuse_published_images(ctx, args.output)
             if os.environ.get("GITHUB_OUTPUT"):

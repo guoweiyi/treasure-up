@@ -1,20 +1,38 @@
 # 安装与升级
 
-[首页](../README.md)提供一条 Docker 命令的安装方式。下面是地址配置、升级和旧版迁移。
+[首页](../README.md#快速开始)提供直接从 Docker Hub 启动的命令，需要 Docker Compose 2.34 及以上。下面使用 [Release 中的 compose.yaml](https://github.com/guoweiyi/treasure-up/releases/latest/download/compose.yaml)，方便保存自己的端口和地址设置；同样无需源码、Python 或手动生成密钥。
+
+把文件放在一个固定目录，后续命令都在该目录执行：
+
+```sh
+docker compose up -d
+docker compose run --rm setup --show-login
+```
+
+第二条命令只在交互终端显示初始账号。登录后改过密码的，以新密码为准，它不会重置账号。默认访问 <http://localhost:8788>，只开放本机端口。
 
 ## 访问地址
 
-默认地址为 `http://localhost:8788`，只允许本机访问。在安装命令末尾追加参数可修改：
+NAS 或局域网访问，在同一目录的 `.env` 中填写实际 IP：
 
-| 场景 | 参数 |
-| --- | --- |
-| 局域网 / NAS | `--origin http://192.168.1.20:8788 --bind-address 0.0.0.0` |
-| HTTPS 反代 | `--origin https://video.example.com` |
-| 代理在另一台机器或独立容器 | 再加 `--bind-address 0.0.0.0` |
+```dotenv
+TREASURE_PUBLIC_ORIGIN=http://192.168.1.20:8788
+TREASURE_BIND_ADDRESS=0.0.0.0
+```
 
-IP 和域名替换为实际地址。已有安装重复执行时，只更新明确传入的配置，保留密码和密钥。远程 HTTP 使用密码登录；iOS App 和通行密钥需要可信的 HTTPS 域名。
+HTTPS 反代将第一行改成 `TREASURE_PUBLIC_ORIGIN=https://video.example.com`。代理与应用在同一主机时，可以保留默认的本机绑定；代理在另一台机器或独立容器时，再开放相应的监听地址。
 
-Nginx 示例：
+新安装默认允许 `https://local.gwy.fun` 的访问和密码登录，旧安装保持自己的许可范围。域名解析和 HTTPS 证书仍由自己的反代提供；通行密钥绑定正式站点地址，使用该域名时设置 `TREASURE_PUBLIC_ORIGIN=https://local.gwy.fun`。
+
+改完执行：
+
+```sh
+docker compose up -d --force-recreate
+```
+
+这会重新读取访问地址，保留密码和密钥。只运行 `restart` 不会执行初始化配置更新。修改端口时还要设置 `TREASURE_PORT=8899`，并让公开地址中的端口与之对应。
+
+远程 HTTP 使用密码登录；iOS App 和通行密钥请使用可信的 HTTPS 域名。Nginx 示例：
 
 ```nginx
 location / {
@@ -26,44 +44,50 @@ location / {
 }
 ```
 
-Nginx Proxy Manager、宝塔、内网穿透也使用同一原则：回源到 Web 的 `8788` 端口，保留浏览器 Host。出现 `Invalid host header` 或“请求来源不匹配”时，检查 `--origin` 的协议、域名、端口是否与地址栏一致。
+Nginx Proxy Manager、宝塔、内网穿透同样回源到 Web 的 `8788` 端口，保留浏览器 Host。出现 `Invalid host header` 或“请求来源不匹配”时，检查 `TREASURE_PUBLIC_ORIGIN` 的协议、域名、端口是否与地址栏一致。
 
 ## 升级与数据
 
-先在后台备份，再执行升级命令：
+先在后台备份，再下载新版本的 `compose.yaml` 覆盖旧文件，保留 `.env`，执行：
 
 ```sh
-docker run --rm -it --pull=always -v /var/run/docker.sock:/var/run/docker.sock yunyunjuan/treasure-up
+docker compose up -d --pull always --force-recreate
 ```
 
-`--pull=always` 会拉取最新安装镜像，安装器随后更新同一版本的服务。原密码、密钥和访问地址保持不变。v0.3.5 安装器创建的配置卷可以直接复用。
-
-配置保存在 `treasure-up-config`，业务数据保存在 `treasure-up_database`、`treasure-up_media` 等卷中。一起保留这些卷，特别是配置中的加密密钥。日常升级不要删除数据卷，也不要运行 `docker compose down -v`。
-
-需要固定版本时，在镜像名后加版本号，例如 `yunyunjuan/treasure-up:0.3.6`。安装器不会自行跨版本升级。版本回退需使用升级前的备份恢复。
-
-## 从旧版 Compose 迁移
-
-旧版 `.env` 保存着原密码和密钥，迁移时必须导入它。安装器发现已有数据卷但缺少配置时会停止，不会替旧数据生成新密钥。
-
-在原部署目录执行（Linux、macOS 和 PowerShell 均可）：
+从 Docker Hub 直接启动的用户，升级命令为：
 
 ```sh
-docker run --rm -it --pull=always -v /var/run/docker.sock:/var/run/docker.sock -v "${PWD}:/previous:ro" yunyunjuan/treasure-up --import-env /previous/.env
+docker compose -f oci://docker.io/yunyunjuan/treasure-up:latest up -d --pull always --force-recreate
 ```
 
-迁移后继续使用原项目名 `treasure-up` 和原数据卷。有自定义 NAS 挂载或 Compose 扩展时，先保留原 Compose 部署方式。
+稳定版入口随发版更新。需要固定版本时，把 `latest` 换成版本号，例如 `0.3.7`。Release 中的 YAML 已固定镜像摘要。不要通过旧版文件直接降级，数据库回退应使用升级前的完整备份。
 
-## 手动 Compose
+主配置保存在 `treasure-up-config` 卷，数据库、媒体等保存在 `treasure-up_database`、`treasure-up_media` 等卷。备份时一起保存，特别是主配置中的加密密钥。日常升级不要执行 `docker compose down -v`。
 
-想自行管理 Compose 文件，可使用 Release 的 `docker.zip` 附件：
+初始化容器没有网络，不接触主机 Docker；它只向数据卷写入配置。后端以普通用户运行，只读取对应角色需要的配置。管理员初始密码和备份密钥不会挂载到 API 容器。
+
+## 从旧版迁移
+
+v0.3.5 自动安装创建的 `treasure-up-config` 可直接复用。使用默认项目名 `treasure-up`，保留原数据卷。有自定义端口或绑定地址的，把原 `TREASURE_PORT`、`TREASURE_BIND_ADDRESS` 同时写进新部署目录的 `.env`；Compose 无法读取卷里的端口设置。
+
+更早的 Compose 部署，原 `.env` 保存着密码和加密密钥，先保留该文件。在原部署目录下载新版 `compose.yaml`，导入一次：
 
 ```sh
-docker compose -f compose.setup.yaml run --rm setup
-docker compose pull
-docker compose up -d --wait --wait-timeout 180
+docker compose run --rm -v "${PWD}/.env:/previous/.env:ro" setup --import-env /previous/.env
+docker compose up -d --force-recreate
 ```
 
-Linux 在 `setup` 前加 `--user "$(id -u):$(id -g)"`，让生成的 `.env` 归当前用户所有。升级保留 `.env`，用新版文件覆盖原部署目录；新版包已固定镜像摘要，不再叠加旧版 `compose.registry*.yaml`。
+导入仅复制原凭据，不会重设密码。已有数据库却找不到配置时，初始化会停止，避免用新密钥覆盖旧数据。原来有 NAS 自定义挂载、不同项目名或 Compose 扩展的，迁移前需保留这些对应关系。
 
-后台的本地存储路径是容器内路径，默认 `/data/media`。自定义 NAS 挂载时，需要后端 UID / GID `10001:10001` 可读写、Nginx 可读取和遍历目录。对象存储在后台表单配置，浏览器直连还需设置对应的 CORS 和 HTTPS 域名。
+后台本地存储路径是容器内路径，默认 `/data/media`。自定义 NAS 挂载需要后端 UID / GID `10001:10001` 可读写、Nginx 可读取和遍历目录。对象存储在后台表单配置，浏览器直连还需设置对应的 CORS 和 HTTPS 域名。
+
+## 查看服务
+
+```sh
+docker compose ps
+docker compose logs --tail 100 api
+```
+
+使用 CLI 维护命令时，通过入口加载配置，例如 `docker compose run --rm api python -m app.cli --help`。直接 `exec` 新进程不会自动继承入口从配置文件读取的环境变量。
+
+如果提示 `setup` 启动失败，执行 `docker compose run --rm setup` 查看原因。初始化容器不保存日志，避免查看初始密码时留下副本。

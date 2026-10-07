@@ -29,7 +29,8 @@ def test_first_install_generates_distinct_secrets_without_redirected_password(tm
     secrets = [values[key] for key in ("POSTGRES_PASSWORD", "TREASURE_ADMIN_PASSWORD", "TREASURE_SECRET_KEY", "TREASURE_BACKUP_KEY")]
     assert len(set(secrets)) == 4 and all(len(value) >= 32 for value in secrets)
     assert all(value not in output.getvalue() for value in secrets)
-    assert values["TREASURE_ALLOWED_HOSTS"] == "localhost,127.0.0.1"
+    assert values["TREASURE_ALLOWED_HOSTS"] == "localhost,127.0.0.1,local.gwy.fun"
+    assert values["TREASURE_TRUSTED_ORIGINS"] == "https://local.gwy.fun"
     assert values["TREASURE_COOKIE_SECURE"] == "false"
     assert values["TREASURE_PASSKEY_ORIGIN"] == "http://localhost:8788"
     assert values["TREASURE_PASSKEYS_ENABLED"] == "true"
@@ -89,7 +90,7 @@ def test_origin_update_preserves_credentials_and_configures_all_proxy_related_po
     after = environment(path)
     for key in ("POSTGRES_PASSWORD", "TREASURE_ADMIN_PASSWORD", "TREASURE_SECRET_KEY", "TREASURE_BACKUP_KEY", "TREASURE_PORT"):
         assert before[key] == after[key]
-    assert after["TREASURE_ALLOWED_HOSTS"] == "video.example.com,localhost,127.0.0.1"
+    assert after["TREASURE_ALLOWED_HOSTS"] == "video.example.com,localhost,127.0.0.1,local.gwy.fun"
     assert after["TREASURE_PASSKEY_RP_ID"] == "video.example.com"
     assert after["TREASURE_PASSKEY_ORIGIN"] == "https://video.example.com"
     assert after["TREASURE_PASSKEYS_ENABLED"] == after["TREASURE_COOKIE_SECURE"] == "true"
@@ -173,3 +174,15 @@ def test_origin_duplicate_setting_is_rejected_without_touching_secrets(tmp_path)
     with pytest.raises(ValueError, match="Duplicate"):
         setup.configure_origin(path, "https://video.example.com", stream=io.StringIO())
     assert path.read_bytes() == before
+
+
+def test_updating_an_older_install_does_not_add_the_new_default_alias(tmp_path):
+    path = tmp_path / ".env"
+    setup.create_environment(path, stream=io.StringIO())
+    original = path.read_text(encoding="utf-8").replace(",local.gwy.fun", "").replace(
+        "TREASURE_TRUSTED_ORIGINS=https://local.gwy.fun\n", "")
+    path.write_text(original, encoding="utf-8")
+    setup.configure_origin(path, "https://private.example.com", stream=io.StringIO())
+    values = environment(path)
+    assert values["TREASURE_ALLOWED_HOSTS"] == "private.example.com,localhost,127.0.0.1"
+    assert "TREASURE_TRUSTED_ORIGINS" not in values

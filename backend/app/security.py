@@ -1,9 +1,12 @@
 import hashlib
 import hmac
+import ipaddress
+import re
 import secrets
 import threading
 from contextlib import contextmanager
 from datetime import timedelta, timezone
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, HTTPException, Request
@@ -114,15 +117,81 @@ def optional_identity(request: Request, db: Session = Depends(get_db)):
         return None
 
 
+def canonical_origin(value: str | None) -> str | None:
+    if not value or len(value) > 2048 or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
+        return None
+    if any(char in value for char in ("\\", "?", "#")):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.path not in {"", "/"} or parsed.netloc.endswith(":")):
+            return None
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            if len(hostname) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                               for label in hostname.split(".")):
+                return None
+        else:
+            if "%" in hostname:
+                return None
+            hostname = f"[{address.compressed}]" if address.version == 6 else str(address)
+        port = parsed.port
+        if port == 0:
+            return None
+    except (ValueError, UnicodeError):
+        return None
+    default_port = 443 if parsed.scheme == "https" else 80
+    return f"{parsed.scheme}://{hostname}" + (f":{port}" if port is not None and port != default_port else "")
+
+
+def trusted_request_origins(request: Request) -> set[str]:
+    """TLS aliases must match the request Host, including any non-default port."""
+    base = canonical_origin(str(request.base_url))
+    if not base:
+        return set()
+    host = urlsplit(base).hostname
+    request_port = urlsplit(str(request.base_url)).port
+    trusted = set()
+    for configured in settings.trusted_origins.split(","):
+        origin = canonical_origin(configured.strip())
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if parsed.hostname == host and (request_port == port if request_port is not None else parsed.port is None):
+            trusted.add(origin)
+    return trusted
+
+
+def secure_cookie(request: Request) -> bool:
+    if settings.cookie_secure:
+        return True
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        return False
+    trusted = trusted_request_origins(request)
+    supplied = request.headers.get("origin")
+    if supplied is None:
+        return any(origin.startswith("https://") for origin in trusted)
+    origin = canonical_origin(supplied)
+    return bool(origin and origin.startswith("https://") and origin in trusted)
+
+
 def same_origin(request: Request):
-    origin = request.headers.get("origin")
-    allowed = {str(request.base_url).rstrip("/")}
+    supplied = request.headers.get("origin")
+    origin = canonical_origin(supplied)
+    allowed = {canonical_origin(str(request.base_url)), *trusted_request_origins(request)}
+    allowed.discard(None)
     from app.passkeys import site_policy
     try:
-        allowed.add(site_policy()[0])
+        configured = canonical_origin(site_policy()[0])
+        if configured:
+            allowed.add(configured)
     except HTTPException:
         pass
-    if request.headers.get("sec-fetch-site") == "cross-site" or (origin and origin.rstrip("/") not in allowed):
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site" or (supplied is not None and origin not in allowed):
         raise HTTPException(403, "请求来源不匹配")
 
 

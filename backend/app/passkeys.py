@@ -26,7 +26,7 @@ from webauthn.helpers.structs import (AuthenticatorSelectionCriteria, PublicKeyC
 from app.config import settings
 from app.db import get_db
 from app.models import (AuditLog, PasskeyAttempt, PasskeyChallenge, PasskeyCredential, User, UserSession, utcnow)
-from app.security import COOKIE_NAME, authenticated, create_session, verify_password
+from app.security import COOKIE_NAME, authenticated, create_session, secure_cookie, verify_password
 
 router = APIRouter(prefix="/api/v1/auth/passkeys", tags=["passkeys"])
 CHALLENGE_COOKIE = "treasure_passkey_challenge"
@@ -243,7 +243,7 @@ def login_verify(body: VerificationInput, request: Request, response: Response, 
     except Exception:
         db.rollback()
         raise HTTPException(401, "通行密钥验证失败，请重试或使用密码登录") from None
-    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=settings.cookie_secure, samesite="strict",
+    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=secure_cookie(request), samesite="strict",
                         max_age=settings.session_hours * 3600, path="/")
     response.delete_cookie(CHALLENGE_COOKIE, path=COOKIE_PATH)
     return {"user": {"id": user.id, "username": user.username, "role": user.role}, "csrf_token": session.csrf_token}

@@ -1,0 +1,7 @@
+FROM python:3.12-slim-trixie@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN pip install --no-compile --no-cache-dir python-dotenv==1.2.4
+COPY deploy/setup.py deploy/volume_setup.py release.json /app/
+USER 0
+ENTRYPOINT ["python", "/app/volume_setup.py"]

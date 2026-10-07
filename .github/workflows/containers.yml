@@ -110,29 +110,28 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version }}
           cache-from: type=gha,scope=release-web-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-web-${{ matrix.arch }}
-      - name: Build the lightweight installer for the native runner architecture
+      - name: Build volume setup for the native runner architecture
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: deploy/Dockerfile.installer
-          build-args: DOCKERHUB_NAMESPACE=${{ env.DOCKERHUB_NAMESPACE }}
+          file: deploy/Dockerfile.setup
           platforms: linux/${{ matrix.arch }}
           load: true
           provenance: false
-          tags: treasure-up-installer:${{ inputs.version }}
+          tags: treasure-up-setup:${{ inputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ inputs.revision }}
             org.opencontainers.image.version=${{ inputs.version }}
-          cache-from: type=gha,scope=release-installer-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=release-installer-${{ matrix.arch }}
+          cache-from: type=gha,scope=release-setup-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-setup-${{ matrix.arch }}
       - name: Test the exact images before registry upload
         env:
           VERSION: ${{ inputs.version }}
           TREASURE_RUN_INSTALL_TESTS: '1'
         run: |
           docker run --rm "treasure-up-backend:$VERSION" python -m compileall -q app
-          docker run --rm --entrypoint python "treasure-up-installer:$VERSION" -m compileall -q /app
+          docker run --rm --entrypoint python "treasure-up-setup:$VERSION" -m compileall -q /app
           python3 deploy/setup.py
           docker compose pull postgres redis
           python3 -m venv .image-checks

@@ -118,6 +118,10 @@ def configure_site(output, *, origin=None, bind_address=None, port=None, allow_h
                 if key in seen:
                     raise ValueError(f"Duplicate site setting: {key}; resolve it before changing the origin")
                 seen.add(key)
+                # New installations include this HTTPS alias. Keep it during
+                # later origin changes, without broadening older deployments.
+                if key == "TREASURE_ALLOWED_HOSTS" and "local.gwy.fun" in value.strip().strip("\"'").split(","):
+                    values[key] = ",".join(dict.fromkeys([*values[key].split(","), "local.gwy.fun"]))
                 ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
                 line = f"{key}={values[key]}{ending}"
         lines.append(line)
@@ -176,7 +180,8 @@ def create_environment(output, *, origin="http://localhost:8788", port=8788, adm
         "TREASURE_SECRET_KEY": base64.urlsafe_b64encode(os.urandom(32)).decode(),
         "TREASURE_BACKUP_KEY": base64.urlsafe_b64encode(os.urandom(32)).decode(),
         "TREASURE_COOKIE_SECURE": "true" if origin.startswith("https://") else "false",
-        "TREASURE_ALLOWED_HOSTS": ",".join(dict.fromkeys([hostname, "localhost", "127.0.0.1"])),
+        "TREASURE_ALLOWED_HOSTS": ",".join(dict.fromkeys([hostname, "localhost", "127.0.0.1", "local.gwy.fun"])),
+        "TREASURE_TRUSTED_ORIGINS": "https://local.gwy.fun",
         "TREASURE_PORT": str(port),
         "TREASURE_BIND_ADDRESS": bind_address,
         "TREASURE_PASSKEY_RP_ID": hostname,

@@ -26,7 +26,8 @@ from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, C
                         SourceAccount, SourceSubscription, StorageProfile, SubtitleTrack, User, UserSession,
                         UserSnapshot, Video, VideoAnnotation, VideoCreator, VideoPart, VideoStar, CommentAsset, WatchProgress, utcnow)
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
-                          require_admin, require_editor, reserve_password_attempt, verify_password, optional_identity)
+                          require_admin, require_editor, reserve_password_attempt, verify_password, optional_identity,
+                          same_origin, secure_cookie)
 
 app = FastAPI(title="Treasure Up", version="0.3.6", docs_url=None, redoc_url=None, openapi_url=None,
               dependencies=[Depends(enforce_library_access)])
@@ -97,17 +98,7 @@ def server_capabilities():
 
 @app.post(P + "/auth/login")
 def login(body: schemas.Login, request: Request, response: Response, db: Session = Depends(get_db)):
-    origin = request.headers.get("origin")
-    accepted_origins = {str(request.base_url).rstrip("/")}
-    # External TLS terminators may forward HTTP internally. Only the explicit
-    # configured origin is accepted in addition to this request's trusted host.
-    from app.passkeys import site_policy
-    try:
-        accepted_origins.add(site_policy()[0])
-    except HTTPException:
-        pass
-    if origin and origin.rstrip("/") not in accepted_origins:
-        raise HTTPException(403, "登录来源不匹配")
+    same_origin(request)
     attempt = reserve_password_attempt(db, request)
     user = db.scalar(select(User).where(User.username == body.username))
     checked_hash = user.password_hash if user else _DUMMY_HASH
@@ -123,7 +114,7 @@ def login(body: schemas.Login, request: Request, response: Response, db: Session
     session, token = create_session(db, user)
     audit(db, user, "login", "session", session.id)
     db.commit()
-    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=settings.cookie_secure, samesite="strict",
+    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=secure_cookie(request), samesite="strict",
                         max_age=settings.session_hours * 3600, path="/")
     return {"user": {"id": user.id, "username": user.username, "role": user.role}, "csrf_token": session.csrf_token}
 

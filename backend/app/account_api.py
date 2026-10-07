@@ -10,7 +10,7 @@ from app.library_access import allow_guest_access
 from app.models import AuditLog, User, UserSession, utcnow
 from app.schemas import Input
 from app.security import (COOKIE_NAME, authenticated, create_session, hash_password,
-                          reserve_password_attempt, same_origin, verify_password)
+                          reserve_password_attempt, same_origin, secure_cookie, verify_password)
 
 router = APIRouter(prefix="/api/v1/auth")
 
@@ -44,6 +44,6 @@ def change_password(body: PasswordChange, request: Request, response: Response,
     attempt.succeeded = True
     db.add(AuditLog(actor_id=user.id, action="change_password", entity_type="user", entity_id=user.id, details={}))
     db.commit()
-    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=settings.cookie_secure, samesite="strict",
+    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=secure_cookie(request), samesite="strict",
                         max_age=max(1, int((session.expires_at - utcnow()).total_seconds())), path="/")
     return {"user": {"id": user.id, "username": user.username, "role": user.role}, "csrf_token": session.csrf_token}

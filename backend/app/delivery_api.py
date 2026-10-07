@@ -22,7 +22,7 @@ from app.playback_limits import check_playback_creation, playback_creation_slot
 from app.models import (Asset, AssetLocation, AuditLog, Comment, CommentAsset, CommentVersion, Creator, DanmakuSnapshot, Job,
                         MediaVariant, PlaybackSession, Setting, StorageObservation, StorageProfile,
                         SubtitleTrack, PlatformUser, UserSnapshot, Video, VideoCreator, VideoPart, VideoStatSnapshot, utcnow)
-from app.security import authenticated, require_admin, optional_identity, same_origin
+from app.security import authenticated, require_admin, optional_identity, same_origin, secure_cookie
 
 router = APIRouter(prefix="/api/v1")
 
@@ -39,7 +39,7 @@ def playback_identity(request: Request, response: Response, identity=Depends(opt
         # Keep existing guest sessions usable while extending the browser binding
         # to cover the full lifetime of this newly created session.
         token = token or secrets.token_urlsafe(32)
-        response.set_cookie(GUEST_COOKIE, token, httponly=True, secure=settings.cookie_secure,
+        response.set_cookie(GUEST_COOKIE, token, httponly=True, secure=secure_cookie(request),
                             samesite="strict", max_age=4 * 3600, path="/api/v1/playback-sessions")
     return (SimpleNamespace(id=identity[0].id if identity else None,
                             guest_hash=hashlib.sha256(token.encode()).hexdigest() if token else ""), None)
