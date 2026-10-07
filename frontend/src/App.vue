@@ -33,7 +33,7 @@ const isAdmin = computed(() => ['admin', 'editor'].includes(session.user?.role |
 watch(
   () => display.site_name,
   (name) => {
-    document.title = `${name} · 私人视频库`;
+    document.title = `${name}`;
   },
   { immediate: true },
 );
@@ -150,7 +150,7 @@ async function logout() {
     <RouterLink class="footer-brand" to="/" :aria-label="`${display.site_name} 首页`">
       <BrandLogo :size="30" decorative /><span>{{ display.site_name }}</span>
     </RouterLink>
-    <span class="footer-separator" aria-hidden="true">·</span><span>私人视频库</span>
+    <span class="footer-separator" aria-hidden="true">·</span><span></span>
   </footer>
 </template>
 <style scoped>
