@@ -3,7 +3,7 @@
 # Windows / macOS Docker Desktop: the default container user can write the mount.
 services:
   setup:
-    image: ${TREASURE_BACKEND_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-backend:0.3.7}
+    image: ${TREASURE_BACKEND_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-backend:0.3.8}
     entrypoint: [python, /app/setup.py]
     working_dir: /setup
     volumes:
