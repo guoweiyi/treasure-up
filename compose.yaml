@@ -7,7 +7,7 @@ x-worker-health: &worker-health
   start_period: 30s
 
 x-backend: &backend
-  image: treasure-up-backend:0.3.6
+  image: treasure-up-backend:0.3.7
   restart: unless-stopped
   environment: &environment
     TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run the setup service first to create .env}@postgres:5432/treasure
@@ -142,7 +142,7 @@ services:
       init:
         condition: service_completed_successfully
   web:
-    image: treasure-up-web:0.3.6
+    image: treasure-up-web:0.3.7
     build:
       context: .
       dockerfile: deploy/Dockerfile.web
