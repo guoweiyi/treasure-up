@@ -1,5 +1,4 @@
 <p align="center"><img src="frontend/public/brand/logo-lockup.png" width="220" alt="Treasure Up" /></p>
-<h1 align="center">Treasure Up</h1>
 <p align="center"><b>一个 B 站视频归档库</b></p>
 
 ## 前言
@@ -7,10 +6,10 @@
 你是否遇到过这些问题？
 
 - 给 UP 主充电后看过的视频，想重温时发现包月已经到期。
-- 视频被删除了，找到了补档，却找不回原来的弹幕和精彩评论。
-- 担心平台调整画质，想留住现在能看到的版本。
+- 视频被删除了，找到了补档，却找不回原来的弹幕和评论。
+- 担心叔叔压画质码率，想留住现在能看到的版本。
 
-Treasure Up 可以把账号有权限观看的视频保存到自己的存储里，连同弹幕、评论和作者资料一起留下，随时用网页或 iPhone / iPad 观看。
+Treasure Up 可以把视频保存起来，连同弹幕、评论和作者资料一起留下，随时观看。
 
 ## 功能
 
@@ -18,17 +17,17 @@ Treasure Up 可以把账号有权限观看的视频保存到自己的存储里�
 - 保存封面、标签、作者资料、弹幕、评论及置顶评论，更新视频统计和失效状态。
 - 支持多 P、充电视频、杜比视界和杜比全景声，提供分片播放与兼容音轨。
 - 支持本地、OSS、COS、OBS、又拍云、七牛、S3 兼容存储、OneDrive 和 SharePoint，可同步副本、切换播放节点。
-- 支持搜索、播放列表、星标、弹幕设置、账号权限和备份恢复。
+- 支持搜索、播放列表、星标、弹幕设置和备份恢复。
 
 ## 快速开始
 
-先安装并启动 Docker，Compose 需为 **2.34 或更新版本**。支持 Linux `amd64` / `arm64`，Windows、macOS 使用 Docker Desktop。
+先安装并启动 Docker，Compose 需为 **2.34 或更新版本**。
 
 ```sh
 docker compose -f oci://docker.io/yunyunjuan/treasure-up:latest up -d
 ```
 
-Compose 直接从 Docker Hub 读取部署配置、拉取镜像并启动服务，无需下载源码。首次运行会自动生成密码和密钥。容器不挂载 Docker socket。
+Compose 直接从 Docker Hub 读取部署配置、拉取镜像并启动服务，无需下载源码。首次运行会自动生成密码和密钥。
 
 在自己的终端查看初始账号：
 
@@ -36,9 +35,9 @@ Compose 直接从 Docker Hub 读取部署配置、拉取镜像并启动服务，
 docker compose -f oci://docker.io/yunyunjuan/treasure-up:latest run --rm setup --show-login
 ```
 
-打开 **<http://localhost:8788>** 登录。密码不会写入容器日志。旧版 Compose 可以[下载单个 compose.yaml](https://github.com/guoweiyi/treasure-up/releases/latest/download/compose.yaml)，在文件所在目录执行 `docker compose up -d`，再用 `docker compose run --rm setup --show-login` 查看账号。
+打开 **<http://localhost:8788>** 登录。
 
-新安装也允许通过 `https://local.gwy.fun` 访问；需自行配置该域名的解析和 HTTPS 反代。要在这个地址使用通行密钥，将下方公开地址设为它。
+也可以[下载单个 compose.yaml](https://github.com/guoweiyi/treasure-up/releases/latest/download/compose.yaml)，在文件所在目录执行 `docker compose up -d`，再用 `docker compose run --rm setup --show-login` 查看账号。
 
 <details>
 <summary>部署在 NAS，或需要从其他设备访问</summary>
