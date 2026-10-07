@@ -26,6 +26,7 @@ import 'element-plus/dist/index.css';
 import { api, write, query, errorText, statusText, date, bytes, session } from '../api';
 import type { Row, Page } from '../types';
 import AdminSettings from '../components/admin/AdminSettings.vue';
+import AccountManager from '../components/admin/AccountManager.vue';
 import SetupChecklist from '../components/admin/SetupChecklist.vue';
 import StorageReplicas from '../components/admin/StorageReplicas.vue';
 import SourceMonitor from '../components/admin/SourceMonitor.vue';
@@ -135,7 +136,7 @@ async function load(p = 1, quiet = false) {
     if (section.value === 'overview') {
       const d = await api<Row>('/admin/overview');
       if (n === sequence) overview.value = d;
-    } else if (['settings', 'replicas', 'sources', 'browser'].includes(section.value)) {
+    } else if (['accounts', 'settings', 'replicas', 'sources', 'browser'].includes(section.value)) {
       settingsRevision.value++;
     } else {
       const d = await api<Page<Row>>(
@@ -209,10 +210,9 @@ async function openEditor(kind = section.value, row?: Row) {
   const editorTicket = editorSequence;
   editId.value = row?.id || '';
   dialogKind.value = kind;
-  dialogTitle.value = `${row ? '编辑' : '添加'}${({ accounts: 'B 站账号', sources: '收藏来源', jobs: '任务', storage: '存储位置', users: '本站用户', videos: '视频资料', creators: 'UP 主资料' } as Row)[kind] || ''}`;
-  if (['accounts', 'sources', 'jobs', 'storage', 'users'].includes(kind)) await loadChoices();
+  dialogTitle.value = `${row ? '编辑' : '添加'}${({ sources: '收藏来源', jobs: '任务', storage: '存储位置', users: '本站用户', videos: '视频资料', creators: 'UP 主资料' } as Row)[kind] || ''}`;
+  if (['sources', 'jobs', 'storage', 'users'].includes(kind)) await loadChoices();
   if (editorTicket !== editorSequence) return;
-  if (kind === 'accounts') Object.assign(form, { name: row?.name || '', cookie: '' });
   if (kind === 'sources')
     Object.assign(form, {
       source_id: '',
@@ -286,14 +286,7 @@ async function submit() {
   try {
     const kind = dialogKind.value;
     let payload: Row;
-    if (kind === 'accounts') {
-      if (!form.name?.trim() || (!editId.value && !form.cookie?.trim()))
-        throw new Error('请填写账号名称和 Cookie');
-      payload = {
-        name: form.name.trim(),
-        ...(form.cookie?.trim() ? { cookie: form.cookie.trim() } : {}),
-      };
-    } else if (kind === 'sources') {
+    if (kind === 'sources') {
       if (!form.source_id?.trim() || !form.account_id || !form.title?.trim())
         throw new Error('请填写收藏夹 ID、显示名称并选择采集账号');
       payload = {
@@ -347,7 +340,6 @@ async function submit() {
       editId.value ? 'PATCH' : 'POST',
     );
     showOperation(d);
-    form.cookie = '';
     storageForm.value.credentials = {};
     form.password = '';
     dialog.value = false;
@@ -481,18 +473,15 @@ onBeforeUnmount(() => {
             <h1>{{ heading }}</h1>
             <p class="muted">{{ descriptions[section] }}</p>
           </div>
-          <div v-if="!['sources', 'browser'].includes(section)" class="toolbar-actions">
+          <div v-if="!['accounts', 'sources', 'browser'].includes(section)" class="toolbar-actions">
             <el-button :loading="busy" @click="load(page)">刷新</el-button
             ><el-button
-              v-if="
-                ['accounts', 'sources', 'jobs', 'storage', 'users'].includes(section) && allowed
-              "
+              v-if="['sources', 'jobs', 'storage', 'users'].includes(section) && allowed"
               type="primary"
               @click="openEditor()"
               >添加{{
                 (
                   {
-                    accounts: '账号',
                     sources: '来源',
                     jobs: '任务',
                     storage: '位置',
@@ -600,6 +589,7 @@ onBeforeUnmount(() => {
             </div></template
           >
           <AdminSettings v-else-if="section === 'settings'" :key="settingsRevision" />
+          <AccountManager v-else-if="section === 'accounts'" />
           <StorageReplicas v-else-if="section === 'replicas'" :key="settingsRevision" />
           <SourceMonitor v-else-if="section === 'sources'" />
           <UserscriptIntegration v-else-if="section === 'browser'" />
@@ -622,13 +612,6 @@ onBeforeUnmount(() => {
                   :value="s" /></el-select
               ><el-button @click="load()">筛选</el-button>
             </div>
-            <el-alert
-              v-if="section === 'accounts'"
-              title="Cookie 加密保存，需要服务端已配置加密密钥。验证只创建任务，最终结果请查看任务中心。"
-              type="info"
-              :closable="false"
-              class="mb"
-            />
             <el-alert
               v-if="section === 'backups'"
               title="立即备份会创建后台任务。请先在系统配置填写独立目录和密钥标识；缺少条件时任务会明确失败。恢复须在隔离环境通过服务端流程执行。"
@@ -683,45 +666,7 @@ onBeforeUnmount(() => {
                   </div></template
                 ></el-table-column
               >
-              <template v-if="section === 'accounts'"
-                ><el-table-column prop="name" label="账号名称" min-width="150" /><el-table-column
-                  prop="uid"
-                  label="UID"
-                  min-width="130"
-                /><el-table-column label="状态" min-width="100"
-                  ><template #default="{ row }">{{
-                    statusText(row.status)
-                  }}</template></el-table-column
-                ><el-table-column label="请求与冷却" min-width="220"
-                  ><template #default="{ row }"
-                    ><span v-if="row.cooldown_until">冷却至 {{ date(row.cooldown_until) }}</span
-                    ><span v-else>无冷却记录</span
-                    ><small class="table-subtitle" v-if="row.next_request_at"
-                      >下次请求 {{ date(row.next_request_at) }}</small
-                    ><small class="table-subtitle" v-if="row.next_video_at"
-                      >下个视频 {{ date(row.next_video_at) }}</small
-                    ><small class="table-subtitle" v-if="row.risk_failures"
-                      >风险响应 {{ row.risk_failures }} 次</small
-                    ></template
-                  ></el-table-column
-                ><el-table-column label="最近验证" min-width="180"
-                  ><template #default="{ row }">{{
-                    date(row.last_verified_at)
-                  }}</template></el-table-column
-                ><el-table-column label="操作" width="200"
-                  ><template #default="{ row }"
-                    ><el-button
-                      size="small"
-                      :loading="actionBusy === `/admin/accounts/${row.id}/verify`"
-                      @click="action(`/admin/accounts/${row.id}/verify`, '验证账号')"
-                      >验证账号</el-button
-                    ><el-button size="small" @click="openEditor('accounts', row)"
-                      >更新凭据</el-button
-                    ></template
-                  ></el-table-column
-                ></template
-              >
-              <template v-else-if="section === 'sources'"
+              <template v-if="section === 'sources'"
                 ><el-table-column prop="title" label="收藏夹" min-width="170" /><el-table-column
                   prop="source_id"
                   label="来源 ID"
@@ -1016,20 +961,6 @@ onBeforeUnmount(() => {
       :close-on-press-escape="!submitting"
       @closed="resetForm"
       ><el-form label-position="top" @submit.prevent="submit">
-        <template v-if="dialogKind === 'accounts'"
-          ><el-form-item label="账号名称" required
-            ><el-input v-model="form.name" placeholder="用于区分采集账号" /></el-form-item
-          ><el-form-item label="Cookie" required
-            ><el-input
-              v-model="form.cookie"
-              type="password"
-              show-password
-              autocomplete="off"
-              placeholder="粘贴你授权使用的账号 Cookie"
-            />
-            <p class="field-help">不会写入浏览器存储，保存后清空输入。</p></el-form-item
-          ></template
-        >
         <template v-if="dialogKind === 'sources'"
           ><el-form-item label="收藏夹 ID" required
             ><el-input

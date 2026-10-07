@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from sqlalchemy import String, cast, delete, func, or_, select
@@ -37,6 +39,14 @@ _DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
 @app.exception_handler(IntegrityError)
 async def conflict_handler(request, exc):
     return JSONResponse(status_code=409, content={"detail": "记录已存在或正在被修改，请刷新后重试"})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request, exc):
+    # Pydantic's default errors contain the submitted input, including secrets.
+    if request.url.path.startswith("/api/v1/admin/accounts"):
+        return JSONResponse(status_code=422, content={"detail": "账号信息格式不正确，请检查名称、Cookie 和刷新令牌"})
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.middleware("http")
@@ -362,17 +372,21 @@ def annotate_creator(creator_id: str, body: schemas.CreatorAnnotation, user=Depe
 
 
 def account_view(a):
-    return {k: getattr(a, k) for k in ["id", "name", "uid", "status", "last_verified_at", "created_at",
-                                     "next_request_at", "next_video_at", "cooldown_until", "risk_failures"]}
+    from app.source_credentials import account_view as view
+    return view(a)
 
 
 @app.patch(P + "/admin/accounts/{account_id}")
-def update_account(account_id: str, body: schemas.AccountUpdate, user=Depends(require_admin), db: Session = Depends(get_db)):
-    from app.ingest.runner import _lock
-    from app.ingest.errors import IngestDeferred
+def update_account(account_id: str, body: schemas.AccountUpdate, request: Request, user=Depends(require_admin), db: Session = Depends(get_db)):
+    from app.ingest.runner import credential_lock
+    from app.ingest.errors import IngestDeferred, IngestError
+    from app.source_credentials import reset_refresh
+    from app.security import same_origin
+    same_origin(request)
     account = required(db, SourceAccount, account_id)
     try:
-        with _lock(db, "account:" + account.id):
+        with credential_lock(db, account.id):
+            db.refresh(account)
             if body.name is not None:
                 account.name = body.name
             if body.cookie is not None:
@@ -381,10 +395,23 @@ def update_account(account_id: str, body: schemas.AccountUpdate, user=Depends(re
                 except ValueError:
                     raise HTTPException(503, "采集凭据加密密钥未正确配置") from None
                 account.status, account.uid, account.last_verified_at = "unverified", None, None
-            audit(db, user, "update_credentials" if body.cookie else "rename", "source_account", account.id)
+            if body.cookie is not None or body.refresh_token is not None:
+                reset_refresh(account, body.refresh_token)
+            if body.auto_refresh_enabled is not None:
+                account.auto_refresh_enabled = body.auto_refresh_enabled
+                if body.auto_refresh_enabled and account.refresh_token_encrypted:
+                    account.next_refresh_at = utcnow()
+            audit(db, user, "update_credentials" if body.cookie is not None or body.refresh_token is not None else "update",
+                  "source_account", account.id)
             commit(db)
     except IngestDeferred:
         raise HTTPException(409, "账号凭据正在更新，请稍后重试") from None
+    except IngestError as error:
+        db.rollback()
+        raise HTTPException(422, str(error)) from None
+    except ValueError:
+        db.rollback()
+        raise HTTPException(503, "采集凭据加密密钥未正确配置") from None
     return account_view(account)
 
 
@@ -394,12 +421,19 @@ def accounts(page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=10
 
 
 @app.post(P + "/admin/accounts", status_code=201)
-def new_account(body: schemas.AccountInput, user=Depends(require_admin), db: Session = Depends(get_db)):
+def new_account(body: schemas.AccountInput, request: Request, user=Depends(require_admin), db: Session = Depends(get_db)):
+    from app.source_credentials import reset_refresh
+    from app.ingest.errors import IngestError
+    from app.security import same_origin
+    same_origin(request)
     try:
         secret = encrypt_secret(body.cookie)
+        item = SourceAccount(name=body.name, secret_encrypted=secret, auto_refresh_enabled=body.auto_refresh_enabled)
+        reset_refresh(item, body.refresh_token)
     except ValueError:
         raise HTTPException(503, "采集凭据加密密钥未正确配置") from None
-    item = SourceAccount(name=body.name, secret_encrypted=secret)
+    except IngestError as error:
+        raise HTTPException(422, str(error)) from None
     db.add(item)
     db.flush()
     audit(db, user, "create", "source_account", item.id)
@@ -853,5 +887,7 @@ from app.personal_playlists import router as personal_playlists_router
 app.include_router(personal_playlists_router)
 from app.account_api import router as account_router
 app.include_router(account_router)
+from app.source_credentials_api import router as source_credentials_router
+app.include_router(source_credentials_router)
 from app.creator_capture_api import router as creator_capture_router
 app.include_router(creator_capture_router)

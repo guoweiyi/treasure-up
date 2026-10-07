@@ -2,7 +2,7 @@
 
 一个部署在自己服务器上的 B 站视频归档库。默认登录后浏览和播放，管理员可在后台开启游客访问；个人片单、进度保存与管理操作需要登录。保存视频、多 P、弹幕、字幕、评论和公开人员资料。
 
-技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；Cookie 只在服务端加密保存。
+技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；B 站 Cookie 与独立刷新令牌只在服务端加密保存。
 
 **当前版本为已发布的 [0.3.2 技术预览（preview）](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.2)。** 新增 GitHub 自动发版、双架构 Docker 镜像和客户端打包流程。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
 
@@ -61,6 +61,7 @@ docker compose up -d --no-deps --no-build --wait api
 - 原档优先播放、长视频无损 fMP4 HLS 分片、受限缓冲、可选播放音量平衡；杜比视界 / 全景声按媒体证据标注。
 - 有数量和素材预算的热门评论归档，评论与楼中楼按需加载、表情行内显示，附图站内预览；人工标注与来源数据分离。
 - 后台账号与凭据轮换、UP / 收藏来源、检查历史和新增统计、任务暂停 / 继续 / 重试、存储配置 / 探测 / 迁移、备份记录、系统配置、用户权限与审计。
+- B 站扫码授权，或手动填写 Cookie 与配套的 `refresh_token` / `ac_time_value`；正常每 24 小时检查续期，只有上游要求时才轮换，支持自动开关和手动检查。[会话续期与故障恢复](docs/bilibili-session-research.md)说明确认重试、重新授权和备份恢复后的行为，不承诺永久在线。
 - 账号密码与通行密钥登录；账户安全支持改密码和会话撤销，保留本机重置入口。
 - B 站来源标签与人工标签分离；UP / 置顶评论标识；编辑者可在 UP 主页筛选最新投稿和充电视频进行采集。
 - [浏览器选片助手](docs/browser-collector.md)：油猴脚本勾选 B 站视频，使用可撤销的专用令牌批量提交采集，后台统一处理与去重。

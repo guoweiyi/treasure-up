@@ -60,6 +60,8 @@ def main():
                     from app.maintenance import enqueue_statistics, enqueue_media_maintenance
                     enqueue_statistics(db)
                     enqueue_media_maintenance(db)
+                    from app.source_credentials import schedule_refreshes
+                    schedule_refreshes(db)
                     recover_and_dispatch(db, lambda job_id, kind: execute.apply_async(args=[job_id],
                         queue=queue_for_kind(kind)))
             except Exception as exc:

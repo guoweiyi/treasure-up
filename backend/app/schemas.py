@@ -53,11 +53,15 @@ class CreatorAnnotation(Input):
 class AccountInput(Input):
     name: str = Field(min_length=1, max_length=200)
     cookie: str = Field(min_length=1, max_length=65536)
+    refresh_token: str | None = Field(default=None, max_length=4096)
+    auto_refresh_enabled: bool = True
 
 
 class AccountUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     cookie: str | None = Field(default=None, min_length=1, max_length=65536)
+    refresh_token: str | None = Field(default=None, max_length=4096)
+    auto_refresh_enabled: bool | None = None
 
 
 class SourceResolve(Input):

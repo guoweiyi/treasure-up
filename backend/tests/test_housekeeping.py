@@ -3,7 +3,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from app.housekeeping import prune_transient_records
-from app.models import PlaybackSession, StorageObservation, UserSession, utcnow
+from app.models import PlaybackSession, SourceAuthorization, StorageObservation, UserSession, utcnow
 from test_api import context, login
 from test_delivery_api import seed_media
 
@@ -28,7 +28,7 @@ def test_pruning_is_bounded_and_retains_active_sessions_and_recent_observations(
                               csrf_token='expired', expires_at=now - timedelta(days=2))
     db.add(old_session); db.commit()
     counts = prune_transient_records(db, now=now, batch_size=2)
-    assert counts == {'playback_sessions': 2, 'sessions': 1, 'storage_observations': 1}
+    assert counts == {'source_authorizations': 0, 'playback_sessions': 2, 'sessions': 1, 'storage_observations': 1}
     db.expire_all()
     remaining = list(db.scalars(select(PlaybackSession)))
     assert len(remaining) == 2
@@ -36,3 +36,22 @@ def test_pruning_is_bounded_and_retains_active_sessions_and_recent_observations(
     assert client.get('/api/v1/auth/me').status_code == 200
     assert len(list(db.scalars(select(StorageObservation)))) == 1
     assert prune_transient_records(db, now=now)['playback_sessions'] == 1
+
+
+def test_expired_qr_credentials_are_pruned_within_the_existing_batch_budget(context):
+    client, db, _ = context
+    login(client)
+    session = db.scalar(select(UserSession))
+    now = utcnow()
+    entries = []
+    for index, status in enumerate(('pending', 'validating', 'authorized', 'validating')):
+        row = SourceAuthorization(user_id=session.user_id, session_id=session.id, name='fixture', status=status,
+            key_encrypted='encrypted-fixture', credential_encrypted='encrypted-fixture',
+            expires_at=now + timedelta(seconds=60) if index == 3 else now - timedelta(seconds=60))
+        db.add(row); db.flush()
+        entries.append(row.id)
+    db.commit()
+    assert prune_transient_records(db, now=now, batch_size=2)['source_authorizations'] == 2
+    assert db.scalar(select(SourceAuthorization.id).where(SourceAuthorization.id == entries[-1])) == entries[-1]
+    assert prune_transient_records(db, now=now)['source_authorizations'] == 1
+    assert list(db.scalars(select(SourceAuthorization.id))) == [entries[-1]]

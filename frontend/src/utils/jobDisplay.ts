@@ -37,6 +37,7 @@ export const jobNames: Record<string, string> = {
   create_playback: '生成兼容副本',
   refresh_comments: '补采评论',
   verify_account: '验证账号',
+  refresh_credentials: '检查账号续期',
   migrate_storage: '迁移存储',
   backup: '创建备份',
   probe_storage: '探测存储能力',
@@ -49,6 +50,20 @@ export const jobNames: Record<string, string> = {
   restore_storage_location: '恢复媒体副本',
   purge_storage_location: '永久删除副本',
 };
+export function credentialRefreshNotice(job: Row) {
+  if (job.kind !== 'refresh_credentials' || job.status !== 'succeeded') return '';
+  const status = job.result?.refresh_status;
+  if (status === 'ready')
+    return job.result.rotated ? '账号凭据已续期。' : '账号凭据仍然有效，暂时无需续期。';
+  const labels: Record<string, string> = {
+    unsupported: '尚未配置刷新令牌，请重新扫码或补入配套的刷新令牌。',
+    paused: '自动续期已关闭。',
+    pending_confirm: '新凭据已保存，正在等待源站确认。',
+    relogin_required: '需要重新授权，请在 B 站账号页面扫码登录。',
+    error: '续期检查未完成，请在 B 站账号页面查看状态。',
+  };
+  return labels[status] || '';
+}
 const phases: Record<string, string> = {
   deletion_wait: '等待关联任务停止',
   deletion_records: '清理归档资料',

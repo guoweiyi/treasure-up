@@ -24,12 +24,12 @@ from alembic.config import Config
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from sqlalchemy import create_engine, delete, inspect, select, text
+from sqlalchemy import create_engine, delete, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Asset, AssetLocation, BackupSet, IntegrationToken, Job, OutboxEvent, Setting, SourceSubscription, StorageProfile, UserSession, PlaybackSession, PasskeyChallenge, PasskeyAttempt
+from app.models import Asset, AssetLocation, BackupSet, IntegrationToken, Job, JobAttempt, OutboxEvent, Setting, SourceAccount, SourceAuthorization, SourceSubscription, StorageProfile, UserSession, PlaybackSession, PasskeyChallenge, PasskeyAttempt
 from app.storage.base import IntegrityError, StorageError, content_key, file_digest, safe_key
 from app.storage.local import LocalStorage
 from app.storage.naming import is_managed_key
@@ -428,15 +428,20 @@ def restore_backup(destination: Path, backup_id: str, database_url: str, media_r
             # Old sessions, schedulers, and storage endpoints must not revive on recovery.
             restored.execute(delete(PasskeyChallenge))
             restored.execute(delete(PasskeyAttempt))
+            restored.execute(delete(SourceAuthorization))
             restored.execute(delete(UserSession))
             restored.execute(delete(PlaybackSession))
+            # An old dump can contain superseded real-world refresh tokens.
+            # Preserve evidence for an explicit review, but never rotate those
+            # credentials automatically from a restored instance.
+            restored.execute(update(SourceAccount).values(auto_refresh_enabled=False, next_refresh_at=None))
             for token in restored.scalars(select(IntegrationToken).where(IntegrationToken.revoked_at.is_(None))):
                 token.revoked_at = utcnow()
             restored.execute(delete(OutboxEvent))
-            for job in restored.scalars(select(Job).where(Job.status.in_(["pending", "queued", "running", "retry", "paused"]))):
-                job.status = "paused"
-                job.lease_owner = None
-                job.lease_expires_at = None
+            restored.execute(update(Job).where(Job.status.in_(["pending", "queued", "running", "retry", "paused"]))
+                .values(status="paused", lease_owner=None, lease_expires_at=None))
+            restored.execute(update(JobAttempt).where(JobAttempt.status == "running", JobAttempt.finished_at.is_(None))
+                .values(status="paused", error="备份恢复后任务已暂停", finished_at=utcnow()))
             for subscription in restored.scalars(select(SourceSubscription)):
                 subscription.enabled = False
             for profile in restored.scalars(select(StorageProfile)):

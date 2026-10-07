@@ -339,6 +339,30 @@ class SourceAccount(Entity, Base):
     next_video_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     risk_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    refresh_pending_encrypted: Mapped[str | None] = mapped_column(Text)
+    auto_refresh_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    refresh_phase: Mapped[str] = mapped_column(String(32), default="unsupported", server_default="unsupported")
+    refresh_error_code: Mapped[str | None] = mapped_column(String(64))
+    refresh_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_refresh_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class SourceAuthorization(Entity, Base):
+    __tablename__ = "source_authorizations"
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[str | None] = mapped_column(ForeignKey("source_accounts.id", ondelete="CASCADE"))
+    account_generation: Mapped[str | None] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(200))
+    key_encrypted: Mapped[str | None] = mapped_column(Text)
+    credential_encrypted: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(64))
 
 
 class SourceSubscription(Entity, Base):

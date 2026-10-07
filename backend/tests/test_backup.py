@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.backup import BackupError, _postgres_environment, create_backup, decrypt_to, encrypt_file, load_backup_manifest, protected_asset_ids, restore_backup, rpo_status, verify_backup
 from app.config import settings
-from app.models import Asset, AssetLocation, BackupSet, Base, IntegrationToken, Setting, SourceAccount, StorageProfile, User
+from app.models import Asset, AssetLocation, BackupSet, Base, IntegrationToken, Job, JobAttempt, Setting, SourceAccount, SourceAuthorization, StorageProfile, User, UserSession
 from app.storage.service import ingest_file, read_asset_bytes, utcnow
 from app.storage.naming import MediaName
 
@@ -79,11 +79,22 @@ def test_readable_media_name_survives_backup_restore(backup_fixture, tmp_path):
 def test_roundtrip_without_primary_media_or_database(backup_fixture, tmp_path):
     db, asset, content, key = backup_fixture
     user = User(username="fixture-admin", role="admin", password_hash="not-used")
-    account = SourceAccount(name="fixture-account", secret_encrypted="not-used")
+    account = SourceAccount(name="fixture-account", secret_encrypted="not-used", refresh_token_encrypted="encrypted-fixture",
+                            refresh_pending_encrypted="pending-fixture", next_refresh_at=utcnow())
     db.add_all([user, account]); db.flush()
     token = IntegrationToken(user_id=user.id, account_id=account.id, name="restore-must-revoke", token_hash="d" * 64,
         scope="ingest.submit", expires_at=utcnow() + timedelta(days=1))
-    db.add(token); db.commit()
+    db.add(token)
+    session = UserSession(user_id=user.id, token_hash='f'*64, csrf_token='fixture', expires_at=utcnow()+timedelta(hours=1))
+    db.add(session); db.flush()
+    db.add(SourceAuthorization(user_id=user.id, session_id=session.id, account_id=account.id, name='fixture',
+        status='validating', credential_encrypted='encrypted-fixture', expires_at=utcnow()+timedelta(minutes=3)))
+    running = Job(kind='refresh_credentials', account_id=account.id, status='running', dedupe_key='refresh-fixture',
+                  lease_owner='old-worker', lease_expires_at=utcnow()+timedelta(minutes=3))
+    db.add(running); db.flush()
+    db.add(JobAttempt(job_id=running.id))
+    db.commit()
+    account_id, job_id = account.id, running.id
     token_id = token.id
     backup = create_backup(db)
     assert backup.status == "complete"
@@ -107,6 +118,13 @@ def test_roundtrip_without_primary_media_or_database(backup_fixture, tmp_path):
     engine = create_engine(target_url)
     with Session(engine) as restored:
         assert restored.get(IntegrationToken, token_id).revoked_at is not None
+        assert list(restored.scalars(select(SourceAuthorization))) == []
+        recovered_account = restored.get(SourceAccount, account_id)
+        assert not recovered_account.auto_refresh_enabled and recovered_account.next_refresh_at is None
+        assert recovered_account.refresh_pending_encrypted == 'pending-fixture'
+        assert restored.get(Job, job_id).status == 'paused' and restored.get(Job, job_id).lease_owner is None
+        attempt = restored.scalar(select(JobAttempt).where(JobAttempt.job_id == job_id))
+        assert attempt.status == 'paused' and attempt.finished_at is not None
         assert read_asset_bytes(restored, asset.id) == content
         assert all(not profile.enabled for profile in restored.scalars(select(StorageProfile).where(StorageProfile.name != "Restored local media")))
     engine.dispose()

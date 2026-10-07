@@ -9,6 +9,7 @@ import {
   jobStatusLabel,
   mediaCaptureLabel,
   compatibilityNotice,
+  credentialRefreshNotice,
 } from '../../utils/jobDisplay';
 const props = defineProps<{ job: Row }>();
 defineEmits<{ retryMedia: [id: string, action: 'retry' | 'resume'] }>();
@@ -40,6 +41,9 @@ const checkNames: Record<string, string> = {
     </p>
     <p>{{ jobPhase(job) }}</p>
     <p v-if="compatibilityNotice(job)" class="capture-result">{{ compatibilityNotice(job) }}</p>
+    <p v-if="credentialRefreshNotice(job)" class="capture-result">
+      {{ credentialRefreshNotice(job) }}
+    </p>
     <div v-if="job.capture" class="capture-result">
       <p>
         <strong>{{ mediaCaptureLabel(job) }}</strong>

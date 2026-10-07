@@ -5,6 +5,7 @@
 - [部署、升级、备份恢复](operations.md)
 - [存储源与直连分发](storage-providers.md)
 - [登录、访问权限、UP 采集与来源元数据](access-and-capture.md)
+- [B 站扫码授权、会话续期与源站失效检查](bilibili-session-research.md)
 - [标签、置顶评论和前台采集接口](catalog-capture.md)
 - [油猴选片助手安装与排查](userscript-guide.md)
 - [发布流水线](ci-cd.md)

@@ -69,8 +69,9 @@ def save_checkpoint(db, job_id, owner, checkpoint):
 
 def renew_lease(db, job_id, owner):
     now = utcnow()
-    changed = db.execute(update(Job).where(*_owned(job_id, owner, _lease_clock(db, now)))
-                         .values(lease_expires_at=now + timedelta(seconds=settings.lease_seconds))
+    clock = _lease_clock(db, now)
+    changed = db.execute(update(Job).where(*_owned(job_id, owner, clock))
+                         .values(lease_expires_at=clock + timedelta(seconds=settings.lease_seconds))
                          .execution_options(synchronize_session=False))
     db.commit()
     return changed.rowcount == 1
@@ -117,12 +118,17 @@ def enqueue(db: Session, kind: str, target_id: str, account_id=None, policy=None
     return job
 
 
-def claim(db: Session, job_id: str, owner: str):
+def claim(db: Session, job_id: str, owner: str, *, attempt=None):
     now = utcnow()
-    result = db.execute(update(Job).where(Job.id == job_id, Job.status == "queued", Job.available_at <= now)
-                        .values(status="running", lease_owner=owner, lease_expires_at=now + timedelta(seconds=settings.lease_seconds),
-                                started_at=now, attempts=Job.attempts + 1, error=None)
+    clock = _lease_clock(db, now)
+    result = db.execute(update(Job).where(Job.id == job_id, Job.status == "queued", Job.available_at <= clock)
+                        .values(status="running", lease_owner=owner, lease_expires_at=clock + timedelta(seconds=settings.lease_seconds),
+                                started_at=clock, attempts=Job.attempts + 1, error=None)
                         .execution_options(synchronize_session=False))
+    if result.rowcount == 1 and attempt is not None:
+        # A crash or failed insert cannot leave a claimed task without its
+        # attempt ledger. The row update and attempt become durable together.
+        db.add(attempt)
     db.commit()
     db.expire_all()
     return db.get(Job, job_id) if result.rowcount == 1 else None
@@ -142,12 +148,10 @@ def heartbeat(job_id, owner, stop):
 def run_job_id(job_id: str):
     owner = str(uuid4())
     with SessionLocal() as db:
-        job = claim(db, job_id, owner)
+        attempt = JobAttempt(job_id=job_id)
+        job = claim(db, job_id, owner, attempt=attempt)
         if job is None:
             return {"claimed": False}
-        attempt = JobAttempt(job_id=job.id)
-        db.add(attempt)
-        db.commit()
         attempt_id = attempt.id
         stop = threading.Event()
         pulse = threading.Thread(target=heartbeat, args=(job.id, owner, stop), daemon=True)
@@ -169,6 +173,11 @@ def run_job_id(job_id: str):
             check_job_allowed(db, job)
             if job.kind in {"delete_video", "delete_creator"}:
                 result = run_deletion(db, job)
+            elif job.kind == "refresh_credentials":
+                from app.source_credentials import refresh_account
+                result = refresh_account(db, job.account_id or job.target_id,
+                    manual=bool(job.policy.get("manual")),
+                    check_active=lambda: ensure_active(db, job_id, owner))
             elif job.kind == "backup":
                 from app.backup import create_backup
                 backup = create_backup(db, check_active=lambda: ensure_active(db, job_id, owner))
@@ -232,7 +241,6 @@ def run_job_id(job_id: str):
             stop.set()
             pulse.join(timeout=2)
         with SessionLocal() as final:
-            record = final.get(JobAttempt, attempt_id)
             now = utcnow()
             values = {"status": outcome, "error": error, "finished_at": None if outcome == "queued" else now,
                       "lease_owner": None, "lease_expires_at": None}
@@ -252,7 +260,7 @@ def run_job_id(job_id: str):
                 changed = final.execute(update(Job).where(*_owned(job_id, owner, _lease_clock(final, now))).values(**values)
                                         .execution_options(synchronize_session=False))
             if changed is not None and changed.rowcount == 1:
-                record.status = outcome
+                attempt_status = outcome
                 if outcome == "queued":
                     final.add(OutboxEvent(job_id=job_id))
             else:
@@ -262,9 +270,13 @@ def run_job_id(job_id: str):
                                         .values(lease_owner=None, lease_expires_at=None)
                                         .execution_options(synchronize_session=False))
                 current_status = final.scalar(select(Job.status).where(Job.id == job_id))
-                record.status = current_status if stopped.rowcount == 1 else "lease_lost"
-            record.error, record.finished_at = error, utcnow()
-            final_status = record.status
+                attempt_status = current_status if stopped.rowcount == 1 else "lease_lost"
+            # Restart recovery may already have closed this attempt. A stale
+            # worker cannot overwrite the recorded cancellation/lost-lease cause.
+            final.execute(update(JobAttempt).where(JobAttempt.id == attempt_id, JobAttempt.finished_at.is_(None))
+                .values(status=attempt_status, error=error, finished_at=utcnow())
+                .execution_options(synchronize_session=False))
+            final_status = final.scalar(select(JobAttempt.status).where(JobAttempt.id == attempt_id))
             final.commit()
         return {"status": final_status, "result": result if final_status not in {"lease_lost", "cancelled", "paused"} else {}}
 
@@ -346,32 +358,71 @@ def schedule_due(db):
     db.commit()
 
 
+def _recover_expired(db, now):
+    # Only project scheduling fields: checkpoints can contain large comment
+    # samples or multipart ledgers and are deliberately left untouched.
+    expired = db.execute(select(Job.id, Job.status, Job.attempts, Job.max_attempts).where(
+        or_(Job.status == "running", Job.status.in_(["paused", "cancelled"]) & Job.lease_owner.is_not(None)),
+        or_(Job.lease_expires_at <= _lease_clock(db, now), Job.lease_expires_at.is_(None)))
+        .order_by(Job.lease_expires_at.asc().nulls_first(), Job.id).limit(100)
+        .with_for_update(skip_locked=True)).all()
+    groups = {}
+    for row in expired:
+        status = ("queued" if row.attempts < row.max_attempts else "failed") if row.status == "running" else row.status
+        groups.setdefault(status, []).append(row.id)
+    for status, ids in groups.items():
+        values = {"status": status, "lease_owner": None, "lease_expires_at": None}
+        if status in {"queued", "failed"}:
+            values.update(error="执行进程租约到期，已保存检查点", finished_at=now if status == "failed" else None)
+        elif status == "cancelled":
+            values["finished_at"] = func.coalesce(Job.finished_at, now)
+        db.execute(update(Job).where(Job.id.in_(ids)).values(**values).execution_options(synchronize_session=False))
+        db.execute(update(JobAttempt).where(JobAttempt.job_id.in_(ids), JobAttempt.status == "running",
+            JobAttempt.finished_at.is_(None)).values(status="lease_lost" if status in {"queued", "failed"} else status,
+            error="执行进程租约到期，已保存检查点", finished_at=now).execution_options(synchronize_session=False))
+        if status == "queued":
+            db.add_all(OutboxEvent(job_id=identity) for identity in ids)
+    db.commit()
+
+
 def recover_and_dispatch(db, send):
     now = utcnow()
-    expired = db.scalars(select(Job).where(Job.status == "running", or_(Job.lease_expires_at <= now,
-                         Job.lease_expires_at.is_(None))).with_for_update(skip_locked=True)).all()
-    for job in expired:
-        job.status = "queued" if job.attempts < job.max_attempts else "failed"
-        job.error = "执行进程租约到期，已保存检查点"
-        job.lease_owner = None
-        job.lease_expires_at = None
-        if job.status == "queued":
-            db.add(OutboxEvent(job_id=job.id))
-    db.commit()
+    _recover_expired(db, now)
     # New continuation/retry events obey available_at without the lost-message
     # fallback delay. A conditional DB claim rejects duplicate delivery hints.
     last_publication = select(func.max(OutboxEvent.published_at)).where(OutboxEvent.job_id == Job.id).correlate(Job).scalar_subquery()
     unpublished = select(OutboxEvent.id).where(OutboxEvent.job_id == Job.id,
                                              OutboxEvent.published_at.is_(None)).correlate(Job).exists()
-    eligible = select(Job).where(Job.status == "queued", Job.available_at <= now,
+    eligible = select(Job.id, Job.kind).where(Job.status == "queued", Job.available_at <= now,
                                 or_(unpublished, last_publication.is_(None),
                                     last_publication <= now - timedelta(seconds=60)))
-    for job in db.scalars(eligible.order_by(Job.available_at, Job.created_at, Job.id).limit(100)):
-        send(job.id, job.kind)
-        pending = db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job.id, OutboxEvent.published_at.is_(None))).all()
-        if not pending:
-            pending = [OutboxEvent(job_id=job.id)]
-            db.add_all(pending)
-        for event in pending:
-            event.published_at = now
-        db.commit()
+    batch = db.execute(eligible.order_by(Job.available_at, Job.created_at, Job.id).limit(100)).all()
+    events = {job.id: [] for job in batch}
+    if batch:
+        for identity, job_id in db.execute(select(OutboxEvent.id, OutboxEvent.job_id).where(
+            OutboxEvent.job_id.in_(events), OutboxEvent.published_at.is_(None))):
+            events[job_id].append(identity)
+        missing = [OutboxEvent(job_id=job_id) for job_id, ids in events.items() if not ids]
+        if missing:
+            db.add_all(missing)
+            db.flush()
+            for item in missing:
+                events[item.job_id].append(item.id)
+    # Release the connection before contacting Redis. These immutable IDs are
+    # the publication boundary: events created by a fast worker belong to the
+    # next slice and must not be acknowledged by the current delivery.
+    db.commit()
+    delivered = []
+    try:
+        for job in batch:
+            send(job.id, job.kind)
+            delivered.extend(events[job.id])
+    finally:
+        if delivered:
+            # One small acknowledgement transaction, including partial broker
+            # failure. If this commit fails, hints may repeat; claim() is the
+            # single execution gate, so no work is lost.
+            db.execute(update(OutboxEvent).where(OutboxEvent.id.in_(delivered),
+                OutboxEvent.published_at.is_(None)).values(published_at=utcnow())
+                .execution_options(synchronize_session=False))
+            db.commit()

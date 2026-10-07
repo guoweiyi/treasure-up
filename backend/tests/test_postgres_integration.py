@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app import backup, jobs
 from app.config import settings
 from app.models import (Asset, AssetLocation, IntegrationToken, Job, JobAttempt, Setting, StorageProfile, User, Video, VideoPart,
-                        MediaVariant, SourceAccount, PlaybackSession, PasskeyCredential, PasskeyChallenge,
+                        MediaVariant, SourceAccount, SourceAuthorization, PlaybackSession, PasskeyCredential, PasskeyChallenge,
                         PasskeyAttempt, UserSession, utcnow)
 from app.storage.service import ingest_file, migrate_asset, read_asset_bytes, resolve_asset
 
@@ -141,6 +141,9 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
         login_session = UserSession(user_id=viewer.id, token_hash="a" * 64, csrf_token="test-csrf",
                                     passkey_credential_id=key.id, expires_at=utcnow() + timedelta(hours=4))
         db.add(login_session); db.flush()
+        account.refresh_token_encrypted, account.next_refresh_at = 'encrypted-fixture', utcnow()
+        db.add(SourceAuthorization(user_id=viewer.id, session_id=login_session.id, account_id=account.id,
+            name='fixture', credential_encrypted='encrypted-fixture', expires_at=utcnow()+timedelta(minutes=3)))
         db.add(PasskeyChallenge(challenge="pending-challenge", purpose="register", user_id=viewer.id,
                                session_id=login_session.id, binding_hash="b" * 64, origin="https://archive.example",
                                rp_id="archive.example", expires_at=utcnow() + timedelta(minutes=5)))
@@ -214,6 +217,9 @@ def test_postgres_snapshot_encrypted_backup_and_restore_without_primary(postgres
         assert restored.get(SourceAccount, account_id).name == "preserved source"
         assert restored.get(SourceAccount, account_id).risk_failures == 0
         assert restored.get(SourceAccount, account_id).cooldown_until is None
+        assert restored.get(SourceAccount, account_id).auto_refresh_enabled is False
+        assert restored.get(SourceAccount, account_id).next_refresh_at is None
+        assert restored.scalar(select(func.count()).select_from(SourceAuthorization)) == 0
         assert restored.scalar(select(func.count()).select_from(Asset)) == 1
         assert restored.scalar(select(func.count()).select_from(PlaybackSession)) == 0
         assert restored.scalar(select(func.count()).select_from(UserSession)) == 0

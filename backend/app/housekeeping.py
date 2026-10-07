@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from sqlalchemy import delete, select
 
-from app.models import PlaybackSession, StorageObservation, UserSession, utcnow
+from app.models import PlaybackSession, SourceAuthorization, StorageObservation, UserSession, utcnow
 
 
 def prune_transient_records(db, *, now=None, batch_size=1000):
@@ -11,6 +11,7 @@ def prune_transient_records(db, *, now=None, batch_size=1000):
     batch_size = min(1000, max(1, batch_size))
     counts = {}
     for model, clock, cutoff in (
+        (SourceAuthorization, SourceAuthorization.expires_at, now),
         (PlaybackSession, PlaybackSession.expires_at, now - timedelta(hours=1)),
         (UserSession, UserSession.expires_at, now - timedelta(days=1)),
         (StorageObservation, StorageObservation.measured_at, now - timedelta(days=7)),

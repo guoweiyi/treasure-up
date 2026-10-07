@@ -1,32 +1,33 @@
-import os
 from datetime import timedelta
 
-import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from app.housekeeping import prune_transient_records
-from app.models import User, UserSession, utcnow
-from test_postgres_integration import postgres_workspace
-
-pytestmark = pytest.mark.skipif(os.environ.get("TREASURE_RUN_POSTGRES_TESTS") != "1",
-                                reason="Explicit TREASURE_RUN_POSTGRES_TESTS=1 required")
+from app.models import SourceAccount, SourceAuthorization, User, UserSession, utcnow
+from test_postgres_integration import postgres_workspace, pytestmark
 
 
-def test_pruning_skips_locked_rows_and_keeps_live_sessions(postgres_workspace):
-    ws = postgres_workspace
+def test_expired_authorization_cleanup_skips_busy_rows_and_preserves_account_refresh_state(postgres_workspace):
+    sessions = postgres_workspace.sessions
     now = utcnow()
-    with ws.sessions() as db:
-        user = User(username='cleanup-test', password_hash='not-a-real-password')
-        db.add(user); db.flush()
-        db.add_all([UserSession(id=str(i), user_id=user.id, token_hash=str(i), csrf_token='test',
-                    expires_at=now + timedelta(days=2) if i == 2 else now - timedelta(days=2)) for i in range(3)])
-        db.commit()
-    with ws.sessions() as holder:
-        holder.scalar(select(UserSession).where(UserSession.id == '0').with_for_update())
-        with ws.sessions() as db:
-            db.execute(text("SET LOCAL statement_timeout = '500ms'"))
-            assert prune_transient_records(db, now=now)['sessions'] == 1
-            assert set(db.scalars(select(UserSession.id))) == {'0', '2'}
-    with ws.sessions() as db:
-        assert prune_transient_records(db, now=now)['sessions'] == 1
-        assert list(db.scalars(select(UserSession.id))) == ['2']
+    with sessions() as db:
+        user = User(username='fixture', password_hash='fixture')
+        account = SourceAccount(name='fixture', secret_encrypted='encrypted-fixture',
+            refresh_pending_encrypted='pending-fixture')
+        db.add_all([user, account]); db.flush()
+        session = UserSession(user_id=user.id, token_hash='a'*64, csrf_token='fixture', expires_at=now+timedelta(hours=1))
+        db.add(session); db.flush()
+        rows = [SourceAuthorization(user_id=user.id, session_id=session.id, account_id=account.id, name='fixture',
+            key_encrypted='encrypted-fixture', credential_encrypted='encrypted-fixture', status='validating',
+            expires_at=now+timedelta(seconds=60) if index == 2 else now-timedelta(seconds=60)) for index in range(3)]
+        db.add_all(rows); db.commit()
+        ids, account_id = [row.id for row in rows], account.id
+    with sessions() as busy:
+        busy.execute(select(SourceAuthorization.id).where(SourceAuthorization.id == ids[0]).with_for_update())
+        with sessions() as db:
+            assert prune_transient_records(db, now=now)['source_authorizations'] == 1
+        busy.rollback()
+    with sessions() as db:
+        assert prune_transient_records(db, now=now)['source_authorizations'] == 1
+        assert list(db.scalars(select(SourceAuthorization.id))) == [ids[2]]
+        assert db.get(SourceAccount, account_id).refresh_pending_encrypted == 'pending-fixture'

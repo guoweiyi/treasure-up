@@ -52,6 +52,7 @@ def test_scheduler_exits_on_lost_leader_connection_and_reacquires_on_restart(mon
     monkeypatch.setattr(scheduler, "prune_transient_records", cleanup)
     monkeypatch.setattr("app.maintenance.enqueue_statistics", lambda db: None)
     monkeypatch.setattr("app.maintenance.enqueue_media_maintenance", lambda db: None)
+    monkeypatch.setattr("app.source_credentials.schedule_refreshes", lambda db: None)
     monkeypatch.setattr(scheduler, "recover_and_dispatch", lambda db, send: events.append("dispatch"))
     monkeypatch.setattr(scheduler.time, "sleep", lambda delay: events.append("sleep"))
     for _ in range(2):

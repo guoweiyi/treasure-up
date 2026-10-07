@@ -7,7 +7,7 @@ const steps = computed(() => [
   {
     done: props.setup?.account_ready,
     title: '连接 B 站账号',
-    text: '添加并验证 Cookie，用于访问你有权限保存的内容。',
+    text: '扫码授权或填写 Cookie，用于访问你有权限保存的内容。',
     to: '/admin/accounts',
   },
   {
