@@ -1,14 +1,17 @@
 """Credential lifecycle tests use synthetic values and never contact Bilibili."""
 from datetime import timedelta
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app import source_credentials as service
 from app.config import settings
 from app.ingest.errors import IngestDeferred, IngestError
+from app.ingest import passport as protocol
 from app.ingest.passport import Credential, RefreshInfo
 from app.models import Base, Job, SourceAccount, utcnow
 from app.security import decrypt_secret, encrypt_secret
@@ -240,3 +243,78 @@ def test_manual_check_reuses_active_job_and_bounds_repeated_checks(workspace):
         db.commit()
         with pytest.raises(IngestDeferred):
             service.enqueue_refresh(db, account, manual=True)
+
+
+@pytest.mark.parametrize("stage", ["info", "correspond"])
+@pytest.mark.parametrize("header,seconds", [("7200", 7200), ("1", 900), ("999999999", 86400), ("invalid", 900)])
+def test_upstream_retry_after_extends_bounded_refresh_backoff_only(workspace, stage, header, seconds):
+    calls = []
+    def handler(request):
+        calls.append(str(request.url).split("?")[0])
+        if str(request.url).split("?")[0] == protocol.INFO and stage == "correspond":
+            return httpx.Response(200, json={"code": 0, "data": {"refresh": True, "timestamp": 1700000000000}})
+        return httpx.Response(429, headers={"retry-after": header})
+    started = utcnow()
+    result = run(workspace, protocol.BiliPassport(transport=httpx.MockTransport(handler)))
+    row = read(workspace)
+    assert result["refresh_status"] == "error" and row.refresh_error_code == "rate_limited"
+    assert started + timedelta(seconds=seconds) <= service.utc(row.next_refresh_at) <= utcnow() + timedelta(seconds=seconds)
+    assert row.cooldown_until is None and row.next_request_at is None and row.next_video_at is None
+    assert protocol.REFRESH not in calls and protocol.CONFIRM not in calls
+    assert decrypt_secret(row.secret_encrypted) == OLD_COOKIE
+
+
+@pytest.mark.parametrize("header,seconds", [("43200", 43200), ("999999999", 86400), ("30", 14400), (None, None)])
+def test_confirm_retry_limit_preserves_upstream_manual_cooldown_without_auto_retry(workspace, header, seconds):
+    from app.source_credentials_api import check_refresh
+    sessions, identity = workspace
+    with sessions() as db:
+        account = db.get(SourceAccount, identity)
+        account.secret_encrypted = encrypt_secret(NEW_COOKIE)
+        account.refresh_token_encrypted = encrypt_secret("new-refresh")
+        account.refresh_pending_encrypted = encrypt_secret("old-refresh")
+        account.refresh_phase, account.refresh_failures = "pending_confirm", 4
+        db.commit()
+    calls = []
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(429, headers={"retry-after": header} if header is not None else {})
+    started = utcnow()
+    run(workspace, protocol.BiliPassport(transport=httpx.MockTransport(handler)))
+    row = read(workspace)
+    assert calls == [protocol.CONFIRM]
+    assert row.refresh_failures == 5 and row.refresh_error_code == "confirm_exhausted"
+    assert decrypt_secret(row.secret_encrypted) == NEW_COOKIE
+    assert decrypt_secret(row.refresh_pending_encrypted) == "old-refresh"
+    assert row.cooldown_until is None
+    with sessions() as db:
+        service.schedule_refreshes(db)
+        assert db.scalar(select(Job.id)) is None
+        if seconds is None:
+            assert row.next_refresh_at is None
+        else:
+            assert started + timedelta(seconds=seconds) <= service.utc(row.next_refresh_at) <= utcnow() + timedelta(seconds=seconds)
+            with pytest.raises(HTTPException) as error:
+                check_refresh(identity, identity=("synthetic-admin", "synthetic-session"), db=db)
+            assert error.value.status_code == 429
+            assert seconds - 2 <= int(error.value.headers["Retry-After"]) <= seconds
+
+
+def test_rotation_post_retry_after_does_not_reenable_unknown_mutation(workspace):
+    calls = []
+    def handler(request):
+        url = str(request.url).split("?")[0]
+        calls.append(url)
+        if url == protocol.INFO:
+            return httpx.Response(200, json={"code": 0, "data": {"refresh": True, "timestamp": 1700000000000}})
+        if url.startswith(protocol.CORRESPOND):
+            return httpx.Response(200, text='<div id="1-name">' + "c" * 32 + '</div>')
+        assert url == protocol.REFRESH
+        return httpx.Response(429, headers={"retry-after": "43200"})
+    run(workspace, protocol.BiliPassport(transport=httpx.MockTransport(handler)))
+    row = read(workspace)
+    assert row.refresh_phase == "relogin_required" and row.refresh_error_code == "refresh_uncertain"
+    assert row.next_refresh_at is None and row.cooldown_until is None
+    retry = Passport()
+    assert run(workspace, retry, manual=True)["refresh_status"] == "relogin_required"
+    assert retry.calls == [] and calls.count(protocol.REFRESH) == 1

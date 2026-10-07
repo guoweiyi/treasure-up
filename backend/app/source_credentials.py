@@ -15,6 +15,7 @@ from app.security import decrypt_secret, encrypt_secret
 
 CHECK_INTERVAL = timedelta(hours=24)
 MAX_CONFIRM_FAILURES = 5
+MAX_REFRESH_RETRY_SECONDS = 24 * 60 * 60
 MESSAGES = {
     "refresh_uncertain": "上次刷新结果未能确认，请重新扫码授权；原有采集凭据已保留。",
     "account_mismatch": "授权的 B站账号与当前账号不一致，请使用原账号扫码。",
@@ -161,18 +162,26 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
             writer.expunge(account)
             return account
 
-    def failure(expected, code, *, phase="error", pending=False):
+    def failure(expected, code, *, phase="error", pending=False, retry_after_seconds=None):
+        # Passport parses Retry-After into seconds. Bound upstream hints without
+        # shortening the existing backoff or affecting ordinary account APIs.
+        hint = min(retry_after_seconds, MAX_REFRESH_RETRY_SECONDS) if (
+            type(retry_after_seconds) is int and retry_after_seconds > 0) else 0
         def change(account):
             account.refresh_failures += 1
             account.refresh_phase = phase
             account.refresh_error_code = code
-            if phase == "relogin_required" or account.refresh_failures >= MAX_CONFIRM_FAILURES:
+            delay = max(60 * min(360, 15 * 2 ** min(account.refresh_failures - 1, 5)), hint)
+            if phase == "relogin_required":
                 account.next_refresh_at = None
+            elif account.refresh_failures >= MAX_CONFIRM_FAILURES:
+                # Automatic retries stop at the limit, but manual checks must
+                # still respect an outstanding upstream cooldown.
+                account.next_refresh_at = utcnow() + timedelta(seconds=delay) if hint else None
                 if pending:
                     account.refresh_error_code = "confirm_exhausted"
             else:
-                delay = min(360, 15 * 2 ** min(account.refresh_failures - 1, 5))
-                account.next_refresh_at = utcnow() + timedelta(minutes=delay)
+                account.next_refresh_at = utcnow() + timedelta(seconds=delay)
         write(expected, change, allow_disabled=True)
         return {"account_id": account_id, "refresh_status": phase, "error_code": code}
 
@@ -214,7 +223,8 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
                     info = passport.refresh_info(cookie)
                 except IngestError as error:
                     return failure(expected, error.code, phase="relogin_required" if error.code in
-                        {"login_required", "invalid_refresh_token", "invalid_cookie"} else "error")
+                        {"login_required", "invalid_refresh_token", "invalid_cookie"} else "error",
+                        retry_after_seconds=error.retry_after_seconds)
                 if not info.refresh:
                     def ready(row):
                         row.refresh_phase, row.refresh_error_code, row.refresh_failures = "ready", None, 0
@@ -240,7 +250,8 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
                                      getattr(error, "mutation_uncertain", True))
                     return failure(expected, "refresh_uncertain" if ambiguous else error.code,
                         phase="relogin_required" if ambiguous or error.code in
-                            {"login_required", "invalid_refresh_token", "invalid_cookie"} else "error")
+                            {"login_required", "invalid_refresh_token", "invalid_cookie"} else "error",
+                        retry_after_seconds=error.retry_after_seconds)
                 uid = expected_uid(account, cookie)
                 if uid is None or fresh.uid != uid:
                     return failure(expected, "account_mismatch", phase="relogin_required")
@@ -266,8 +277,9 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
             write(expected, lambda row: None)
             try:
                 passport.confirm_refresh(cookie, old_token)
-            except IngestError:
-                return failure(expected, "confirm_failed", phase="pending_confirm", pending=True)
+            except IngestError as error:
+                return failure(expected, "confirm_failed", phase="pending_confirm", pending=True,
+                               retry_after_seconds=error.retry_after_seconds)
 
             def confirmed(row):
                 row.refresh_pending_encrypted = None
