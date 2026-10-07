@@ -6,13 +6,13 @@
 
 技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；B 站 Cookie 与独立刷新令牌只在服务端加密保存。
 
-**本次版本为 [0.3.3 技术预览（preview）](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.3)，iOS / iPadOS 客户端为 0.4.3。** 新 logo 已适配网页、浏览器、PWA、离线页、选片助手和原生客户端。Docker 负责采集、存储和媒体处理，客户端连接自己的服务。
+**本次版本为 [0.3.4 技术预览（preview）](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.4)，iOS / iPadOS 客户端为 0.4.3。** 新 logo 已适配网页、浏览器、PWA、离线页、选片助手和原生客户端，并补齐 320px 离线布局、选片助手蓝灰配色和发版重跑处理。Docker 负责采集、存储和媒体处理，客户端连接自己的服务。
 
-[本版说明与下载选择](docs/releases/v0.3.3.md) 包含更新内容、安装包和升级方式；[品牌资源说明](assets/branding/README.md) 记录原图、透明母图及尺寸生成方法。
+[本版说明与下载选择](docs/releases/v0.3.4.md) 包含更新内容、安装包和升级方式；[品牌资源说明](assets/branding/README.md) 记录原图、透明母图及尺寸生成方法。
 
 ## 预构建镜像部署
 
-需要 Docker Compose v2 和 Python 3.10+。从目标 Release 下载 `treasure-up-v0.3.3-docker.zip`，解压进入包内目录后运行：
+需要 Docker Compose v2 和 Python 3.10+。从目标 Release 下载 `treasure-up-v0.3.4-docker.zip`，解压进入包内目录后运行：
 
 ```bash
 python deploy/start.py --prebuilt

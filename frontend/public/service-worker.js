@@ -1,6 +1,6 @@
 // Only public application files may be cached. Sessions, API responses and media
 // always go directly to the server; offline mode must never expose private data.
-const CACHE = 'treasure-shell-v2-brand-033';
+const CACHE = 'treasure-shell-v2-brand-034';
 const PUBLIC_FILES = [
   '/offline.html',
   '/app-icon.svg',

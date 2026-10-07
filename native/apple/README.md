@@ -214,7 +214,7 @@ Info.plist 声明音频后台模式，播放器处理锁屏信息、远程指令
 - 冷启动使用固定尺寸、居中的原生 LaunchScreen；连接加载、连接服务器、登录、iPad 侧栏、资料库、收藏与订阅 / UP 主空态、未登录片单、关于页及视频详情开源页脚复用同一套品牌组件。
 - 深色模式使用适配强调色与浅色标志底，让原图的深蓝描边保持可见。图片等比显示；身份文字支持动态字号与换行，装饰图片从 VoiceOver 隐藏，完整标志提供可读名称。
 - 关于页从 Bundle 读取版本和构建号，避免更新工程后仍显示旧的硬编码版本。`project.yml` 和已提交的 Xcode 工程版本保持一致。
-- 2026-10-07 的品牌更新已执行本地资源、plist / storyboard XML 和工程引用静态检查。当前执行环境为 Windows，无法运行 Xcode / iOS 模拟器；下方历史构建和设备记录属于 0.4.2 及之前版本，不作为 0.4.3 已构建或已获设备验收的证据。
+- 2026-10-07 的品牌更新通过本地资源、plist / storyboard XML 和工程引用检查，并在 GitHub Actions 的 Xcode 26.6 / iOS Simulator 26.5 SDK 下完成真实编译与回归：[iPhone](https://github.com/guoweiyi/treasure-up/actions/runs/37595131183/job/112712644449) 的 132 项单测和 4 项有效离线 UI 测试通过，[iPad](https://github.com/guoweiyi/treasure-up/actions/runs/37595131183/job/112712644416) 的 132 项单测和 5 项离线 UI 测试通过；LaunchScreen、资源目录与临时签名模拟器 ZIP 均完成构建。品牌版本未执行真机验收，下方 0.4.2 及之前的历史设备记录不作为 0.4.3 真机已通过的证据。
 
 ## 历史验收记录
 
