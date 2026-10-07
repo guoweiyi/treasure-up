@@ -14,7 +14,6 @@ struct VideoDetailView: View {
     @State private var video: ArchiveVideo?
     @State private var error: String?
     @State private var savePresented = false
-    @State private var loginPresented = false
     @State private var actionBusy = false
     @State private var lifetime = VideoPageLifetime()
     @State private var fullscreen = false
@@ -79,7 +78,7 @@ struct VideoDetailView: View {
         }
         .onDisappear {
             // UIKit full-screen presentation covers this destination without leaving it.
-            guard !fullscreen, !savePresented, !loginPresented, !lifetime.isCoveredByPresentation else { return }
+            guard !fullscreen, !savePresented, api.loginRequest == nil, !lifetime.isCoveredByPresentation else { return }
             playTask?.cancel()
             if followsPlayback {
                 if let current = playback.currentVideo { video = current }
@@ -97,7 +96,6 @@ struct VideoDetailView: View {
             if video == nil { await load() }
         }
         .sheet(isPresented: $savePresented) { NavigationStack { SaveToPlaylistView(videoId: displayedVideo?.id ?? videoId) } }
-        .sheet(isPresented: $loginPresented) { NavigationStack { LoginView() } }
     }
 
     private var inlineAspectRatio: CGFloat {
@@ -133,7 +131,7 @@ struct VideoDetailView: View {
                 onSeek: { part, seconds in seekComment(video, part: part, seconds: seconds) })
             case .queue:
                 PlaybackQueueSection(shouldCancelPlaybackOnDisappear: {
-                    !fullscreen && !savePresented && !loginPresented && !lifetime.isCoveredByPresentation
+                    !fullscreen && !savePresented && api.loginRequest == nil && !lifetime.isCoveredByPresentation
                 }) { followsPlayback = true }
             }
         }
@@ -181,9 +179,13 @@ struct VideoDetailView: View {
             }.font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 Button(video.starred ? "已星标" : "星标", systemImage: video.starred ? "star.fill" : "star") {
-                    if api.user == nil { loginPresented = true } else { Task { await toggleStar(video) } }
+                    if api.user == nil { api.requestLogin(message: "登录后为视频添加星标。") }
+                    else { Task { await toggleStar(video) } }
                 }.disabled(actionBusy)
-                Button("收藏", systemImage: "bookmark") { if api.user == nil { loginPresented = true } else { savePresented = true } }
+                Button("收藏", systemImage: "bookmark") {
+                    if api.user == nil { api.requestLogin(message: "登录后将视频收藏到你的片单。") }
+                    else { savePresented = true }
+                }
                 Spacer()
                 if let url = api.resolveURL("/videos/\(video.id)") { ShareLink(item: url).labelStyle(.iconOnly) }
             }.buttonStyle(.bordered).font(.subheadline)

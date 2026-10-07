@@ -124,6 +124,19 @@ final class PlayerControlsTests: XCTestCase {
         XCTAssertEqual(PlayerGestureMath.scrubPosition(start: 590, translation: 400, width: 400, duration: 600), 600)
     }
 
+    func testPictureScrubRejectsChangedViewportOrMetadataBeforeRelease() throws {
+        let drag = try XCTUnwrap(PlayerScrubSession(start: 60, width: 800, duration: 600))
+        XCTAssertEqual(drag.position(translation: 200, currentWidth: 800, currentDuration: 600), 90)
+        XCTAssertNil(drag.position(translation: 200, currentWidth: 400, currentDuration: 600),
+                     "Opening the iPad sidebar must cancel a drag instead of doubling its seek distance")
+        XCTAssertNil(drag.position(translation: 200, currentWidth: 800, currentDuration: 0))
+        XCTAssertNil(drag.position(translation: 200, currentWidth: 800, currentDuration: .nan))
+        XCTAssertNil(drag.position(translation: 200, currentWidth: 800, currentDuration: 100))
+        XCTAssertNil(drag.position(translation: .infinity, currentWidth: 800, currentDuration: 600))
+        XCTAssertNil(PlayerScrubSession(start: 60, width: 0, duration: 600))
+        XCTAssertNil(PlayerScrubSession(start: .nan, width: 800, duration: 600))
+    }
+
     func testLongVideoScrubWindowStaysControllableAndShortVideoNeverOvershoots() {
         XCTAssertEqual(PlayerGestureMath.scrubPosition(start: 1_000, translation: 400, width: 400, duration: 7_200), 1_180)
         XCTAssertEqual(PlayerGestureMath.scrubPosition(start: 2, translation: 400, width: 400, duration: 8), 8)

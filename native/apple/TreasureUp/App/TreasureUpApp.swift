@@ -21,10 +21,20 @@ struct TreasureUpApp: App {
     }
 
     @ViewBuilder private var appContent: some View {
-        #if DEBUG
+        #if DEBUG && targetEnvironment(simulator)
         if OfflinePlayerUITestFixture.isEnabled {
             OfflinePlayerUITestFixture()
-        } else if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+        } else {
+            rootContent
+        }
+        #else
+        rootContent
+        #endif
+    }
+
+    @ViewBuilder private var rootContent: some View {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
             // Hosted unit tests supply their own windows, API stubs and player.
             // Do not start a real restoreSession request against the user's
             // configured server while running the offline regression suite.
@@ -62,10 +72,26 @@ enum AppSection: String, CaseIterable, Identifiable {
 struct RootView: View {
     @Environment(APIClient.self) private var api
     @Environment(PlaybackCoordinator.self) private var playback
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: AppSection? = .library
     @State private var splitVisibility: NavigationSplitViewVisibility = .automatic
     @State private var connecting = true
     @State private var connectionError: String?
+    @State private var policyRefresh: Task<Void, Never>?
+
+    private var requiresLogin: Bool { api.user == nil && !api.allowGuestAccess }
+
+    private var loginRequest: Binding<AuthenticationRequest?> {
+        Binding {
+            // A private library already presents its login gate. Keep one login
+            // surface even when several protected requests fail together.
+            guard !connecting, api.isConnected, !requiresLogin,
+                  !playback.fullscreenPresentation.isActive else { return nil }
+            return api.loginRequest
+        } set: { request in
+            if request == nil { api.dismissLoginRequest() }
+        }
+    }
 
     var body: some View {
         Group {
@@ -77,8 +103,10 @@ struct RootView: View {
                 }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !api.isConnected {
                 NavigationStack { ServerConnectionView(initialError: connectionError) }
-            } else if api.user == nil && !api.allowGuestAccess {
-                NavigationStack { LoginView(requiresLogin: true) }
+            } else if requiresLogin {
+                NavigationStack {
+                    LoginView(requiresLogin: true, authenticationMessage: api.loginRequest?.message)
+                }
                     .id(api.baseURL.absoluteString)
             } else {
                 navigation
@@ -88,9 +116,32 @@ struct RootView: View {
         }
         .task {
             do { try await api.restoreSession() }
+            catch is CancellationError { return }
             catch { connectionError = error.localizedDescription }
+            guard !Task.isCancelled else { return }
             connecting = false
         }
+        .sheet(item: loginRequest) { request in
+            NavigationStack { LoginView(authenticationMessage: request.message) }
+        }
+        .onChange(of: api.loginRequest?.id, initial: true) { _, requestID in
+            if requestID != nil { playback.fullscreenPresentation.requestDismissal() }
+        }
+        .onChange(of: requiresLogin) { _, required in
+            if required { playback.fullscreenPresentation.requestDismissal() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            policyRefresh?.cancel()
+            policyRefresh = nil
+            guard phase == .active, !connecting, api.isConnected else { return }
+            policyRefresh = Task { await api.refreshAccessPolicy() }
+        }
+        .onChange(of: api.baseURL) { _, _ in
+            policyRefresh?.cancel()
+            policyRefresh = nil
+            connectionError = nil
+        }
+        .onDisappear { policyRefresh?.cancel(); policyRefresh = nil }
         .onChange(of: playback.requestsPresentation) { _, requested in
             // Manual PiP restores the still-mounted video destination.
             if requested { playback.requestsPresentation = false }

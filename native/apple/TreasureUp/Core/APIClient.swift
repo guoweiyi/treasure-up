@@ -1,6 +1,11 @@
 import Foundation
 import Observation
 
+struct AuthenticationRequest: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let message: String
+}
+
 enum APIError: LocalizedError, Sendable {
     case invalidServer(String)
     case staleSession
@@ -35,6 +40,10 @@ final class APIClient {
     private(set) var allowGuestAccess = false
     private(set) var sessionRevision = 0
     private(set) var persistenceWarning: String?
+    private(set) var loginRequest: AuthenticationRequest?
+    private(set) var serverInitialized: Bool?
+    private(set) var passwordLoginAvailable = true
+    private(set) var accessPolicyError: String?
 
     @ObservationIgnored private var cookies: [HTTPCookie] = []
     @ObservationIgnored private var session: URLSession
@@ -43,6 +52,8 @@ final class APIClient {
     @ObservationIgnored private let sessionConfiguration: URLSessionConfiguration?
     @ObservationIgnored private let persistSession: Bool
     @ObservationIgnored private var connectionRevision = 0
+    @ObservationIgnored private var policyRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var policyRefreshID = UUID()
     private static let serverDefaultsKey = "treasure.native.server"
 
     init(baseURL: URL? = nil, defaults: UserDefaults = .standard,
@@ -79,6 +90,7 @@ final class APIClient {
         do { (data, response) = try await probeSession.data(for: request) }
         catch is CancellationError { throw CancellationError() }
         catch { throw Self.translateNetwork(error) }
+        try Task.checkCancellation()
         guard revision == connectionRevision else { throw APIError.staleSession }
         try Self.validateHTTP(response, data: data)
         let capability = try await APIResponseDecoder.decode(ServerCapabilities.self, from: data)
@@ -86,38 +98,71 @@ final class APIClient {
         guard capability.application == "treasure-up", capability.apiVersion == 1 else {
             throw APIError.invalidServer("该地址不是兼容的 Treasure Up 服务器。")
         }
-        if candidate != baseURL {
-            resetMemory()
-            baseURL = candidate
-            if persistSession {
-                do { cookies = try vault.load(for: candidate); persistenceWarning = nil }
-                catch { persistenceWarning = error.localizedDescription }
-            }
-            siteName = "Treasure Up"
-            defaultDanmaku = true
-            allowGuestAccess = false
+        // Prepare the complete destination off-screen. Cancellation, a failed
+        // session probe or a late response must leave the current server intact.
+        let prepared = APIClient(baseURL: candidate, defaults: defaults,
+                                 sessionConfiguration: sessionConfiguration, persistSession: false)
+        defer { prepared.session.finishTasksAndInvalidate() }
+        if candidate == baseURL {
+            prepared.cookies = cookies
+            prepared.persistenceWarning = persistenceWarning
+        } else if persistSession {
+            do { prepared.cookies = try vault.load(for: candidate) }
+            catch { prepared.persistenceWarning = error.localizedDescription }
+        }
+        try await prepared.restoreSession(verifyServer: false)
+        try Task.checkCancellation()
+        guard revision == connectionRevision else { throw APIError.staleSession }
+        resetMemory()
+        baseURL = candidate
+        cookies = prepared.cookies
+        user = prepared.user
+        csrfToken = prepared.csrfToken
+        siteName = prepared.siteName
+        defaultDanmaku = prepared.defaultDanmaku
+        allowGuestAccess = prepared.allowGuestAccess
+        serverInitialized = prepared.serverInitialized
+        passwordLoginAvailable = prepared.passwordLoginAvailable
+        accessPolicyError = prepared.accessPolicyError
+        persistenceWarning = prepared.persistenceWarning
+        loginRequest = nil
+        if persistSession {
+            do { try vault.save(cookies, for: candidate) }
+            catch { persistenceWarning = error.localizedDescription }
         }
         defaults.set(candidate.absoluteString, forKey: Self.serverDefaultsKey)
         hasConfiguredServer = true
         isConnected = true
-        await loadDisplaySettings()
     }
 
     /// A 401 is a valid guest state. Network failures remain visible to the caller.
     func restoreSession() async throws {
+        try await restoreSession(verifyServer: true)
+    }
+
+    private func restoreSession(verifyServer: Bool) async throws {
         guard hasConfiguredServer else { return }
-        let capabilities: ServerCapabilities = try await get("/server")
-        guard capabilities.application == "treasure-up", capabilities.apiVersion == 1 else {
-            throw APIError.invalidServer("该地址不是兼容的 Treasure Up 服务器。")
+        let revision = connectionRevision
+        let server = baseURL
+        if verifyServer {
+            let capabilities: ServerCapabilities = try await get("/server")
+            guard capabilities.application == "treasure-up", capabilities.apiVersion == 1 else {
+                throw APIError.invalidServer("该地址不是兼容的 Treasure Up 服务器。")
+            }
         }
-        isConnected = true
+        guard revision == connectionRevision, server == baseURL else { throw APIError.staleSession }
         do {
             let envelope: SessionEnvelope = try await get("/auth/me")
+            guard revision == connectionRevision, server == baseURL else { throw APIError.staleSession }
             apply(envelope)
         } catch let error as APIError where error.status == 401 {
             // The display policy below decides whether an unsigned-in viewer can browse.
         }
         await loadDisplaySettings()
+        await refreshAccessPolicy()
+        try Task.checkCancellation()
+        guard revision == connectionRevision, server == baseURL else { throw APIError.staleSession }
+        isConnected = true
     }
 
     func login(username: String, password: String) async throws {
@@ -126,20 +171,31 @@ final class APIClient {
             throw APIError.invalidServer("请输入用户名和密码。")
         }
         connectionRevision += 1
+        let revision = connectionRevision
+        let server = baseURL
         // Fence already-mounted views and outstanding reads before replacing identity.
         resetMemory()
         if persistSession { try vault.clear(for: baseURL) }
         let envelope: SessionEnvelope = try await send("/auth/login", body: [
             "username": .string(normalizedUsername), "password": .string(password)
         ])
+        guard revision == connectionRevision, server == baseURL else { throw APIError.staleSession }
+        if baseURL.scheme == "http", cookies.contains(where: { $0.name == "treasure_session" && $0.isSecure }) {
+            invalidateIdentity()
+            throw APIError.invalidServer(Self.httpCookieConfigurationHint)
+        }
         apply(envelope)
         isConnected = true
         await loadDisplaySettings()
+        await refreshAccessPolicy()
+        try Task.checkCancellation()
+        guard revision == connectionRevision, server == baseURL else { throw APIError.staleSession }
     }
 
     func logout() async throws {
         // Do not silently claim the server-side session was revoked if offline.
         connectionRevision += 1
+        loginRequest = nil
         let revision = sessionRevision
         let server = baseURL
         var failure: Error?
@@ -153,6 +209,37 @@ final class APIClient {
         do { if persistSession { try vault.clear(for: server) }; persistenceWarning = nil }
         catch { persistenceWarning = error.localizedDescription; if failure == nil { failure = error } }
         if let failure { throw failure }
+    }
+
+    func requestLogin(message: String = "请先登录后继续。") {
+        guard loginRequest == nil else { return }
+        loginRequest = AuthenticationRequest(message: message)
+    }
+
+    func dismissLoginRequest() { loginRequest = nil }
+
+    /// Foreground refreshes and concurrent denied requests share one policy read.
+    func refreshAccessPolicy() async {
+        guard hasConfiguredServer else { return }
+        if let pending = policyRefreshTask { await pending.value; return }
+        let id = UUID()
+        policyRefreshID = id
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadAccessPolicy()
+        }
+        policyRefreshTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            // The initiating view owns this refresh. Cancellation also releases
+            // a staged connection immediately instead of waiting for its timeout.
+            Task { @MainActor [weak self] in
+                guard let self, self.policyRefreshID == id else { return }
+                self.cancelPolicyRefresh()
+            }
+        }
+        if policyRefreshID == id { policyRefreshTask = nil }
     }
 
     func get<T: Decodable & Sendable>(_ path: String, query: [String: String] = [:]) async throws -> T {
@@ -260,17 +347,44 @@ final class APIClient {
         }
         // An asset can redirect to signed object storage. Its expired signature
         // does not revoke the user's independent application session.
-        if http.statusCode == 401 && ownOrigin && responseIsSameOrigin {
+        let isPublicMetadata = ["/api/v1/auth/status", "/api/v1/server", "/api/v1/library/settings"].contains(url.path)
+        if http.statusCode == 401 && ownOrigin && responseIsSameOrigin,
+           url.path.hasPrefix("/api/v1/"), !isPublicMetadata {
+            let hadUser = user != nil
             invalidateIdentity()
+            let isSessionProbe = ["/api/v1/auth/me", "/api/v1/auth/login", "/api/v1/auth/logout",
+                                  "/api/v1/auth/status", "/api/v1/server", "/api/v1/library/settings"].contains(url.path)
+            if !isSessionProbe {
+                // Guests have no identity to clear, but their protected images,
+                // player and outstanding reads must still be invalidated once.
+                if loginRequest == nil, revision == sessionRevision { sessionRevision += 1 }
+                requestLogin(message: hadUser ? "登录状态已失效，请重新登录后继续。" : "请登录后继续浏览。")
+                cancelPolicyRefresh()
+                Task { [weak self] in await self?.refreshAccessPolicy() }
+            }
         }
         try Self.validateHTTP(http, data: data)
+        if ownOrigin, responseIsSameOrigin, baseURL.scheme == "http", user == nil,
+           url.path == "/api/v1/playback-sessions", method.uppercased() == "POST",
+           cookies.contains(where: { $0.name == "treasure_viewer" && $0.isSecure }) {
+            throw APIError.invalidServer(Self.httpCookieConfigurationHint)
+        }
         return data
     }
 
     private func acceptCookies(from response: HTTPURLResponse, url: URL) {
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields { headers[String(describing: key)] = String(describing: value) }
-        let received = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
+        // Foundation can discard a Secure cookie while parsing an HTTP response.
+        // Inspect its metadata using the same host/path with an HTTPS parsing
+        // origin so we can report that deployment error. The actual request URL
+        // stays unchanged, and mediaCookies still refuses to send it over HTTP.
+        var cookieOrigin = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if url.scheme == "http" {
+            cookieOrigin?.scheme = "https"
+            cookieOrigin?.port = url.port ?? 80
+        }
+        let received = HTTPCookie.cookies(withResponseHeaderFields: headers, for: cookieOrigin?.url ?? url)
             .filter { SessionCookieVault.belongsToServer($0, server: baseURL) }
         guard !received.isEmpty else { return }
         for cookie in received {
@@ -285,6 +399,7 @@ final class APIClient {
         if user != envelope.user || csrfToken != envelope.csrfToken { sessionRevision += 1 }
         user = envelope.user
         csrfToken = envelope.csrfToken
+        loginRequest = nil
     }
 
     private func invalidateIdentity() {
@@ -298,6 +413,7 @@ final class APIClient {
     }
 
     private func resetMemory() {
+        cancelPolicyRefresh()
         sessionRevision += 1
         session.invalidateAndCancel()
         session = Self.makeSession(configuration: sessionConfiguration)
@@ -307,16 +423,55 @@ final class APIClient {
     }
 
     private func loadDisplaySettings() async {
+        let revision = sessionRevision
+        let connection = connectionRevision
         do {
             let settings: DisplaySettings = try await get("/library/settings")
-            siteName = settings.siteName.isEmpty ? "Treasure Up" : settings.siteName
-            defaultDanmaku = settings.defaultDanmaku
-            allowGuestAccess = settings.allowGuestAccess ?? false
+            guard revision == sessionRevision, connection == connectionRevision, !Task.isCancelled else { return }
+            siteName = settings.siteName.flatMap { $0.isEmpty ? nil : $0 } ?? "Treasure Up"
+            defaultDanmaku = settings.defaultDanmaku ?? true
+        } catch { /* Display metadata does not override the authentication policy. */ }
+    }
+
+    private func loadAccessPolicy() async {
+        let revision = sessionRevision
+        let connection = connectionRevision
+        let isCurrent = { revision == self.sessionRevision && connection == self.connectionRevision && !Task.isCancelled }
+        do {
+            let status: AuthenticationStatus
+            do { status = try await get("/auth/status") }
+            catch let error as APIError where error.status == 404 {
+                let settings: DisplaySettings = try await get("/library/settings")
+                status = AuthenticationStatus(initialized: nil, allowGuestAccess: settings.allowGuestAccess,
+                                              passwordLogin: true)
+            }
+            guard isCurrent() else { return }
+            guard let allowed = status.allowGuestAccess else { throw APIError.decoding }
+            serverInitialized = status.initialized
+            passwordLoginAvailable = status.passwordLogin ?? true
+            accessPolicyError = nil
+            updateGuestAccess(allowed)
         } catch {
-            // A stale public policy must not expose a guest navigation surface.
-            allowGuestAccess = false
+            guard isCurrent(), !(error is CancellationError) else { return }
+            accessPolicyError = error.localizedDescription
+            // Fail closed until an explicit retry succeeds. An unavailable policy
+            // is shown as an error, never as an expired-password explanation.
+            updateGuestAccess(false)
         }
     }
+
+    private func updateGuestAccess(_ allowed: Bool) {
+        if allowGuestAccess && !allowed && user == nil { sessionRevision += 1 }
+        allowGuestAccess = allowed
+    }
+
+    private func cancelPolicyRefresh() {
+        policyRefreshTask?.cancel()
+        policyRefreshTask = nil
+        policyRefreshID = UUID()
+    }
+
+    private static let httpCookieConfigurationHint = "服务器将登录或播放 Cookie 标记为 Secure，HTTP 无法使用。请改用 HTTPS，或由管理员在 HTTP 部署中设置 TREASURE_COOKIE_SECURE=false 后重试。"
 
     static func normalizedServer(_ address: String) throws -> URL {
         var value = address.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -325,6 +480,7 @@ final class APIClient {
               let scheme = parts.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = parts.host?.lowercased(), !host.isEmpty,
               parts.user == nil, parts.password == nil,
+              parts.port.map({ (1...65535).contains($0) }) ?? true,
               parts.query == nil, parts.fragment == nil,
               parts.path.isEmpty || parts.path == "/" else {
             throw APIError.invalidServer("请输入服务器根地址，例如 https://video.example.com。")
@@ -386,6 +542,8 @@ final class APIClient {
         case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed: return APIError.network("无法连接服务器，请检查地址和网络。")
         case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate:
             return APIError.network("无法验证服务器的 HTTPS 证书，请检查服务器配置。")
+        case .appTransportSecurityRequiresSecureConnection:
+            return APIError.network("当前安装版本不支持此 HTTP 连接，请更新 App 或使用 HTTPS 地址。")
         default: return APIError.network(error.localizedDescription)
         }
     }
@@ -393,9 +551,14 @@ final class APIClient {
     private struct SessionEnvelope: Decodable, Sendable { var user: ArchiveUser; var csrfToken: String }
     private struct ServerCapabilities: Decodable, Sendable { var application: String; var apiVersion: Int }
     private struct DisplaySettings: Decodable, Sendable {
-        var siteName: String
-        var defaultDanmaku: Bool
+        var siteName: String?
+        var defaultDanmaku: Bool?
         var allowGuestAccess: Bool?
+    }
+    private struct AuthenticationStatus: Decodable, Sendable {
+        var initialized: Bool?
+        var allowGuestAccess: Bool?
+        var passwordLogin: Bool?
     }
 }
 

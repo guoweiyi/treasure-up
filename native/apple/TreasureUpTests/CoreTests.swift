@@ -99,6 +99,7 @@ final class CoreTests: XCTestCase {
             switch request.url?.path {
             case "/api/v1/server": return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}")
             case "/api/v1/auth/me": return .init(status: 401, body: "{}")
+            case "/api/v1/auth/status": return .init(status: 404, body: "{}")
             default: return .init(body: "{\"site_name\":\"Saved Archive\"}")
             }
         }
@@ -123,6 +124,8 @@ final class CoreTests: XCTestCase {
         MockURLProtocol.store.set { request in
             if request.url?.host == "wrong.example.test" { return .init(body: "{\"application\":\"other-app\",\"api_version\":1}") }
             if request.url?.path == "/api/v1/server" { return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}") }
+            if request.url?.path == "/api/v1/auth/me" { return .init(status: 401, body: "{}") }
+            if request.url?.path == "/api/v1/auth/status" { return .init(status: 404, body: "{}") }
             return .init(body: "{\"site_name\":\"My Archive\"}")
         }
         let client = APIClient(defaults: defaults, sessionConfiguration: configuration, persistSession: false)
@@ -247,6 +250,7 @@ final class CoreTests: XCTestCase {
                              headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
             case "/api/v1/library/settings":
                 return .init(body: "{\"site_name\":\"Native Test\",\"default_danmaku\":true}")
+            case "/api/v1/auth/status": return .init(status: 404, body: "{}")
             case "/api/v1/videos/video-a/star": return .init(body: "{\"starred\":true}")
             default: return .init(body: "{}")
             }
@@ -290,6 +294,7 @@ final class CoreTests: XCTestCase {
             case "/api/v1/auth/login":
                 return .init(body: "{\"user\":{\"id\":\"user-a\",\"username\":\"tester\",\"role\":\"reader\"},\"csrf_token\":\"csrf-test\"}",
                              headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
+            case "/api/v1/auth/status": return .init(status: 404, body: "{}")
             default:
                 return .init(body: "{\"site_name\":\"Native Test\",\"default_danmaku\":true,\"allow_guest_access\":false}")
             }
@@ -331,6 +336,7 @@ final class CoreTests: XCTestCase {
                              responseURL: URL(string: "https://storage.example.test/signed-sidecar"))
             case "/api/v1/auth/me":
                 return .init(status: 401, body: "{\"detail\":\"会话已失效\"}")
+            case "/api/v1/auth/status": return .init(status: 404, body: "{}")
             default: return .init(body: "{\"site_name\":\"Native Test\",\"default_danmaku\":true}")
             }
         }
@@ -367,6 +373,8 @@ final class CoreTests: XCTestCase {
                 return .init(body: "{\"user\":{\"id\":\"user-a\",\"username\":\"tester\",\"role\":\"admin\"},\"csrf_token\":\"csrf-test\"}",
                              headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
             case "/api/v1/server": return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}")
+            case "/api/v1/auth/me": return .init(status: 401, body: "{}")
+            case "/api/v1/auth/status": return .init(status: 404, body: "{}")
             default: return .init(body: "{\"site_name\":\"Native Test\",\"default_danmaku\":true}")
             }
         }
@@ -451,6 +459,7 @@ final class CoreTests: XCTestCase {
                 return .init(body: "{\"user\":{\"id\":\"user-a\",\"username\":\"tester\",\"role\":\"reader\"},\"csrf_token\":\"csrf-test\"}",
                              headers: ["Set-Cookie": "treasure_session=test-token; Path=/; Secure; HttpOnly"])
             case "/api/v1/library/settings": return .init(body: "{}")
+            case "/api/v1/auth/status": return .init(status: 404, body: "{}")
             default: return .init(body: "", headers: ["Content-Type": "image/png"], data: png)
             }
         }
@@ -492,6 +501,8 @@ final class CoreTests: XCTestCase {
     func testArtworkRequestIdentityFencesSessionAndServerChanges() async throws {
         MockURLProtocol.store.set { request in
             if request.url?.path == "/api/v1/server" { return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}") }
+            if request.url?.path == "/api/v1/auth/me" { return .init(status: 401, body: "{}") }
+            if request.url?.path == "/api/v1/auth/status" { return .init(status: 404, body: "{}") }
             return .init(body: "{}")
         }
         let client = makeClient()

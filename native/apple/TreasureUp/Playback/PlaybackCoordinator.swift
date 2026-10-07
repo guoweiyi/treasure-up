@@ -7,6 +7,7 @@ import UIKit
 @MainActor @Observable
 final class PlaybackCoordinator {
     let player: AVPlayer
+    let fullscreenPresentation = FullscreenPresentationState()
     private(set) var currentVideo: ArchiveVideo?
     private(set) var currentPart: VideoPart?
     private(set) var currentVariant: MediaVariant?

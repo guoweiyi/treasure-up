@@ -23,6 +23,8 @@ final class PlayerSeekSlider: UISlider {
     private let bufferedTrack = CALayer()
     private let playedTrack = CALayer()
     private var configuration: PlayerSeekBar?
+    private var interactionConfiguration: PlayerSeekBar?
+    private var interactionWidth: CGFloat?
     private(set) var isScrubbing = false
     private var previewTime = 0.0
     private static let idleThumb = thumb(diameter: 12)
@@ -52,11 +54,12 @@ final class PlayerSeekSlider: UISlider {
     required init?(coder: NSCoder) { fatalError("Use init()") }
 
     func configure(_ configuration: PlayerSeekBar) {
-        if self.configuration?.mediaID != configuration.mediaID {
-            // The owning SwiftUI view resets its preview on part change. Never
-            // let a touch begun on the previous part seek into the next part.
-            isScrubbing = false
-            isHighlighted = false
+        if let previous = self.configuration,
+           previous.mediaID != configuration.mediaID || previous.duration != configuration.duration {
+            // Finish the old owner's editing callback before installing the
+            // replacement. A metadata reload can invalidate duration without
+            // changing the part ID, and must never commit the old preview.
+            cancelInteraction()
         }
         self.configuration = configuration
         isEnabled = configuration.duration.isFinite && configuration.duration > 0
@@ -75,6 +78,7 @@ final class PlayerSeekSlider: UISlider {
     }
 
     override func layoutSubviews() {
+        if isScrubbing, interactionWidth != bounds.width { cancelInteraction() }
         super.layoutSubviews()
         let rect = trackRect(forBounds: bounds)
         CATransaction.begin()
@@ -110,16 +114,20 @@ final class PlayerSeekSlider: UISlider {
 
     @discardableResult
     func beginInteraction(at x: CGFloat) -> Bool {
-        guard isEnabled, configuration != nil else { return false }
+        guard isEnabled, !isScrubbing, let configuration,
+              bounds.width > 18, bounds.width.isFinite, x.isFinite else { return false }
+        interactionConfiguration = configuration
+        interactionWidth = bounds.width
         isScrubbing = true
         isHighlighted = true
-        configuration?.onEditingChanged(true)
+        configuration.onEditingChanged(true)
         updateInteraction(at: x)
         return true
     }
 
     func updateInteraction(at x: CGFloat) {
-        guard isScrubbing, let configuration else { return }
+        guard isScrubbing, let configuration = interactionConfiguration else { return }
+        guard isEnabled, interactionWidth == bounds.width else { cancelInteraction(); return }
         let rect = trackRect(forBounds: bounds)
         guard rect.width > 0, x.isFinite else { return }
         let progress = min(1, max(0, (x - rect.minX) / rect.width))
@@ -132,22 +140,34 @@ final class PlayerSeekSlider: UISlider {
 
     func finishInteraction() {
         guard isScrubbing else { return }
+        guard isEnabled, interactionWidth == bounds.width else { cancelInteraction(); return }
+        let owner = interactionConfiguration
         isScrubbing = false
         isHighlighted = false
-        configuration?.onCommit(previewTime)
-        configuration?.onEditingChanged(false)
+        interactionConfiguration = nil
+        interactionWidth = nil
+        owner?.onCommit(previewTime)
+        owner?.onEditingChanged(false)
         setNeedsLayout()
     }
 
     func cancelInteraction() {
         guard isScrubbing else { return }
+        let owner = interactionConfiguration
         isScrubbing = false
         isHighlighted = false
+        interactionConfiguration = nil
+        interactionWidth = nil
         previewTime = PlayerGestureMath.clampedTime(configuration?.value ?? 0, duration: configuration?.duration ?? 0)
         setValue(Float(fraction(previewTime)), animated: false)
-        configuration?.onEditingChanged(false)
+        owner?.onEditingChanged(false)
         updateAccessibilityValue()
         setNeedsLayout()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { cancelInteraction() }
     }
 
     override func accessibilityIncrement() { accessibleSeek(by: 10) }

@@ -1,6 +1,6 @@
 # Treasure Up · iOS / iPadOS
 
-原生 Swift 客户端，支持 iPhone / iPad，最低系统为 iOS / iPadOS 18.0。首次打开填写自己的 Treasure Up HTTPS 服务器地址；已有用户更新后保留原地址。
+原生 Swift 客户端，支持 iPhone / iPad，最低系统为 iOS / iPadOS 18.0。首次打开填写自己的 Treasure Up HTTPS 或 HTTP 服务器根地址；已有用户更新后保留原地址。HTTP 和局域网连接配置见[安装说明](apple/INSTALL.md#连接与更新)。
 
 ## 安装
 

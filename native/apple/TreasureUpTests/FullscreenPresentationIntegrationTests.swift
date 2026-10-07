@@ -6,6 +6,55 @@ import AVFoundation
 
 @MainActor
 final class FullscreenPresentationIntegrationTests: XCTestCase {
+    func testPresentationBlockerKeepsPendingOwnersUntilTheirActualCompletion() {
+        let state = FullscreenPresentationState()
+        let first = UUID()
+        let second = UUID()
+        var closeRequests = 0
+        state.begin(first) { closeRequests += 1 }
+        state.begin(second) { closeRequests += 1 }
+        state.requestDismissal()
+        XCTAssertEqual(closeRequests, 2)
+        XCTAssertTrue(state.isActive, "A close request is not a completed UIKit dismissal")
+        state.end(first)
+        XCTAssertTrue(state.isActive, "An old presentation cannot release a newer owner's blocker")
+        state.end(first)
+        XCTAssertTrue(state.isActive, "Duplicate completions must be harmless")
+        state.end(second)
+        XCTAssertFalse(state.isActive)
+    }
+
+    func testAuthenticationRequestDuringEntranceWaitsForDismissalAndOrientationRestoration() async throws {
+        let fixture = try await FullscreenTransitionFixture()
+        addTeardownBlock { await fixture.close() }
+        await waitUntil("Inline fixture must attach") { fixture.playback.presentation?.controller.view.window === fixture.window }
+        let scene = try XCTUnwrap(fixture.window.windowScene)
+        let originalOrientation = scene.interfaceOrientation
+        fixture.state.isPresented = true
+        await waitUntil("Authentication must interrupt a real entrance transition") {
+            self.presentedFullscreen(from: fixture.split)?.isBeingPresented == true
+        }
+        let fullscreen = try XCTUnwrap(presentedFullscreen(from: fixture.split))
+        XCTAssertTrue(fixture.playback.fullscreenPresentation.isActive)
+
+        // Root uses this same sequence when an API request expires a session.
+        fixture.playback.fullscreenPresentation.requestDismissal()
+        fixture.playback.resetForIdentityChange()
+        XCTAssertNil(fixture.playback.currentVideo)
+        XCTAssertTrue(fixture.playback.fullscreenPresentation.isActive,
+                      "Clearing the player must not let a login sheet overtake UIKit's dismissal")
+        await waitUntil("The interrupted entrance must finish and begin dismissal") { fullscreen.isBeingDismissed }
+        XCTAssertTrue(fixture.playback.fullscreenPresentation.isActive)
+        await waitUntil("Login presentation must become available after both transitions finish") {
+            !fixture.playback.fullscreenPresentation.isActive
+        }
+        XCTAssertNil(fullscreen.presentingViewController)
+        XCTAssertFalse(fixture.state.isPresented)
+        XCTAssertEqual(scene.interfaceOrientation, originalOrientation,
+                       "Authentication must not present while restoring the pre-player orientation")
+        XCTAssertNil(fixture.split.transitionCoordinator)
+    }
+
     func testTeardownBeforeQueuedPresentationStopsOnlyItsOwnInlinePlayback() async throws {
         let fixture = try await FullscreenTransitionFixture()
         addTeardownBlock { await fixture.close() }
@@ -18,6 +67,7 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
         XCTAssertNil(fixture.playback.currentVideo,
                      "The page's fullscreen flag otherwise makes its onDisappear skip this stop")
         XCTAssertNil(presentedFullscreen(from: fixture.split))
+        XCTAssertFalse(fixture.playback.fullscreenPresentation.isActive)
     }
 
     func testQueuedTeardownDoesNotStopSameVideoBorrowedByAnotherContainer() async throws {
@@ -58,11 +108,12 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
             fullscreen.isBeingDismissed && presentation.controller.parent === inline
         }
         XCTAssertTrue(fixture.state.isPresented, "The binding remains true until UIKit finishes dismissal")
+        XCTAssertTrue(fixture.playback.fullscreenPresentation.isActive)
         anchor.tearDown()
         XCTAssertNil(fixture.playback.currentVideo,
                      "Returning the layer early during dismissal must not bypass page-exit cleanup")
         await waitUntil("The in-flight dismissal must still complete after teardown") {
-            fullscreen.presentingViewController == nil
+            fullscreen.presentingViewController == nil && !fixture.playback.fullscreenPresentation.isActive
         }
     }
 
@@ -135,6 +186,7 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
             !fixture.state.isPresented
         }
         XCTAssertNil(presentedFullscreen(from: fixture.split))
+        XCTAssertFalse(fixture.playback.fullscreenPresentation.isActive)
         XCTAssertNotNil(alert.presentingViewController, "Fullscreen must not replace the unrelated modal")
         XCTAssertEqual(fixture.playback.currentVideo?.id, fixture.source.id)
         alert.dismiss(animated: false)

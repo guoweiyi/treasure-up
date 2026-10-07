@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1283D56F42A241D1B76E1901 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 1283D56F42A241D1B76E1902 /* LaunchScreen.storyboard */; };
 		020EF17F887D323A5B32BFD6 /* AdminMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4118406527BF647E4B9852 /* AdminMaintenance.swift */; };
 		06433F29A94490BF20778130 /* PlayerGestureSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89F9B4C6129583BA74D2F131 /* PlayerGestureSurface.swift */; };
 		08D76554A40018B28FE491D3 /* VideoPageLifetime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BCF8EE7575A93CA83E2AA67 /* VideoPageLifetime.swift */; };
@@ -28,8 +27,10 @@
 		5B874CFCC636AB811D195869 /* PlaybackQueueSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */; };
 		643A2F6869FA186CD2C4B6A6 /* VideoDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECBAA25E116EFED140426EF8 /* VideoDetailView.swift */; };
 		69D026203D8F37224109FF20 /* NativeOverlayPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD6A6A0DECC7D1301EFF3DD3 /* NativeOverlayPerformanceTests.swift */; };
+		6CC254EC8C12B2954BDB3DB9 /* AccessPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02AF1E0805722A84016FF130 /* AccessPolicyTests.swift */; };
 		6FC3BC301B7F27C478366D67 /* VideoPageLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CF691EBAA548DC10B42595 /* VideoPageLifetimeTests.swift */; };
 		7097CFF18E0C17D4EAFB3485 /* FullscreenPlayerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D0490E9F759FD0A8B035B33 /* FullscreenPlayerTests.swift */; };
+		74BB216414DF5970969AEB18 /* HTTPConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D97497C662AF3EF6C5FE1D77 /* HTTPConnectionTests.swift */; };
 		848638D66AB1220B8F6F26CA /* OfflinePlayerUITestFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = F53BBCE1D93D0AFBE8B65173 /* OfflinePlayerUITestFixture.swift */; };
 		8B884E1482E6392B87B5DC53 /* PlayerControlsState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */; };
 		8DFE74BF5FBB3C22C08DCC13 /* VideoCommentsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF15A04D85A795AA725CB043 /* VideoCommentsSection.swift */; };
@@ -40,6 +41,7 @@
 		A17A51C283B9FDB2D815C99F /* CoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99D08916B4C68FE268D7A5D /* CoreTests.swift */; };
 		A93AD24D9C20E1D4E2A61A87 /* AdminEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */; };
 		B5ED8B8EC988438F6724AA65 /* AdminSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7D8D33202B91CB285E1E70A /* AdminSettings.swift */; };
+		B89B820D5EE501B83F9317B9 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 4AFDA767755A5C58E9EAE585 /* LaunchScreen.storyboard */; };
 		B9929BBD442B1955C268E2FB /* SavedPlaylistsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */; };
 		BC88967D74F30C2D8FFC5E64 /* PlayerNativeInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F71A0287A1369510ECA005 /* PlayerNativeInteractionTests.swift */; };
 		BE22C0B378D0FA727A5C633E /* PlaybackRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6FDF44D73E22D5FD6BFB76 /* PlaybackRecovery.swift */; };
@@ -73,7 +75,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		1283D56F42A241D1B76E1902 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		02AF1E0805722A84016FF130 /* AccessPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessPolicyTests.swift; sourceTree = "<group>"; };
 		093E2A40D0F44EEA0508C121 /* PlayerSeekBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerSeekBar.swift; sourceTree = "<group>"; };
 		1083D7D0490215656759582E /* AdminLists.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminLists.swift; sourceTree = "<group>"; };
 		12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminEditor.swift; sourceTree = "<group>"; };
@@ -88,6 +90,7 @@
 		2A0F8B7549A90614E770D7AB /* TreasureUpApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreasureUpApp.swift; sourceTree = "<group>"; };
 		3C292CB4217994CFB56A14B1 /* PromptText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptText.swift; sourceTree = "<group>"; };
 		4839F5C4FA5401BA87C827FC /* PlaybackQueueSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueSection.swift; sourceTree = "<group>"; };
+		4AFDA767755A5C58E9EAE585 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		4C313386880949F2564EBF49 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		4EE899DE46F36E492CC0564E /* PlayerControlsState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControlsState.swift; sourceTree = "<group>"; };
 		50BC8828AAB805068B84BFDF /* SavedPlaylistsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedPlaylistsView.swift; sourceTree = "<group>"; };
@@ -113,6 +116,7 @@
 		CB307D79CC6373AF2B3F5ACA /* FullscreenPlayerPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenPlayerPresenter.swift; sourceTree = "<group>"; };
 		CC36E461E30CEC302566F4E3 /* SessionCookieVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCookieVault.swift; sourceTree = "<group>"; };
 		D7DC0AEFC2F55BC29DE963D7 /* PlayerControlsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerControlsTests.swift; sourceTree = "<group>"; };
+		D97497C662AF3EF6C5FE1D77 /* HTTPConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPConnectionTests.swift; sourceTree = "<group>"; };
 		DA2C67FBE25943886183992A /* TreasureUpTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TreasureUpTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DA580EDA6BA6B4A3727A3CF4 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
 		DD807A99692C691C979AFDE1 /* PlaybackTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackTimeline.swift; sourceTree = "<group>"; };
@@ -139,7 +143,7 @@
 			children = (
 				A46595F5EF0A1F5C6A36245E /* Assets.xcassets */,
 				AED4677AD2EE5E557337B938 /* Info.plist */,
-				1283D56F42A241D1B76E1902 /* LaunchScreen.storyboard */,
+				4AFDA767755A5C58E9EAE585 /* LaunchScreen.storyboard */,
 				2E6FC928759279D74A215D21 /* Admin */,
 				E1D16BE9F8ECE1AA3EC88CE7 /* App */,
 				9E2A829AB40CD59A96A522EE /* Catalog */,
@@ -194,9 +198,11 @@
 		2ECDE9502E15661BAAEE570A /* TreasureUpTests */ = {
 			isa = PBXGroup;
 			children = (
+				02AF1E0805722A84016FF130 /* AccessPolicyTests.swift */,
 				F99D08916B4C68FE268D7A5D /* CoreTests.swift */,
 				5D0490E9F759FD0A8B035B33 /* FullscreenPlayerTests.swift */,
 				E6C46D3AB956FE9CFBB9DCE2 /* FullscreenPresentationIntegrationTests.swift */,
+				D97497C662AF3EF6C5FE1D77 /* HTTPConnectionTests.swift */,
 				BD6A6A0DECC7D1301EFF3DD3 /* NativeOverlayPerformanceTests.swift */,
 				B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */,
 				A9DF7300701A329C819838D6 /* PlaybackTests.swift */,
@@ -375,7 +381,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0D9916E4953E55F88D6A56FE /* Assets.xcassets in Resources */,
-				1283D56F42A241D1B76E1901 /* LaunchScreen.storyboard in Resources */,
+				B89B820D5EE501B83F9317B9 /* LaunchScreen.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -425,9 +431,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6CC254EC8C12B2954BDB3DB9 /* AccessPolicyTests.swift in Sources */,
 				A17A51C283B9FDB2D815C99F /* CoreTests.swift in Sources */,
 				7097CFF18E0C17D4EAFB3485 /* FullscreenPlayerTests.swift in Sources */,
 				15C605578E3FAE9F640FA0B7 /* FullscreenPresentationIntegrationTests.swift in Sources */,
+				74BB216414DF5970969AEB18 /* HTTPConnectionTests.swift in Sources */,
 				69D026203D8F37224109FF20 /* NativeOverlayPerformanceTests.swift in Sources */,
 				BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */,
 				CF038D291F8DB5C416396298 /* PlaybackTests.swift in Sources */,
@@ -498,7 +506,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -517,7 +525,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.4.3;
+				MARKETING_VERSION = 0.4.4;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -566,7 +574,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -579,7 +587,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.4.3;
+				MARKETING_VERSION = 0.4.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

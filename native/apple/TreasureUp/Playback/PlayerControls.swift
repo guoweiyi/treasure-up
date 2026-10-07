@@ -84,6 +84,16 @@ struct InlineNativePlayer: View {
                 controlPressed = false
                 scheduleHide()
             }
+            .onChange(of: geometry.size) { _, _ in
+                // Sidebar, Stage Manager and rotation can change the mapping
+                // under a finger. End that interaction instead of jumping to
+                // a different timestamp or leaving temporary speed engaged.
+                guard scrubbing.gesture != nil || scrubbing.isSliderEditing || holdingSpeed else { return }
+                resetScrubbing()
+                holdingSpeed = false
+                coordinator.endTemporaryRate()
+                revealControls()
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inline-player")
@@ -182,18 +192,23 @@ struct InlineNativePlayer: View {
                 switch phase {
                 case .began:
                     guard !holdingSpeed, seekableDuration > 0, scenePhase == .active else { return }
-                    scrubbing.gestureStartTime = coordinator.currentTime
-                    scrubbing.seekPreview = PlayerGestureMath.scrubPosition(start: coordinator.currentTime,
-                        translation: translation, width: width, duration: coordinator.duration)
+                    scrubbing.gesture = PlayerScrubSession(start: coordinator.currentTime,
+                        width: width, duration: coordinator.duration)
+                    scrubbing.seekPreview = scrubbing.gesture?.position(translation: translation,
+                        currentWidth: width, currentDuration: coordinator.duration)
                     hideTask?.cancel()
                 case .changed:
-                    guard let start = scrubbing.gestureStartTime else { return }
-                    scrubbing.seekPreview = PlayerGestureMath.scrubPosition(start: start,
-                        translation: translation, width: width, duration: coordinator.duration)
+                    guard let position = scrubbing.gesture?.position(translation: translation,
+                        currentWidth: width, currentDuration: coordinator.duration) else {
+                        resetScrubbing()
+                        scheduleHide()
+                        return
+                    }
+                    scrubbing.seekPreview = position
                 case .ended:
-                    if let start = scrubbing.gestureStartTime {
-                        coordinator.seek(to: PlayerGestureMath.scrubPosition(start: start,
-                            translation: translation, width: width, duration: coordinator.duration))
+                    if let position = scrubbing.gesture?.position(translation: translation,
+                        currentWidth: width, currentDuration: coordinator.duration) {
+                        coordinator.seek(to: position)
                     }
                     resetScrubbing()
                     scheduleHide()
@@ -409,15 +424,7 @@ struct InlineNativePlayer: View {
                 Toggle("允许后台播放", isOn: $coordinator.backgroundPlayback).frame(minHeight: 44)
             }
             panelSection("弹幕") {
-                Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled).frame(minHeight: 44)
-                if coordinator.danmakuEnabled {
-                    Text("透明度 \(Int(coordinator.danmakuOpacity * 100))%").font(.subheadline)
-                    Slider(value: $coordinator.danmakuOpacity, in: 0.2...1).frame(minHeight: 44)
-                        .accessibilityLabel("弹幕透明度")
-                    Text("字号 \(Int(coordinator.danmakuFontSize))").font(.subheadline)
-                    Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1).frame(minHeight: 44)
-                        .accessibilityLabel("弹幕字号")
-                }
+                PlayerDanmakuOptions(coordinator: coordinator)
             }
             if !(coordinator.session?.routes.isEmpty ?? true) {
                 panelSection("分发节点") {
@@ -541,13 +548,52 @@ private enum PlayerInlinePanel {
 @MainActor @Observable
 private final class PlayerScrubbingState {
     var seekPreview: Double?
-    var gestureStartTime: Double?
+    var gesture: PlayerScrubSession?
+    var gestureStartTime: Double? { gesture?.start }
     var isSliderEditing = false
 
     func reset() {
         seekPreview = nil
-        gestureStartTime = nil
+        gesture = nil
         isSliderEditing = false
+    }
+}
+
+/// A drag owns one geometry and one duration, even if SwiftUI reconfigures its
+/// callbacks while the sidebar or media metadata changes underneath it.
+struct PlayerScrubSession {
+    let start: Double
+    let width: Double
+    let duration: Double
+
+    init?(start: Double, width: Double, duration: Double) {
+        guard start.isFinite, width.isFinite, width > 0, duration.isFinite, duration > 0 else { return nil }
+        self.start = PlayerGestureMath.clampedTime(start, duration: duration)
+        self.width = width
+        self.duration = duration
+    }
+
+    func position(translation: Double, currentWidth: Double, currentDuration: Double) -> Double? {
+        guard translation.isFinite, currentWidth == width, currentDuration == duration else { return nil }
+        return PlayerGestureMath.scrubPosition(start: start, translation: translation, width: width, duration: duration)
+    }
+}
+
+/// Continuous option sliders observe their values here, so a finger moving
+/// them does not rebuild the player surface and every other open setting.
+private struct PlayerDanmakuOptions: View {
+    @Bindable var coordinator: PlaybackCoordinator
+
+    var body: some View {
+        Toggle("显示弹幕", isOn: $coordinator.danmakuEnabled).frame(minHeight: 44)
+        if coordinator.danmakuEnabled {
+            Text("透明度 \(Int(coordinator.danmakuOpacity * 100))%").font(.subheadline)
+            Slider(value: $coordinator.danmakuOpacity, in: 0.2...1).frame(minHeight: 44)
+                .accessibilityLabel("弹幕透明度")
+            Text("字号 \(Int(coordinator.danmakuFontSize))").font(.subheadline)
+            Slider(value: $coordinator.danmakuFontSize, in: 14...26, step: 1).frame(minHeight: 44)
+                .accessibilityLabel("弹幕字号")
+        }
     }
 }
 
