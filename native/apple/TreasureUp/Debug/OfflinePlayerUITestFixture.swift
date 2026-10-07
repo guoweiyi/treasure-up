@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG && targetEnvironment(simulator)
 import SwiftUI
 import AVFoundation
 import Observation
@@ -7,11 +7,7 @@ import Observation
 /// inside the app's temporary directory; no configured server or login is used.
 struct OfflinePlayerUITestFixture: View {
     static var isEnabled: Bool {
-        #if targetEnvironment(simulator)
         ProcessInfo.processInfo.arguments.contains("--offline-player-ui")
-        #else
-        false
-        #endif
     }
 
     @State private var state = OfflinePlayerUIState()

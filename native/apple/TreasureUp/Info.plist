@@ -9,6 +9,8 @@
   <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>LSRequiresIPhoneOS</key><true/>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+  <key>NSLocalNetworkUsageDescription</key><string>连接你填写的局域网 Treasure Up 服务器，浏览和播放归档视频喵～</string>
   <key>UILaunchStoryboardName</key><string>LaunchScreen</string>
   <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
   <key>UIBackgroundModes</key><array><string>audio</string></array>

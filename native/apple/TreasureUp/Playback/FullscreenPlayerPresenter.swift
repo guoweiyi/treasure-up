@@ -1,5 +1,29 @@
 import SwiftUI
 import AVFoundation
+import Observation
+
+/// A modal remains occupied through its entire UIKit transition, including the
+/// interval after SwiftUI removes the page that originally presented it.
+@MainActor @Observable
+final class FullscreenPresentationState {
+    private(set) var isActive = false
+    @ObservationIgnored private var dismissals: [UUID: () -> Void] = [:]
+
+    func begin(_ token: UUID, requestDismissal: @escaping () -> Void) {
+        dismissals[token] = requestDismissal
+        isActive = true
+    }
+
+    func end(_ token: UUID) {
+        dismissals[token] = nil
+        isActive = !dismissals.isEmpty
+    }
+
+    func requestDismissal() {
+        // A callback may synchronously release a rejected presentation.
+        for dismiss in Array(dismissals.values) { dismiss() }
+    }
+}
 
 /// A real full-screen UIKit presentation escapes the split-view detail column.
 /// Both sizes borrow the same AVPlayer and rendering controller without reloading.
@@ -34,11 +58,14 @@ final class PlayerPresentationAnchor: UIViewController {
     private var lastBindingValue = false
     private var tornDown = false
     private var presentationToken: UUID?
+    private var presentationState: FullscreenPresentationState?
     private var presentedVideoID: String?
     private weak var presentedInlineOwner: UIViewController?
     private var didClose: (() -> Void)?
     private var originalOrientation: UIInterfaceOrientation = .unknown
     private var presentationUpdate: Task<Void, Never>?
+    private var orientationRestoration: Task<Void, Never>?
+    private var orientationRestorationFailed = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -91,10 +118,10 @@ final class PlayerPresentationAnchor: UIViewController {
         case .presented:
             if fullscreen?.presentingViewController == nil {
                 fullscreen = nil
-                presentationToken = nil
                 phase = .idle
+                releasePresentation()
                 completeCloseRequest()
-            } else if !requested || tornDown {
+            } else if !requested || tornDown || playback?.currentVideo == nil {
                 dismissCurrent(animated: !tornDown)
             } else {
                 fullscreen?.requestVideoOrientation()
@@ -126,6 +153,8 @@ final class PlayerPresentationAnchor: UIViewController {
         presentedInlineOwner = playback.presentation?.controller.parent
         presentationToken = token
         phase = .presenting
+        presentationState = playback.fullscreenPresentation
+        presentationState?.begin(token) { [weak self] in self?.requestClose(token: token) }
         // UIKit retains this completion until the transition finishes. Keep the
         // anchor alive long enough to honor teardown/cancel during presentation.
         present(controller, animated: true) { [self, weak controller] in
@@ -141,8 +170,8 @@ final class PlayerPresentationAnchor: UIViewController {
         }
         if controller.presentingViewController == nil {
             fullscreen = nil
-            presentationToken = nil
             phase = .idle
+            releasePresentation()
             completeCloseRequest()
         }
     }
@@ -164,34 +193,68 @@ final class PlayerPresentationAnchor: UIViewController {
             DispatchQueue.main.async { [self, weak controller] in
                 guard let controller, fullscreen === controller else { return }
                 fullscreen = nil
-                presentationToken = nil
-                phase = .idle
                 // A fresh false→true binding edge during dismissal is a new request.
-                // Do not overwrite it with the completion of the old presentation.
+                // Do not restore the previous geometry before immediately reopening.
                 if requested && !tornDown {
-                    schedulePresentationUpdate()
+                    finishDismissal()
+                } else if !tornDown, let scene, let window = viewIfLoaded?.window,
+                          window.windowScene === scene, restore != .unknown,
+                          scene.interfaceOrientation != restore {
+                    restoreOrientation(restore, in: scene, window: window)
                 } else {
-                    if !tornDown, let scene, let window = viewIfLoaded?.window,
-                       window.windowScene === scene, restore != .unknown,
-                       scene.interfaceOrientation != restore {
-                        let root = window.rootViewController
-                        root?.setNeedsUpdateOfSupportedInterfaceOrientations()
-                        if #available(iOS 26.0, *) { root?.setNeedsUpdateOfPrefersInterfaceOrientationLocked() }
-                        // iPhone can restore window bounds while leaving its scene
-                        // landscape after a locked full-screen presentation. Both
-                        // device families need the same explicit scene restoration.
-                        scene.requestGeometryUpdate(.iOS(interfaceOrientations: PlayerFullscreenGeometry.mask(for: restore)))
-                    }
-                    completeCloseRequest()
+                    finishDismissal()
                 }
             }
         }
+    }
+
+    private func restoreOrientation(_ orientation: UIInterfaceOrientation, in scene: UIWindowScene, window: UIWindow) {
+        guard let token = presentationToken else { finishDismissal(); return }
+        let root = window.rootViewController
+        root?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if #available(iOS 26.0, *) { root?.setNeedsUpdateOfPrefersInterfaceOrientationLocked() }
+        orientationRestorationFailed = false
+        // iPhone can restore window bounds while leaving its scene landscape
+        // after a locked presentation. Both device families need this request.
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: PlayerFullscreenGeometry.mask(for: orientation))) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard self?.presentationToken == token else { return }
+                self?.orientationRestorationFailed = true
+            }
+        }
+        // Geometry updates have no success callback. Keep authentication queued
+        // until the scene and its rotation settle, with a bound for system-denied
+        // changes (for example, a resized iPad window).
+        orientationRestoration = Task { @MainActor [self] in
+            for _ in 0..<100 {
+                if tornDown || orientationRestorationFailed ||
+                    (scene.interfaceOrientation == orientation && root?.transitionCoordinator == nil) { break }
+                do { try await Task.sleep(for: .milliseconds(20)) }
+                catch { break }
+            }
+            guard phase == .dismissing, presentationToken == token else { return }
+            orientationRestoration = nil
+            finishDismissal()
+        }
+    }
+
+    private func finishDismissal() {
+        phase = .idle
+        releasePresentation()
+        if requested && !tornDown { schedulePresentationUpdate() }
+        else { completeCloseRequest() }
     }
 
     private func completeCloseRequest() {
         requested = false
         lastBindingValue = false
         if !tornDown { didClose?() }
+    }
+
+    private func releasePresentation() {
+        if let presentationToken { presentationState?.end(presentationToken) }
+        presentationToken = nil
+        presentationState = nil
     }
 
     func tearDown() {

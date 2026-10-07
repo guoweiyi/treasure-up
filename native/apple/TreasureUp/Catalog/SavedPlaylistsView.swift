@@ -5,7 +5,6 @@ struct SavedPlaylistsView: View {
     @State private var lists: [PersonalPlaylist] = []
     @State private var error: String?
     @State private var loading = false
-    @State private var loginPresented = false
     @State private var createPresented = false
     @State private var name = ""
     @State private var description = ""
@@ -16,7 +15,8 @@ struct SavedPlaylistsView: View {
                     BrandMark(size: 76)
                     Text(appPrompt("收藏属于你的好视频"))
                 } description: { Text(appPrompt("登录后创建片单，记录观看状态与收藏笔记。")) } actions: {
-                    Button("登录") { loginPresented = true }.buttonStyle(.borderedProminent)
+                    Button("登录") { api.requestLogin(message: "登录后创建片单，记录观看状态与收藏笔记。") }
+                        .buttonStyle(.borderedProminent)
                 }
             } else {
                 List {
@@ -44,7 +44,6 @@ struct SavedPlaylistsView: View {
         .navigationTitle("我的片单")
         .toolbar { if api.user != nil { Button("新建片单", systemImage: "plus") { name = ""; description = ""; createPresented = true } } }
         .task(id: api.user?.id) { if api.user != nil { await load() } }
-        .sheet(isPresented: $loginPresented) { NavigationStack { LoginView() } }
         .sheet(isPresented: $createPresented) {
             NavigationStack {
                 Form {

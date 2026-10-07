@@ -84,6 +84,66 @@ final class PlayerNativeInteractionTests: XCTestCase {
         XCTAssertEqual(slider.accessibilityTraits, .adjustable)
     }
 
+    func testDurationReloadCancelsDragAndBalancesEditingWithoutSeeking() {
+        // A route/quality reload can report an unknown duration while keeping
+        // the part ID unchanged. Releasing that touch must not seek the reload.
+        for replacementDuration in [0, .nan, .infinity, 25] {
+            let slider = PlayerSeekSlider()
+            slider.frame = CGRect(x: 0, y: 0, width: 418, height: 44)
+            var editing: [Bool] = []
+            var commits: [Double] = []
+            func configure(_ duration: Double) {
+                slider.configure(PlayerSeekBar(value: 12, duration: duration, bufferedTime: 20, mediaID: "same-part",
+                    onPreview: { _ in }, onEditingChanged: { editing.append($0) }, onCommit: { commits.append($0) }))
+            }
+            configure(100)
+            XCTAssertTrue(slider.beginInteraction(at: 329))
+            configure(replacementDuration)
+            slider.finishInteraction()
+            XCTAssertFalse(slider.isScrubbing)
+            XCTAssertEqual(editing, [true, false])
+            XCTAssertTrue(commits.isEmpty)
+            XCTAssertTrue(slider.value.isFinite)
+        }
+    }
+
+    func testMediaReplacementReturnsEditingToOriginalOwnerOnly() {
+        let slider = PlayerSeekSlider()
+        slider.frame = CGRect(x: 0, y: 0, width: 418, height: 44)
+        var events: [String] = []
+        func configure(_ media: String) {
+            slider.configure(PlayerSeekBar(value: 10, duration: 100, bufferedTime: 20, mediaID: media,
+                onPreview: { _ in }, onEditingChanged: { events.append("\(media):\($0)") },
+                onCommit: { _ in events.append("\(media):commit") }))
+        }
+        configure("old")
+        slider.beginInteraction(at: 209)
+        configure("new")
+        slider.finishInteraction()
+        XCTAssertEqual(events, ["old:true", "old:false"])
+        XCTAssertTrue(slider.beginInteraction(at: 209))
+        slider.finishInteraction()
+        XCTAssertEqual(events, ["old:true", "old:false", "new:true", "new:commit", "new:false"])
+    }
+
+    func testSidebarResizeCancelsThumbDragEvenBeforeLayoutPass() {
+        for layoutBeforeRelease in [false, true] {
+            let slider = PlayerSeekSlider()
+            slider.frame = CGRect(x: 0, y: 0, width: 818, height: 44)
+            var commits = 0
+            var editing: [Bool] = []
+            slider.configure(PlayerSeekBar(value: 12, duration: 100, bufferedTime: 60, mediaID: "a",
+                onPreview: { _ in }, onEditingChanged: { editing.append($0) }, onCommit: { _ in commits += 1 }))
+            XCTAssertTrue(slider.beginInteraction(at: 409))
+            slider.frame.size.width = 418
+            if layoutBeforeRelease { slider.layoutIfNeeded() }
+            slider.finishInteraction()
+            XCTAssertEqual(commits, 0, "The same finger position must not jump from 50% to the end after a resize")
+            XCTAssertEqual(editing, [true, false])
+            XCTAssertEqual(slider.value, 0.12, accuracy: 0.001)
+        }
+    }
+
     func testShowingControlsChangesOnlyHitRegionAndKeepsRecognizers() {
         let view = PlayerGestureView()
         view.frame = CGRect(x: 0, y: 0, width: 400, height: 225)
