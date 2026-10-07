@@ -375,7 +375,16 @@ final class APIClient {
     private func acceptCookies(from response: HTTPURLResponse, url: URL) {
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields { headers[String(describing: key)] = String(describing: value) }
-        let received = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
+        // Foundation can discard a Secure cookie while parsing an HTTP response.
+        // Inspect its metadata using the same host/path with an HTTPS parsing
+        // origin so we can report that deployment error. The actual request URL
+        // stays unchanged, and mediaCookies still refuses to send it over HTTP.
+        var cookieOrigin = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if url.scheme == "http" {
+            cookieOrigin?.scheme = "https"
+            cookieOrigin?.port = url.port ?? 80
+        }
+        let received = HTTPCookie.cookies(withResponseHeaderFields: headers, for: cookieOrigin?.url ?? url)
             .filter { SessionCookieVault.belongsToServer($0, server: baseURL) }
         guard !received.isEmpty else { return }
         for cookie in received {
