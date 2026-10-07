@@ -7,7 +7,8 @@ import re
 import subprocess
 import tempfile
 
-COMPONENTS = ("backend", "web")
+# Promote the entry point last, after its versioned runtime images are available.
+COMPONENTS = ("backend", "web", "installer")
 ARCHES = ("amd64", "arm64")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
@@ -37,7 +38,8 @@ def context(tag, repository, revision, run_id, namespace=None):
 def image_name(ctx, component):
     if component not in COMPONENTS:
         raise ValueError("Unexpected image component")
-    return f"docker.io/{ctx['namespace']}/treasure-up-{component}"
+    repository = "treasure-up" if component == "installer" else f"treasure-up-{component}"
+    return f"docker.io/{ctx['namespace']}/{repository}"
 
 
 def require_digest(value):
@@ -73,7 +75,7 @@ def verify_public_images(images):
                 command("docker", "--config", anonymous_config, "manifest", "inspect",
                         f"{value['image']}@{value['digest']}")
             except ValueError:
-                raise ValueError("Anonymous Docker Hub pull failed; make both image repositories Public and retry") from None
+                raise ValueError("Anonymous Docker Hub pull failed; make all image repositories Public and retry") from None
 
 
 def push_candidates(ctx, arch, output):
@@ -240,17 +242,19 @@ def promote(ctx, path, channel):
     data = read_images(path, ctx)
     verify_public_images(data["images"])
     version = ctx["tag"][1:]
-    # Preflight every immutable version before changing either image.
+    # Preflight every immutable version before changing any image.
     for value in data["images"].values():
         previous = inspect_digest(f"{value['image']}:{version}", missing=True)
         if previous is not None and previous != value["digest"]:
             raise ValueError("A version tag already points to a different digest; publish a new version")
-    for value in data["images"].values():
+    for component in COMPONENTS:
+        value = data["images"][component]
         command("docker", "buildx", "imagetools", "create", "--tag", f"{value['image']}:{version}", value["reference"])
         if inspect_digest(f"{value['image']}:{version}") != value["digest"]:
             raise ValueError("Published image digest changed unexpectedly")
     alias = "latest" if channel == "stable" else "preview"
-    for value in data["images"].values():
+    for component in COMPONENTS:
+        value = data["images"][component]
         target = f"{value['image']}:{alias}"
         old = inspect_digest(target, missing=True)
         if old:

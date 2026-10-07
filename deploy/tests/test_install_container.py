@@ -23,7 +23,7 @@ from check_service import run_check
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TREASURE_RUN_INSTALL_TESTS") != "1",
-    reason="Set TREASURE_RUN_INSTALL_TESTS=1 after building local backend/web images",
+    reason="Set TREASURE_RUN_INSTALL_TESTS=1 after building local backend/web/installer images",
 )
 
 
@@ -40,7 +40,7 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
     version = json.loads((ROOT / "release.json").read_text(encoding="utf-8"))["version"]
     images = {component: os.environ.get(
         f"TREASURE_INSTALL_{component.upper()}_IMAGE", f"treasure-up-{component}:{version}"
-    ) for component in ("backend", "web")}
+    ) for component in ("backend", "web", "installer")}
     project = "treasure-install-test-" + uuid4().hex[:16]
     config_volume, installer, reader = project + "-config", project + "-installer", project + "-reader"
     migrated_volume = project + "-migrated-config"
@@ -60,11 +60,15 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
-    setup = ["run", "--rm", "--name", installer, "--user", "0", "--pull", "never", "--network", "none",
+    installer_label = f"com.treasure-up.installer.project={project}"
+    setup = ["run", "--rm", "--name", installer, "--pull", "never", "--network", "none",
+             "--label", installer_label, "--label", "com.treasure-up.installer.role=launcher",
              "--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
-             "--mount", f"type=volume,source={config_volume},target=/config",
-             images["backend"], "python", "/app/install.py", "--project-name", project,
+             images["installer"], "--installer-image", images["installer"], "--project-name", project,
              "--backend-image", images["backend"], "--web-image", images["web"], "--no-pull", "--port", str(port)]
+
+    def no_installers_remain():
+        assert not command(["ps", "--all", "--quiet", "--filter", "label=" + installer_label]).stdout.strip()
 
     def snapshot(volume=config_volume):
         # Copy config privately for HTTP assertions; never print its secrets to Docker logs.
@@ -79,6 +83,7 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
         # No downloaded archive, host configuration or source tree is mounted.
         assert not any(tmp_path.iterdir())
         first = command(setup, timeout=300)
+        no_installers_remain()
         snapshot()
         state = json.loads((tmp_path / "installation.json").read_text(encoding="utf-8"))
         assert state["completed_version"] == version and state["project"] == project
@@ -86,6 +91,9 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
         config = yaml.safe_load((tmp_path / "compose.yaml").read_text(encoding="utf-8"))
         assert all(not service.get("build") for service in config["services"].values())
         assert "/var/run/docker.sock" not in (tmp_path / "compose.yaml").read_text(encoding="utf-8")
+        services = command(["ps", "--quiet", "--filter", f"label=com.docker.compose.project={project}"]).stdout.split()
+        for service in json.loads(command(["inspect", *services]).stdout):
+            assert all(mount["Destination"] != "/var/run/docker.sock" for mount in service["Mounts"])
         settings = dict(line.split("=", 1) for line in environment_file.read_text(encoding="utf-8").splitlines())
         secrets = [settings[key] for key in ("POSTGRES_PASSWORD", "TREASURE_ADMIN_PASSWORD", "TREASURE_SECRET_KEY", "TREASURE_BACKUP_KEY")]
         if any(value in first.stdout + first.stderr for value in secrets):
@@ -95,6 +103,7 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
         user = run_check(base, environment_file)
         assert user.get("id")
         repeated = command(setup, timeout=300)
+        no_installers_remain()
         snapshot()
         assert hashlib.sha256(environment_file.read_bytes()).digest() == before
         if any(value in repeated.stdout + repeated.stderr for value in secrets):
@@ -102,18 +111,25 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
         assert run_check(base, environment_file).get("id") == user["id"]
         hidden = command(setup + ["--show-login"], timeout=90, check=False)
         assert hidden.returncode != 0
+        no_installers_remain()
         if any(value in hidden.stdout + hidden.stderr for value in secrets):
             raise AssertionError("Saved login was exposed outside an interactive terminal")
+        terminal = setup.copy()
+        terminal.insert(1, "--tty")
+        shown = command(terminal + ["--show-login"], timeout=90, check=False)
+        if shown.returncode or settings["TREASURE_ADMIN_PASSWORD"] not in shown.stdout:
+            raise AssertionError("Interactive setup did not display the saved initial login")
+        no_installers_remain()
         # A different empty config volume must not silently regenerate keys for
         # the existing database. Explicit import is the supported migration.
-        migration = setup.copy()
-        migration[migration.index(f"type=volume,source={config_volume},target=/config")] = \
-            f"type=volume,source={migrated_volume},target=/config"
+        migration = setup + ["--config-volume", migrated_volume]
         denied = command(migration, timeout=90, check=False)
         assert denied.returncode != 0 and "Existing project data" in denied.stdout + denied.stderr
-        position = migration.index(images["backend"])
+        no_installers_remain()
+        position = migration.index(images["installer"])
         migration[position:position] = ["--mount", f"type=volume,source={config_volume},target=/previous,readonly"]
         imported = command(migration + ["--import-env", "/previous/.env"], timeout=300)
+        no_installers_remain()
         if any(value in imported.stdout + imported.stderr for value in secrets):
             raise AssertionError("Configuration migration exposed a saved credential")
         snapshot(migrated_volume)
@@ -127,10 +143,14 @@ def test_fresh_install_uses_only_containers_and_preserves_initialization(tmp_pat
                  "s=json.loads(p.read_text()); s['attempted_version']='999.0.0'; p.write_text(json.dumps(s))"])
         downgrade = command(migration, timeout=90, check=False)
         assert downgrade.returncode != 0 and "would downgrade" in downgrade.stdout + downgrade.stderr
+        no_installers_remain()
         assert run_check(base, environment_file).get("id") == user["id"]
     finally:
         # Kill a timed-out installer before removing only this random test project's resources.
         command(["rm", "--force", installer, reader], check=False)
+        children = command(["ps", "--all", "--quiet", "--filter", "label=" + installer_label]).stdout.split()
+        if children:
+            command(["rm", "--force", *children])
         for resource, list_args, delete_args in (
             ("containers", ["ps", "--all", "--quiet"], ["rm", "--force"]),
             ("networks", ["network", "ls", "--quiet"], ["network", "rm"]),

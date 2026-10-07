@@ -132,8 +132,8 @@ def prepare(root, version, channel, *, automatic_notes=False):
                 raise ValueError("Invalid Docker Hub namespace")
             planned[notes] = (f"# Treasure Up v{version}\n\n{release_changes(subjects)}\n\n"
                               "Docker 安装，无需下载源码或 ZIP：\n\n```sh\n"
-                              "docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock "
-                              f"-v treasure-up-config:/config docker.io/{namespace}/treasure-up-backend:{version} python /app/install.py\n```\n\n"
+                              "docker run --rm -it -v /var/run/docker.sock:/var/run/docker.sock "
+                              f"{namespace}/treasure-up:{version}\n```\n\n"
                               f"iPhone / iPad 请下载 `treasure-up-v{version}-ios-unsigned.ipa`，自行签名后安装；步骤见附件 `IOS-INSTALL.md`。\n\n"
                               "升级前请备份数据库和配置，保留原数据卷，不要执行 `docker compose down -v`。\n")
         else:

@@ -2,8 +2,9 @@
 
 ## 首次配置
 
-Docker Hub 使用两个公开仓库：
+Docker Hub 使用三个公开仓库：
 
+- `yunyunjuan/treasure-up`：安装入口
 - `yunyunjuan/treasure-up-backend`
 - `yunyunjuan/treasure-up-web`
 
@@ -14,7 +15,7 @@ Docker Hub 使用两个公开仓库：
 | `DOCKERHUB_USERNAME` | Docker Hub 登录账号 |
 | `DOCKERHUB_TOKEN` | 有仓库读写权限的 Access Token |
 
-命名空间默认 `yunyunjuan`。fork 项目可以用 Actions Variable `DOCKERHUB_NAMESPACE` 修改，安装时追加 `--namespace 自己的命名空间`。GitHub 的分支规则需允许发布流程提交版本号和创建标签。
+命名空间默认 `yunyunjuan`。fork 项目可以用 Actions Variable `DOCKERHUB_NAMESPACE` 修改，新安装镜像会内置这个默认值。GitHub 的分支规则需允许发布流程提交版本号和创建标签。
 
 ## 发布版本
 

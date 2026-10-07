@@ -30,11 +30,17 @@ Nginx Proxy Manager、宝塔、内网穿透也使用同一原则：回源到 Web
 
 ## 升级与数据
 
-先在后台备份，再重新运行首页安装命令。`--pull always` 会拉取新安装镜像，安装器随后更新同一版本的服务镜像。
+先在后台备份，再执行升级命令：
+
+```sh
+docker run --rm -it --pull=always -v /var/run/docker.sock:/var/run/docker.sock yunyunjuan/treasure-up
+```
+
+`--pull=always` 会拉取最新安装镜像，安装器随后更新同一版本的服务。原密码、密钥和访问地址保持不变。v0.3.5 安装器创建的配置卷可以直接复用。
 
 配置保存在 `treasure-up-config`，业务数据保存在 `treasure-up_database`、`treasure-up_media` 等卷中。一起保留这些卷，特别是配置中的加密密钥。日常升级不要删除数据卷，也不要运行 `docker compose down -v`。
 
-需要固定版本时，将命令中的 `:latest` 换成具体版本，例如 `:0.3.5`。大版本回退先阅读发布说明，涉及数据库迁移时需使用升级前的备份恢复。
+需要固定版本时，在镜像名后加版本号，例如 `yunyunjuan/treasure-up:0.3.6`。安装器不会自行跨版本升级。版本回退需使用升级前的备份恢复。
 
 ## 从旧版 Compose 迁移
 
@@ -43,7 +49,7 @@ Nginx Proxy Manager、宝塔、内网穿透也使用同一原则：回源到 Web
 在原部署目录执行（Linux、macOS 和 PowerShell 均可）：
 
 ```sh
-docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock -v treasure-up-config:/config -v "${PWD}:/previous:ro" yunyunjuan/treasure-up-backend:latest python /app/install.py --import-env /previous/.env
+docker run --rm -it --pull=always -v /var/run/docker.sock:/var/run/docker.sock -v "${PWD}:/previous:ro" yunyunjuan/treasure-up --import-env /previous/.env
 ```
 
 迁移后继续使用原项目名 `treasure-up` 和原数据卷。有自定义 NAS 挂载或 Compose 扩展时，先保留原 Compose 部署方式。

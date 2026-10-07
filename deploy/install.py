@@ -105,7 +105,7 @@ def install(args):
     with installation_lock(directory):
         state = read_state(state_file)
         project = args.project_name or state.get("project") or "treasure-up"
-        namespace = args.namespace or state.get("namespace") or "yunyunjuan"
+        namespace = args.namespace or state.get("namespace") or os.getenv("TREASURE_INSTALL_NAMESPACE") or "yunyunjuan"
         mode = args.mode or state.get("mode") or "light"
         if not PROJECT.fullmatch(project) or not NAMESPACE.fullmatch(namespace) or mode not in {"light", "full"}:
             raise ValueError("Invalid project name, Docker Hub namespace or installation mode")
@@ -185,7 +185,7 @@ def install(args):
         print("Use --show-login in a private interactive terminal to view the saved initial login; change it after signing in.")
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-dir", default="/config")
     parser.add_argument("--project-name")
@@ -200,6 +200,11 @@ def main():
     parser.add_argument("--backend-image", help="Explicit image override for local verification or an offline mirror")
     parser.add_argument("--web-image", help="Explicit image override for local verification or an offline mirror")
     parser.add_argument("--no-pull", action="store_true", help="Use only existing local images, including PostgreSQL and Redis")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     try:
         install(args)

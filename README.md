@@ -25,10 +25,10 @@ Treasure Up 可以把账号有权限观看的视频保存到自己的存储里�
 先安装并启动 Docker。支持 Linux `amd64` / `arm64`，Windows、macOS 使用 Docker Desktop。
 
 ```sh
-docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock -v treasure-up-config:/config yunyunjuan/treasure-up-backend:latest python /app/install.py
+docker run --rm -it -v /var/run/docker.sock:/var/run/docker.sock yunyunjuan/treasure-up
 ```
 
-命令会拉取镜像、生成配置并启动服务。完成后打开 **<http://localhost:8788>**，使用终端显示的 `admin` 和随机密码登录。
+镜像会自动准备配置、初始化管理员并启动服务。完成后打开 **<http://localhost:8788>**，使用终端显示的 `admin` 和随机密码登录。
 
 安装时临时挂载 Docker socket，用于创建服务容器；安装结束即退出，业务容器不保留这个挂载。密码和配置保存在 `treasure-up-config` 数据卷中。
 
@@ -38,14 +38,14 @@ docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/dock
 把下面的 `192.168.1.20` 换成服务器 IP：
 
 ```sh
-docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock -v treasure-up-config:/config yunyunjuan/treasure-up-backend:latest python /app/install.py --origin http://192.168.1.20:8788 --bind-address 0.0.0.0
+docker run --rm -it -v /var/run/docker.sock:/var/run/docker.sock yunyunjuan/treasure-up --origin http://192.168.1.20:8788 --bind-address 0.0.0.0
 ```
 
 使用反向代理时，把 `--origin` 改为实际 HTTPS 域名。iOS App 和通行密钥登录请使用 HTTPS 域名。
 
 </details>
 
-登录后，在后台添加 B 站账号、存储位置和备份来源。升级时再次运行安装命令即可，原配置和数据保留。旧版 Compose 用户先看[迁移说明](docs/installation.md)。
+登录后，在后台添加 B 站账号、存储位置和备份来源。[升级或迁移已有部署](docs/installation.md#升级与数据)时保留原配置和数据卷。
 
 ## iPhone / iPad
 
