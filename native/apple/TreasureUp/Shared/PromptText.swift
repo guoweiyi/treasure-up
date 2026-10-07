@@ -4,6 +4,6 @@ import Foundation
 /// API values, navigation titles and action labels must keep their original text.
 func appPrompt(_ message: String) -> String {
     let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !text.isEmpty, !text.hasSuffix("喵～") else { return text }
-    return text + "喵～"
+    guard !text.isEmpty, !text.hasSuffix("") else { return text }
+    return text + ""
 }
