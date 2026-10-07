@@ -130,7 +130,7 @@ def check():
     require("/offline.html" in cached and any(image["src"] in cached for image in logo_images), "Offline page and its logo must be precached together")
     for url in cached:
         public_file(url)
-    require(worker.count("caches.open(") == 1 and "cache.addAll(PUBLIC_FILES)" in worker, "Service worker must only precache the public asset list")
+    require(len(re.findall(r"\bcaches\s*\.\s*open\s*\(", worker)) == 1 and re.search(r"\bcache\s*\.\s*addAll\s*\(\s*PUBLIC_FILES\s*\)", worker), "Service worker must only precache the public asset list")
     require(not re.search(r"\bcache\.(?:put|add)\s*\(", worker), "Service worker must not cache responses dynamically")
     require("url.pathname.startsWith('/api/')" in worker and "PUBLIC_FILES.includes(url.pathname)" in worker, "Service worker must exclude API requests and restrict asset fallback to the public list")
     print(f"Branding verified: {len(assets)} PNG assets, native catalogs, PWA icons and public offline cache")
