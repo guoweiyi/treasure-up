@@ -38,6 +38,7 @@ import IngestPolicyFields from '../components/admin/IngestPolicyFields.vue';
 import VideoEditorFields from '../components/admin/VideoEditorFields.vue';
 import DeletionDialog from '../components/admin/DeletionDialog.vue';
 import UiIcon from '../components/UiIcon.vue';
+import BrandLogo from '../components/BrandLogo.vue';
 import UserscriptIntegration from '../components/UserscriptIntegration.vue';
 import { videoEditorDraft, videoEditorPayload } from '../utils/videoEditor';
 import { storageDraft, storagePayload, storageKindName } from '../utils/storageForm';
@@ -452,7 +453,9 @@ onBeforeUnmount(() => {
   <el-config-provider :locale="zhCn"
     ><div class="admin-layout">
       <aside class="admin-sidebar">
-        <div class="admin-sidebar-label">管理后台</div>
+        <div class="admin-sidebar-label">
+          <BrandLogo :size="28" decorative /><span>管理后台</span>
+        </div>
         <nav aria-label="后台导航">
           <RouterLink
             v-for="(item, i) in menu"

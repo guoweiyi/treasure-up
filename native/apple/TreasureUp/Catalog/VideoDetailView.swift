@@ -123,8 +123,10 @@ struct VideoDetailView: View {
                 parts(video)
                 RelatedVideosView(videoId: video.id, creatorId: video.creators.first?.id)
                 Link(destination: URL(string: "https://github.com/guoweiyi/treasure-up")!) {
-                    Label("Treasure Up · 开源项目", systemImage: "chevron.left.forwardslash.chevron.right")
-                        .font(.footnote)
+                    HStack(spacing: 8) {
+                        BrandMark(size: 28)
+                        Text("Treasure Up · 开源项目").font(.footnote)
+                    }
                 }.padding(.top, 12)
             case .comments: VideoCommentsSection(videoId: video.id, isActive: page == .comments && !fullscreen && isPageVisible,
                 parts: video.parts, currentPartID: isCurrent ? playback.currentPart?.id : video.parts.first(where: { !$0.variants.isEmpty })?.id,

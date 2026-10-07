@@ -6,17 +6,23 @@ html:root {
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --accent: #16847a;
-  --accent-soft: #edf6f3;
+  --brand-ink: #303e7f;
+  --brand-blue: #789dde;
+  --brand-soft: #edf3ff;
+  --accent: var(--brand-ink);
+  --accent-hover: #263266;
+  --accent-soft: var(--brand-soft);
+  --accent-focus: #b7cdf0;
   --border: #e7e8ea;
   --muted: #767d85;
   --text: #18191c;
-  --el-color-primary: #16847a;
-  --el-color-primary-light-3: #5ca99f;
-  --el-color-primary-light-5: #8bc1ba;
-  --el-color-primary-light-7: #b9dad5;
-  --el-color-primary-light-9: #edf6f3;
-  --el-color-primary-dark-2: #126a62;
+  --el-color-primary: #303e7f;
+  --el-color-primary-light-3: #6e78a5;
+  --el-color-primary-light-5: #989fbf;
+  --el-color-primary-light-7: #c1c5d9;
+  --el-color-primary-light-8: #d6d8e5;
+  --el-color-primary-light-9: #edf3ff;
+  --el-color-primary-dark-2: #263266;
   --el-border-radius-base: 6px;
 }
 * {
@@ -65,7 +71,7 @@ button.primary {
   border-color: var(--accent);
 }
 button.primary:hover:not(:disabled) {
-  background: #126a62;
+  background: var(--accent-hover);
   color: #fff;
 }
 input:not([type='range']):not([type='checkbox']):not([type='color']),
@@ -86,7 +92,7 @@ textarea::placeholder {
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 2px solid #b9dad5;
+  outline: 2px solid var(--accent-focus);
   outline-offset: 1px;
 }
 input[type='checkbox'],

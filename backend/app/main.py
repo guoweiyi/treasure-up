@@ -28,7 +28,7 @@ from app.models import (Asset, AssetLocation, AuditLog, BackupSet, CaptureRun, C
 from app.security import (COOKIE_NAME, authenticated, create_session, encrypt_secret, hash_password,
                           require_admin, require_editor, reserve_password_attempt, verify_password, optional_identity)
 
-app = FastAPI(title="Treasure Up", version="0.3.2", docs_url=None, redoc_url=None, openapi_url=None,
+app = FastAPI(title="Treasure Up", version="0.3.3", docs_url=None, redoc_url=None, openapi_url=None,
               dependencies=[Depends(enforce_library_access)])
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[v.strip() for v in settings.allowed_hosts.split(",")])
 app.add_middleware(RequestBodyLimit)

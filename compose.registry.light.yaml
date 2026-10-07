@@ -2,4 +2,4 @@
 # compose.yaml collector, so changing the merged collector image alone is insufficient.
 services:
   worker:
-    image: ${TREASURE_BACKEND_IMAGE:-ghcr.io/guoweiyi/treasure-up-backend:0.3.2}
+    image: ${TREASURE_BACKEND_IMAGE:-ghcr.io/guoweiyi/treasure-up-backend:0.3.3}

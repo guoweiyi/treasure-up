@@ -33,7 +33,9 @@ jobs:
       - name: Deployment and release packaging tests
         env:
           TREASURE_RUN_COMPOSE_TESTS: '1'
-        run: .audit/bin/python -m pytest deploy/tests -q
+        run: |
+          python3 deploy/check_branding.py
+          .audit/bin/python -m pytest deploy/tests -q
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 25

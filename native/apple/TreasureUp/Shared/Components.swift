@@ -1,6 +1,78 @@
 import SwiftUI
 import ImageIO
 
+enum TreasureBrand {
+    static let name = "Treasure Up"
+    static let accent = Color("BrandAccent")
+    static let surface = Color("BrandSurface")
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+    static var build: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+    }
+}
+
+/// The original navy outline stays visible in both appearances on this light
+/// brand surface; never tint the supplied artwork as a template symbol.
+struct BrandMark: View {
+    var size: CGFloat = 44
+    var decorative = true
+    var body: some View {
+        Image("BrandMark").renderingMode(.original)
+            .resizable().scaledToFit()
+            .padding(size * 0.08)
+            .frame(width: size, height: size)
+            .background(TreasureBrand.surface, in: .rect(cornerRadius: size * 0.23))
+            .accessibilityLabel("Treasure Up 标志")
+            .accessibilityHidden(decorative)
+    }
+}
+
+struct BrandLockup: View {
+    var size: CGFloat = 148
+    var body: some View {
+        Image("BrandLockup").renderingMode(.original)
+            .resizable().scaledToFit()
+            .padding(12)
+            .frame(width: size, height: size)
+            .background(TreasureBrand.surface, in: .rect(cornerRadius: 24))
+            .accessibilityLabel(TreasureBrand.name)
+    }
+}
+
+struct BrandIdentity: View {
+    @ScaledMetric(relativeTo: .headline) private var markSize: CGFloat = 44
+    var title = TreasureBrand.name
+    var subtitle: String?
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            BrandMark(size: min(markSize, 64))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline).foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }.accessibilityElement(children: .combine)
+    }
+}
+
+struct BrandEmptyState: View {
+    let title: String
+    var message: String?
+    var body: some View {
+        ContentUnavailableView {
+            BrandMark(size: 76)
+            Text(appPrompt(title))
+        } description: {
+            if let message { Text(appPrompt(message)) }
+        }
+    }
+}
+
 extension View {
     @ViewBuilder func nativeGlassButton(prominent: Bool = false) -> some View {
         if #available(iOS 26.0, *) {

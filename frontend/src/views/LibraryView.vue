@@ -145,6 +145,7 @@ watch(() => route.fullPath, load, { immediate: true });
     </div>
     <EmptyState
       v-else
+      :branded="!q && !collection && !tag && !starred"
       :title="q || collection || tag || starred ? '没有匹配的视频' : '视频库还是空的'"
       :text="
         q || collection || tag || starred

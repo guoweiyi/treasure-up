@@ -11,7 +11,7 @@ import {
   loadAuthStatus,
 } from '../api';
 import type { User } from '../types';
-import UiIcon from '../components/UiIcon.vue';
+import BrandLogo from '../components/BrandLogo.vue';
 import { loginDestination } from '../utils/accessPolicy';
 import {
   getPasskeyCapabilities,
@@ -92,8 +92,11 @@ async function login() {
 <template>
   <main class="login-page">
     <form class="login-card" :aria-busy="busy" @submit.prevent="login">
-      <div class="brand">
-        <span class="brand-mark"><UiIcon name="play" /></span><span>{{ display.site_name }}</span>
+      <div class="login-brand">
+        <BrandLogo variant="lockup" :size="164" surface="paper" />
+        <p v-if="display.site_name !== 'Treasure Up'" class="login-site-name">
+          {{ display.site_name }}
+        </p>
       </div>
       <h1>{{ initialized ? '登录视频库' : '准备你的视频库' }}</h1>
       <p class="login-intro">
@@ -196,8 +199,23 @@ async function login() {
 .login-card {
   width: 430px;
 }
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.login-site-name {
+  margin: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--brand-ink);
+  font-size: 17px !important;
+  font-weight: 600;
+}
 .login-card h1 {
   margin-bottom: 8px;
+  margin-top: 22px;
 }
 .login-intro {
   color: #9499a0;

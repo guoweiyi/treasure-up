@@ -287,8 +287,8 @@
   border-radius: 9px;
 }
 .collection-card:hover {
-  border-color: #b9d4cb;
-  background: #fafcfb;
+  border-color: var(--accent-focus);
+  background: #f7f9ff;
 }
 .collection-card > div:not(.folder-icon) {
   min-width: 0;

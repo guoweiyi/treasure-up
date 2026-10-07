@@ -11,7 +11,7 @@ struct ServerConnectionView: View {
         Form {
             Section {
                 VStack(alignment: .leading, spacing: 14) {
-                    Image(systemName: "play.rectangle.on.rectangle.fill").font(.system(size: 46)).foregroundStyle(.indigo)
+                    BrandLockup(size: 164)
                     Text(appPrompt("你的收藏，原生呈现。")).font(.title.bold())
                     Text(appPrompt("连接 Treasure Up，浏览已归档的视频、片单与创作者。")).foregroundStyle(.secondary)
                 }.padding(.vertical, 16)
@@ -52,8 +52,8 @@ struct LoginView: View {
     var body: some View {
         Form {
             Section {
-                Label(appPrompt(requiresLogin ? "登录后浏览你的资料库" : "登录后同步你的片单和播放进度"), systemImage: "person.crop.circle.badge.checkmark")
-                    .font(.headline).padding(.vertical, 12)
+                BrandIdentity(subtitle: appPrompt(requiresLogin ? "登录后浏览你的资料库" : "登录后同步你的片单和播放进度"))
+                    .padding(.vertical, 12)
                 TextField("用户名", text: $username).textContentType(.username)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.next)
                     .onSubmit { passwordFocused = true }.accessibilityIdentifier("loginUsername")
@@ -102,7 +102,7 @@ struct SettingsView: View {
             Section {
                 if let user = api.user {
                     Label { VStack(alignment: .leading, spacing: 4) { Text(user.username).font(.headline); Text(roleName(user.role)).font(.caption).foregroundStyle(.secondary) } } icon: {
-                        Image(systemName: "person.crop.circle.fill").font(.largeTitle).foregroundStyle(.indigo)
+                        Image(systemName: "person.crop.circle.fill").font(.largeTitle).foregroundStyle(TreasureBrand.accent)
                     }.padding(.vertical, 6)
                     NavigationLink { SavedPlaylistsView() } label: { Label("收藏片单", systemImage: "bookmark") }
                     NavigationLink { AccountSecurityView() } label: { Label("账户与安全", systemImage: "lock.shield") }
@@ -126,7 +126,9 @@ struct SettingsView: View {
                 Button("切换服务器", systemImage: "network") { serverPresented = true }
             }
             Section("关于") {
-                LabeledContent("Treasure Up", value: "0.4.0")
+                HStack { Spacer(); BrandLockup(); Spacer() }.padding(.vertical, 8)
+                LabeledContent("版本", value: TreasureBrand.version)
+                LabeledContent("构建", value: TreasureBrand.build)
                 Text(appPrompt("为 iPhone 和 iPad 设计")).foregroundStyle(.secondary)
                 Link(destination: URL(string: "https://github.com/guoweiyi/treasure-up")!) { Label("开源项目 · GitHub", systemImage: "chevron.left.forwardslash.chevron.right") }
                 Text(appPrompt("HDR、杜比视界及杜比全景声的实际呈现取决于片源、设备与当前播放输出。"))

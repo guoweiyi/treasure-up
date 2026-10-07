@@ -13,7 +13,8 @@ struct SavedPlaylistsView: View {
         Group {
             if api.user == nil {
                 ContentUnavailableView {
-                    Label(appPrompt("收藏属于你的好视频"), systemImage: "bookmark")
+                    BrandMark(size: 76)
+                    Text(appPrompt("收藏属于你的好视频"))
                 } description: { Text(appPrompt("登录后创建片单，记录观看状态与收藏笔记。")) } actions: {
                     Button("登录") { loginPresented = true }.buttonStyle(.borderedProminent)
                 }
@@ -25,7 +26,7 @@ struct SavedPlaylistsView: View {
                             NavigationLink { PlaylistDetailView(playlist: list) } label: {
                                 HStack(spacing: 14) {
                                     Image(systemName: list.kind == "watch_later" ? "clock.fill" : "rectangle.stack.fill")
-                                        .font(.title2).foregroundStyle(.indigo).frame(width: 44, height: 48)
+                                        .font(.title2).foregroundStyle(TreasureBrand.accent).frame(width: 44, height: 48)
                                     VStack(alignment: .leading, spacing: 5) {
                                         Text(list.name).font(.headline)
                                         Text("\(list.itemCount) 个视频 · \(list.unwatchedCount) 个未看").font(.caption).foregroundStyle(.secondary)
@@ -170,7 +171,7 @@ struct PlaylistDetailView: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button("移除", role: .destructive) { removal = video }
-                    Button("编辑") { select(video) }.tint(.indigo)
+                    Button("编辑") { select(video) }.tint(TreasureBrand.accent)
                 }
                 .swipeActions(edge: .leading) {
                     Button(video.playlistItem?.watched == true ? "标为未看" : "标为已看", systemImage: "checkmark") {

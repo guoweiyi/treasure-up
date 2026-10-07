@@ -44,10 +44,15 @@ struct VideoLibraryView: View {
                 if let creatorProfile { CreatorProfileHeader(creator: creatorProfile) }
                 let headerLayout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12)) : AnyLayout(HStackLayout(alignment: .firstTextBaseline))
                 headerLayout {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(query.isEmpty ? (creatorProfile == nil ? "你的珍藏" : "已归档作品") : "搜索结果").font(.title3.bold())
-                        Text(loading && videos.isEmpty ? appPrompt("正在加载…") : "\(total) 个已保存视频")
-                            .font(.subheadline).foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        if creatorProfile == nil && collectionId == nil && creatorId == nil && !starredOnly {
+                            BrandMark(size: 48)
+                        }
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(query.isEmpty ? (creatorProfile == nil ? "你的珍藏" : "已归档作品") : "搜索结果").font(.title3.bold())
+                            Text(loading && videos.isEmpty ? appPrompt("正在加载…") : "\(total) 个已保存视频")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
                     }
                     if !typeSize.isAccessibilitySize { Spacer() }
                     Menu {
@@ -67,7 +72,7 @@ struct VideoLibraryView: View {
                 if let error, videos.isEmpty { FailureView(message: error) { await load() } }
                 if loading && videos.isEmpty { ProgressView().frame(maxWidth: .infinity).padding(60) }
                 else if videos.isEmpty && error == nil {
-                    ContentUnavailableView(appPrompt(query.isEmpty ? "还没有视频" : "没有匹配的视频"), systemImage: "rectangle.stack", description: Text(appPrompt("调整搜索或筛选条件，或在管理中心添加归档来源。")))
+                    BrandEmptyState(title: query.isEmpty ? "还没有视频" : "没有匹配的视频", message: "调整搜索或筛选条件，或在管理中心添加归档来源。")
                 }
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
                     ForEach(videos) { video in
@@ -170,7 +175,7 @@ struct CollectionsView: View {
             if loading { ProgressView().frame(maxWidth: .infinity) }
             if hasMore && items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
         }
-        .overlay { if !loading && error == nil && items.isEmpty { ContentUnavailableView(appPrompt("暂无收藏与订阅"), systemImage: "square.stack") } }
+        .overlay { if !loading && error == nil && items.isEmpty { BrandEmptyState(title: "暂无收藏与订阅") } }
         .navigationTitle("收藏与订阅")
         .task { await load() }.refreshable { await load() }
     }
@@ -224,7 +229,7 @@ struct CreatorsView: View {
             if loading { ProgressView().frame(maxWidth: .infinity) }
             if hasMore && items.count < total { Button("载入更多") { Task { await load(more: true) } }.disabled(loading) }
         }
-        .overlay { if items.isEmpty && !loading && error == nil { ContentUnavailableView(appPrompt(query.isEmpty ? "暂无 UP 主" : "没有匹配的 UP 主"), systemImage: "person.crop.circle.badge.questionmark", description: Text(appPrompt("可以尝试调整搜索关键词。"))) } }
+        .overlay { if items.isEmpty && !loading && error == nil { BrandEmptyState(title: query.isEmpty ? "暂无 UP 主" : "没有匹配的 UP 主", message: "可以尝试调整搜索关键词。") } }
         .navigationTitle("UP 主")
         .searchable(text: $query, prompt: "搜索 UP 主")
         .scrollDismissesKeyboard(.interactively)

@@ -2,7 +2,7 @@
   display: grid;
   grid-template-columns: 192px minmax(0, 1fr);
   min-height: calc(100vh - 64px);
-  background: #f6f7f5;
+  background: #f6f8fc;
 }
 .admin-sidebar {
   background: #fff;
@@ -12,6 +12,9 @@
   flex-direction: column;
 }
 .admin-sidebar-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: #969696;
   font-size: 11px;
   padding: 0 14px 20px;

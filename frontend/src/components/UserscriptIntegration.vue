@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { ElDialog, ElMessage, ElMessageBox } from 'element-plus';
 import { api, date, errorText, statusText } from '../api';
 import type { Page } from '../types';
+import BrandLogo from './BrandLogo.vue';
 import {
   newUserscriptTokenForm,
   userscriptFlags,
@@ -40,7 +41,7 @@ const issued = ref<{ item: UserscriptToken; token: string } | null>(null);
 const revokedHere = ref(new Set<string>());
 const form = reactive(newUserscriptTokenForm());
 const origin = window.location.origin;
-const scriptVersion = '1.2.0';
+const scriptVersion = '1.3.0';
 const scriptSource = ref(''),
   scriptLoading = ref(false),
   scriptOpen = ref(false);
@@ -265,6 +266,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="userscript-integration" aria-labelledby="userscript-title">
     <header class="integration-header">
+      <BrandLogo :size="36" decorative />
       <div>
         <h2 id="userscript-title">安装与连接</h2>
       </div>
@@ -609,10 +611,13 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .userscript-integration {
-  --integration-accent: var(--accent, #16847a);
-  color: #253432;
+  --integration-accent: var(--accent, #303e7f);
+  color: #253049;
 }
 .integration-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 24px;
 }
 .integration-eyebrow {
@@ -643,9 +648,9 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   gap: 14px;
   padding: 22px;
-  border: 1px solid #e5ece8;
+  border: 1px solid #e3e9f4;
   border-radius: 12px;
-  background: #fafcfb;
+  background: #f8faff;
 }
 .step-number {
   display: grid;
@@ -654,7 +659,7 @@ onBeforeUnmount(() => {
   height: 28px;
   border-radius: 50%;
   color: var(--integration-accent);
-  background: #eaf3ef;
+  background: var(--brand-soft);
   font-size: 12px;
   font-weight: 600;
 }
@@ -780,8 +785,8 @@ onBeforeUnmount(() => {
 .userscript-integration button:hover,
 .token-form button:hover,
 .issued-token button:hover {
-  border-color: #b2c9bc;
-  color: #16847a;
+  border-color: var(--accent-focus);
+  color: var(--integration-accent);
 }
 .userscript-integration button:disabled,
 .token-form button:disabled {
@@ -791,8 +796,8 @@ onBeforeUnmount(() => {
 .userscript-integration .integration-primary,
 .token-form .integration-primary,
 .issued-token .integration-primary {
-  background: #16847a;
-  border-color: #16847a;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
 }
 .integration-primary:hover {
@@ -853,8 +858,8 @@ onBeforeUnmount(() => {
   color: #8a928d;
 }
 .token-status.active {
-  color: #16847a;
-  background: #eaf6f1;
+  color: var(--accent);
+  background: var(--brand-soft);
 }
 .token-status.expired,
 .token-status.unknown {
@@ -951,8 +956,8 @@ onBeforeUnmount(() => {
 .token-form input:focus,
 .token-form select:focus,
 .issued-token textarea:focus {
-  outline: 2px solid rgb(22 132 122 / 14%);
-  border-color: #16847a;
+  outline: 2px solid var(--accent-focus);
+  border-color: var(--accent);
 }
 .token-form-grid {
   display: grid;
@@ -992,7 +997,7 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 .token-policy-options input {
-  accent-color: #16847a;
+  accent-color: var(--accent);
 }
 .token-form-help {
   margin: 9px 0 16px;

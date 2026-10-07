@@ -4,7 +4,6 @@
 .mobile-account-menu {
   display: none;
 }
-.brand-mark,
 .header-search,
 .cover-link {
   border-radius: 5px;
@@ -350,6 +349,9 @@
     padding-bottom: 8px;
   }
   .topbar:has(~ .mobile-navigation) > nav {
+    display: none;
+  }
+  .topbar:has(~ .mobile-navigation) .brand-name {
     display: none;
   }
   .topbar .header-search input {

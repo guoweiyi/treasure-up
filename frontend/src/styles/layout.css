@@ -13,27 +13,21 @@
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
   font-weight: 650;
   font-size: 21px;
   white-space: nowrap;
-  color: #273d37;
+  color: var(--brand-ink);
   letter-spacing: -0.5px;
+  min-width: 0;
 }
 .brand-mark {
-  display: inline-flex;
-  width: 29px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  background: var(--accent);
-  border-radius: 8px;
+  --brand-logo-size: 44px;
 }
-.brand-mark .ui-icon {
-  width: 21px;
-  height: 21px;
-  stroke-width: 1.9;
+.brand-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .topbar nav {
   display: flex;
@@ -62,7 +56,7 @@
   flex: 1;
   height: 38px;
   margin: 0 auto;
-  background: #f4f6f3;
+  background: #f2f5fc;
   border: 1px solid transparent;
   border-radius: 7px;
   padding: 3px 4px;
@@ -213,28 +207,46 @@
   font-weight: 400;
 }
 .site-footer {
-  text-align: center;
-  color: #b3b7bd;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
   font-size: 12px;
   padding: 25px;
 }
-.site-footer span {
-  padding: 0 9px;
+.footer-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--brand-ink);
+  min-width: 0;
+  max-width: 100%;
+}
+.footer-brand span {
+  overflow-wrap: anywhere;
+}
+.footer-separator {
+  color: #aebbd6;
 }
 .login-page {
   min-height: 100vh;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 28px;
-  background: #f6f7f8;
+  background: radial-gradient(ellipse at 50% 0, #edf3ff, #f7f9fe 65%);
 }
 .login-card {
   width: 400px;
+  min-width: 0;
   max-width: 100%;
   padding: 36px;
   background: #fff;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 16px;
+  box-shadow: 0 12px 42px #303e7f0a;
 }
 .login-card h1 {
   font-size: 23px;

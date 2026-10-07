@@ -1,16 +1,18 @@
 # Treasure Up
 
+<p align="center"><img src="frontend/public/brand/logo-lockup.png" width="220" alt="Treasure Up" /></p>
+
 一个部署在自己服务器上的 B 站视频归档库。默认登录后浏览和播放，管理员可在后台开启游客访问；个人片单、进度保存与管理操作需要登录。保存视频、多 P、弹幕、字幕、评论和公开人员资料。
 
 技术栈：Vue 3 / TypeScript / Artplayer / hls.js、FastAPI、PostgreSQL 17、Celery / Redis、FFmpeg、Nginx。媒体支持本地磁盘、S3 兼容对象存储和原生阿里云 OSS；B 站 Cookie 与独立刷新令牌只在服务端加密保存。
 
-**当前版本为已发布的 [0.3.2 技术预览（preview）](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.2)。** 新增 GitHub 自动发版、双架构 Docker 镜像和客户端打包流程。Docker 负责采集、存储和媒体处理，客户端只连接自己的服务。研究依据与验收边界见 [0.3 说明](docs/v0.3-research-and-plan.md)，上一版记录见 [0.2 实施状态](docs/implementation-status.md)。真实 S3 / OSS 桶、在线采集及原生设备兼容仍需分别验收。
+**本次版本为 [0.3.3 技术预览（preview）](https://github.com/guoweiyi/treasure-up/releases/tag/v0.3.3)，iOS / iPadOS 客户端为 0.4.3。** 新 logo 已适配网页、浏览器、PWA、离线页、选片助手和原生客户端。Docker 负责采集、存储和媒体处理，客户端连接自己的服务。
 
-[本版说明与下载选择](docs/releases/v0.3.2.md) 包含各平台安装包、签名状态和升级方式；[自动发版指南](docs/ci-cd.md) 说明版本准备、流水线、镜像权限和失败恢复。
+[本版说明与下载选择](docs/releases/v0.3.3.md) 包含更新内容、安装包和升级方式；[品牌资源说明](assets/branding/README.md) 记录原图、透明母图及尺寸生成方法。
 
 ## 预构建镜像部署
 
-需要 Docker Compose v2 和 Python 3.10+。从目标 Release 下载 `treasure-up-v0.3.2-docker.zip`，解压进入包内目录后运行：
+需要 Docker Compose v2 和 Python 3.10+。从目标 Release 下载 `treasure-up-v0.3.3-docker.zip`，解压进入包内目录后运行：
 
 ```bash
 python deploy/start.py --prebuilt
@@ -18,7 +20,7 @@ python deploy/start.py --prebuilt
 python deploy/start.py --prebuilt --light
 ```
 
-部署包不需要本地编译，默认固定本次验证过的多架构镜像摘要；保留原 `.env` 和数据卷升级。本仓库的 GHCR backend / web 两个包现已 Public，可匿名拉取。新 fork 或新包首次创建默认私有，需所有者分别设为 Public，或使用有权限的账号执行 `docker login ghcr.io`。当前预览通道更新 `preview`，不会更新 `latest`。详见 [预构建部署与故障处理](docs/ci-cd.md)。
+部署包不需要本地编译，默认固定本次验证过的多架构镜像摘要；保留原 `.env` 和数据卷升级。本仓库的 GHCR backend / web 两个包现已 Public，可匿名拉取。新 fork 或新包首次创建默认私有，需所有者分别设为 Public，或使用有权限的账号执行 `docker login ghcr.io`。当前预览通道更新 `preview`，不会更新 `latest`。升级说明见本版 Release。
 
 ## 从源码本机启动
 
@@ -48,11 +50,11 @@ docker compose up -d --no-deps --no-build --wait api
 
 这会同步精确域名白名单、登录 / 通行密钥 Origin、RP ID、安全 Cookie 和通行密钥开关；不更换账号密码、加密密钥、端口或数据。外层代理应保留浏览器的 `Host`（包括非默认端口）。以后更换域名时重复执行；已有通行密钥绑定原 RP 域名，新域名需要使用密码登录后重新注册。
 
-如果穿透服务暂时仅提供 HTTP，显式运行 `python deploy/bootstrap.py --origin http://video.example.com --allow-http` 后按上面命令重建 API。该模式保留密码登录，禁用不受浏览器支持的远程 HTTP 通行密钥；HTTP 不加密登录凭据和会话，长期使用请为穿透入口配置 HTTPS。完整说明及预构建镜像命令见[运维说明](docs/operations.md#反向代理与内网穿透)。
+如果穿透服务暂时仅提供 HTTP，显式运行 `python deploy/bootstrap.py --origin http://video.example.com --allow-http` 后按上面命令重建 API。该模式保留密码登录，禁用不受浏览器支持的远程 HTTP 通行密钥；HTTP 不加密登录凭据和会话，长期使用请为穿透入口配置 HTTPS。预构建部署升级时仍使用 `python deploy/start.py --prebuilt`。
 
 ## 已提供的功能
 
-以下包含当前源码的迭代内容，尚未全部加入公开 Release。当前操作说明从[文档导航](docs/README.md)进入；[访问设置、账号安全、UP 页面采集和元数据刷新](docs/access-and-capture.md)单独说明。油猴选片助手已更新到 1.2.0。
+浏览器选片助手已更新到 1.3.0，可在后台“浏览器采集”下载安装，并使用专用令牌连接服务。
 
 - 视频库、收藏夹、UP 主目录和独立主页，支持标题、标签、昵称及历史昵称搜索。
 - 稍后看与自定义片单、已看状态、个人备注、移动和列表播放；原个人星标兼容迁入稍后看。
@@ -61,10 +63,10 @@ docker compose up -d --no-deps --no-build --wait api
 - 原档优先播放、长视频无损 fMP4 HLS 分片、受限缓冲、可选播放音量平衡；杜比视界 / 全景声按媒体证据标注。
 - 有数量和素材预算的热门评论归档，评论与楼中楼按需加载、表情行内显示，附图站内预览；人工标注与来源数据分离。
 - 后台账号与凭据轮换、UP / 收藏来源、检查历史和新增统计、任务暂停 / 继续 / 重试、存储配置 / 探测 / 迁移、备份记录、系统配置、用户权限与审计。
-- B 站扫码授权，或手动填写 Cookie 与配套的 `refresh_token` / `ac_time_value`；正常每 24 小时检查续期，只有上游要求时才轮换，支持自动开关和手动检查。[会话续期与故障恢复](docs/bilibili-session-research.md)说明确认重试、重新授权和备份恢复后的行为，不承诺永久在线。
+- B 站扫码授权，或手动填写 Cookie 与配套的 `refresh_token` / `ac_time_value`；正常每 24 小时检查续期，只有上游要求时才轮换，支持自动开关和手动检查。会话续期支持确认重试、重新授权和备份恢复后的行为，不承诺永久在线。
 - 账号密码与通行密钥登录；账户安全支持改密码和会话撤销，保留本机重置入口。
 - B 站来源标签与人工标签分离；UP / 置顶评论标识；编辑者可在 UP 主页筛选最新投稿和充电视频进行采集。
-- [浏览器选片助手](docs/browser-collector.md)：油猴脚本勾选 B 站视频，使用可撤销的专用令牌批量提交采集，后台统一处理与去重。
+- 浏览器选片助手：油猴脚本勾选 B 站视频，使用可撤销的专用令牌批量提交采集，后台统一处理与去重。
 - 可安装 Web 应用及 [iOS / iPadOS 原生客户端](native/README.md)：纯 Swift App 直接使用后端 API，提供 iPad 分栏和原生播放器。客户端目录仅保留 iOS 工程，不执行服务器采集任务；真机签名、设备适配与商店分发有独立验收要求。
 - 可恢复任务检查点、批量下载限速、过期任务接管与旧 Worker 提交隔离。
 - 封面、人员资料、评论、弹幕等元数据先于媒体下载；下载、兼容副本独立任务，原档无需等待转码即可播放。
@@ -81,13 +83,9 @@ docker compose up -d --no-deps --no-build --wait api
 
 ## 部署与维护
 
-[运维说明](docs/operations.md) 包含存储参数、备份密钥、恢复、升级与验证命令。不要使用 `docker compose down -v` 卸载日常服务，它会删除持久卷。
+升级时保留 `.env`、加密密钥、媒体和数据卷。不要使用 `docker compose down -v` 卸载日常服务，它会删除持久卷。
 
-[自动发版指南](docs/ci-cd.md) 说明推送版本标签或手动选择已有标签后，如何运行回归、打包客户端并推送 GHCR 镜像。维护者的 `deploy/release.py prepare` 需要 Python 3.11+；用户部署入口 `deploy/start.py` 仍只需 Python 3.10+。当前客户端流水线仅构建 iOS / iPadOS，附件为临时签名的模拟器包，不是真机 IPA。已发布版本的历史附件保持原样。
-
-[2026-10-04 代码审计](docs/code-review-2026-10-04.md) 记录本轮安全与并发修复、性能验证、依赖公告及尚未覆盖的验收范围。
-
-[浏览与采集体验迭代](docs/experience-2026-10-04.md) 说明访客播放、来源选择、独立下载队列、个人星标和移动播放器的改动与验收边界。
+维护者使用 Python 3.11+ 运行 `python deploy/release.py prepare vX.Y.Z --channel preview`，补完对应 Release 说明并运行 `python deploy/release.py check vX.Y.Z` 后推送版本标签。GitHub Actions 验证前后端、iPhone / iPad 离线回归及品牌资产，再构建双架构镜像和附件；全部通过后公开版本。当前 iOS 附件是临时签名的模拟器包，真机分发需独立开发签名。用户部署入口仍只需 Python 3.10+。
 
 `.env`、`.private/`、媒体、运行数据、依赖及日志均不提交。首次部署创建空库；仓库不包含账号 Cookie、演示视频或个人收藏数据。此前 Node 实验仅保留在原工作区，不属于本项目运行依赖。
 
@@ -97,10 +95,11 @@ docker compose up -d --no-deps --no-build --wait api
 python -m venv .venv
 # 激活虚拟环境后：
 python -m pip install -r backend/requirements.lock
-python -m pytest
+python -m pytest -c backend/pytest.ini backend/tests
 npm --prefix frontend ci
 npm --prefix frontend run test
 npm --prefix frontend run build
+python deploy/check_branding.py
 python -m pytest deploy/tests -q
 ```
 

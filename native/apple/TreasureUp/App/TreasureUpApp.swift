@@ -16,7 +16,7 @@ struct TreasureUpApp: App {
             appContent
                 .environment(api)
                 .environment(playback)
-                .tint(.indigo)
+                .tint(TreasureBrand.accent)
         }
     }
 
@@ -70,7 +70,11 @@ struct RootView: View {
     var body: some View {
         Group {
             if connecting {
-                ProgressView(appPrompt("正在连接资料库…")).frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 20) {
+                    BrandMark(size: 104)
+                    Text(TreasureBrand.name).font(.title2.bold())
+                    ProgressView(appPrompt("正在连接资料库…"))
+                }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !api.isConnected {
                 NavigationStack { ServerConnectionView(initialError: connectionError) }
             } else if api.user == nil && !api.allowGuestAccess {
@@ -97,8 +101,15 @@ struct RootView: View {
     @ViewBuilder private var navigation: some View {
         if UIDevice.current.userInterfaceIdiom == .pad {
             NavigationSplitView(columnVisibility: $splitVisibility) {
-                List(AppSection.allCases, selection: $selection) { section in
-                    Label(section.title, systemImage: section.symbol).tag(section)
+                List(selection: $selection) {
+                    Section {
+                        ForEach(AppSection.allCases) { section in
+                            Label(section.title, systemImage: section.symbol).tag(section)
+                        }
+                    } header: {
+                        BrandIdentity(title: api.siteName, subtitle: "视频归档与珍藏")
+                            .textCase(nil).padding(.vertical, 8)
+                    }
                 }
                 .navigationTitle(api.siteName)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)

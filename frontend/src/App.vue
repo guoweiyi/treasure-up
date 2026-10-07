@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { session, sessionRevision, display, write, errorText } from './api';
 import UiIcon from './components/UiIcon.vue';
+import BrandLogo from './components/BrandLogo.vue';
 import { inNativeShell } from './client';
 import { requiresLogin } from './utils/accessPolicy';
 const route = useRoute(),
@@ -65,8 +66,8 @@ async function logout() {
 <template>
   <header v-if="route.path !== '/login'" class="topbar">
     <RouterLink class="brand" to="/" :aria-label="`${display.site_name} 首页`"
-      ><span class="brand-mark"><UiIcon name="play" /></span
-      ><span>{{ display.site_name }}</span></RouterLink
+      ><BrandLogo class="brand-mark" decorative />
+      <span class="brand-name">{{ display.site_name }}</span></RouterLink
     >
     <nav aria-label="主导航">
       <RouterLink
@@ -146,12 +147,15 @@ async function logout() {
     >切换服务器</a
   >
   <footer v-if="route.path !== '/login' && !route.path.startsWith('/admin')" class="site-footer">
-    {{ display.site_name }} <span>·</span> 私人视频库
+    <RouterLink class="footer-brand" to="/" :aria-label="`${display.site_name} 首页`">
+      <BrandLogo :size="30" decorative /><span>{{ display.site_name }}</span>
+    </RouterLink>
+    <span class="footer-separator" aria-hidden="true">·</span><span>私人视频库</span>
   </footer>
 </template>
 <style scoped>
 .login-link {
-  background: #222;
+  background: var(--brand-ink);
   color: #fff;
   border-radius: 6px;
   padding: 7px 18px;
