@@ -136,7 +136,7 @@ volumes:
 3. 在原目录运行 `docker compose pull`，随后 `docker compose up -d --wait --wait-timeout 180`。轻量模式或自定义挂载沿用原 `-f` 参数。
 4. 检查 `docker compose ps` 和网页，确认登录、视频库及播放正常。
 
-新部署包使用镜像摘要锁定本次版本。已有 `.env` 如果设置过 `TREASURE_BACKEND_IMAGE` / `TREASURE_WEB_IMAGE`，它们会覆盖包内默认值；使用官方包升级时移除旧镜像覆盖，其他配置保持不变。数据库迁移由 `init` 执行，失败时后续服务不会被当作初始化成功。
+新部署包直接使用镜像摘要锁定本次版本，不再读取旧 `.env` 中的 `TREASURE_BACKEND_IMAGE` / `TREASURE_WEB_IMAGE` 镜像覆盖字段；使用官方部署包时可以移除这两个旧字段，其他配置保持不变。不要再叠加旧版 `compose.registry*.yaml`。数据库迁移由 `init` 执行，失败时后续服务不会被当作初始化成功。
 
 应用备份与 `.env` 都应保存到独立位置。不要只备份容器可写层，也不要把 Redis 当作数据库备份。跨大版本回退可能涉及数据库结构，不能只把镜像标签改回去；保留升级前的可恢复备份。
 
