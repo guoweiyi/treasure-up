@@ -296,6 +296,11 @@ final class FullscreenPresentationIntegrationTests: XCTestCase {
             !state.isPresented && presentation.controller.parent === originalContainer &&
             reopened.presentingViewController == nil
         }
+        await waitUntil("The second dismissal must also restore window and scene orientation") {
+            abs(window.bounds.width - originalWindowSize.width) < 2 &&
+            abs(window.bounds.height - originalWindowSize.height) < 2 &&
+            scene.interfaceOrientation == originalOrientation
+        }
         XCTAssertEqual(playback.currentVideo?.id, source.id)
     }
 

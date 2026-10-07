@@ -159,21 +159,31 @@ final class PlayerPresentationAnchor: UIViewController {
         let scene = controller.view.window?.windowScene
         let restore = originalOrientation
         controller.dismiss(animated: animated) { [self, weak controller] in
-            guard let controller, fullscreen === controller else { return }
-            fullscreen = nil
-            presentationToken = nil
-            phase = .idle
-            // A fresh false→true binding edge during dismissal is a new request.
-            // Do not overwrite it with the completion of the old presentation.
-            if requested && !tornDown {
-                schedulePresentationUpdate()
-            } else {
-                if !tornDown, UIDevice.current.userInterfaceIdiom == .pad,
-                   restore != .unknown, scene?.interfaceOrientation != restore {
-                    view.window?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-                    scene?.requestGeometryUpdate(.iOS(interfaceOrientations: PlayerFullscreenGeometry.mask(for: restore)))
+            // UIKit still owns its orientation transaction inside this callback.
+            // Finish on the next main-queue turn before requesting scene geometry.
+            DispatchQueue.main.async { [self, weak controller] in
+                guard let controller, fullscreen === controller else { return }
+                fullscreen = nil
+                presentationToken = nil
+                phase = .idle
+                // A fresh false→true binding edge during dismissal is a new request.
+                // Do not overwrite it with the completion of the old presentation.
+                if requested && !tornDown {
+                    schedulePresentationUpdate()
+                } else {
+                    if !tornDown, let scene, let window = viewIfLoaded?.window,
+                       window.windowScene === scene, restore != .unknown,
+                       scene.interfaceOrientation != restore {
+                        let root = window.rootViewController
+                        root?.setNeedsUpdateOfSupportedInterfaceOrientations()
+                        if #available(iOS 26.0, *) { root?.setNeedsUpdateOfPrefersInterfaceOrientationLocked() }
+                        // iPhone can restore window bounds while leaving its scene
+                        // landscape after a locked full-screen presentation. Both
+                        // device families need the same explicit scene restoration.
+                        scene.requestGeometryUpdate(.iOS(interfaceOrientations: PlayerFullscreenGeometry.mask(for: restore)))
+                    }
+                    completeCloseRequest()
                 }
-                completeCloseRequest()
             }
         }
     }
