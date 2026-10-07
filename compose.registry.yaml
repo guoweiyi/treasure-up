@@ -1,7 +1,7 @@
 # Source checkout override; release deployment bundles already select these images.
 # Pull first, then up --no-build --pull never; never build over release image tags.
 x-registry-backend: &registry-backend
-  image: ${TREASURE_BACKEND_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-backend:0.3.4}
+  image: ${TREASURE_BACKEND_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-backend:0.3.5}
 
 services:
   init: *registry-backend
@@ -12,4 +12,4 @@ services:
   media-worker: *registry-backend
   backup-worker: *registry-backend
   web:
-    image: ${TREASURE_WEB_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-web:0.3.4}
+    image: ${TREASURE_WEB_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-web:0.3.5}

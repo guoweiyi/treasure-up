@@ -1,4 +1,5 @@
 {
-  "version": "0.3.4",
-  "channel": "preview"
+  "version": "0.3.5",
+  "channel": "stable",
+  "distribution": "dockerhub"
 }
