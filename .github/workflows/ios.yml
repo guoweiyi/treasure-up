@@ -124,6 +124,7 @@ jobs:
         with:
           name: treasure-up-ios-simulator
           path: native/ios-simulator.zip
+          overwrite: true
           if-no-files-found: error
           include-hidden-files: false
           compression-level: 0
@@ -131,7 +132,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ios-test-results-${{ matrix.device }}
+          name: ios-test-results-${{ matrix.device }}-attempt-${{ github.run_attempt }}
           path: native/apple/build/TestResults-${{ matrix.device }}.xcresult
           if-no-files-found: warn
           include-hidden-files: false
