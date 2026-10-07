@@ -19,6 +19,10 @@ on:
       revision:
         required: true
         type: string
+      reuse_existing:
+        description: Reuse already-promoted immutable images when retrying an existing version.
+        type: boolean
+        default: false
 permissions:
   contents: read
 env:
@@ -29,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      reused: ${{ steps.reuse.outputs.reused }}
+      reused: ${{ steps.reuse.outputs.reused || 'false' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -42,6 +46,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Reuse immutable images only when their revision and both platforms match
+        if: inputs.reuse_existing
         id: reuse
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -106,14 +111,16 @@ jobs:
           cache-from: type=gha,scope=release-web-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-web-${{ matrix.arch }}
       - name: Test the exact images before registry upload
+        env:
+          VERSION: ${{ inputs.version }}
+          TREASURE_RUN_INSTALL_TESTS: '1'
         run: |
+          docker run --rm "treasure-up-backend:$VERSION" python -m compileall -q app
           python3 deploy/setup.py
-          docker compose up -d --no-build --wait --wait-timeout 180
-          docker compose exec -T api python -m compileall -q app
-          python3 deploy/check_service.py
-      - name: Stop isolated test services
-        if: always()
-        run: docker compose down
+          docker compose pull postgres redis
+          python3 -m venv .image-checks
+          .image-checks/bin/python -m pip install pytest==9.1.1 PyYAML==6.0.3
+          .image-checks/bin/python -m pytest deploy/tests/test_install_container.py -q
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: docker.io

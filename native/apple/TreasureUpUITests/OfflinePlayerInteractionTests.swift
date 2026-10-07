@@ -1,7 +1,7 @@
 import XCTest
 
 /// Run directly with -only-testing:TreasureUpUITests/OfflinePlayerInteractionTests.
-/// These tests opt into the DEBUG simulator fixture, never the live smoke path.
+/// These tests use the DEBUG simulator fixture without a configured server.
 @MainActor
 final class OfflinePlayerInteractionTests: XCTestCase {
     private var launchedApp: XCUIApplication?

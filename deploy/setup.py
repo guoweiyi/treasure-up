@@ -71,7 +71,7 @@ def normalize_bind_address(value):
     return str(address)
 
 
-def configure_site(output, *, origin=None, bind_address=None, allow_http=False, stream=None):
+def configure_site(output, *, origin=None, bind_address=None, port=None, allow_http=False, stream=None):
     """Explicitly change only site policy in an existing environment file."""
     output, stream = Path(output), stream or sys.stdout
     values = {}
@@ -86,6 +86,10 @@ def configure_site(output, *, origin=None, bind_address=None, allow_http=False, 
         })
     if bind_address is not None:
         values["TREASURE_BIND_ADDRESS"] = normalize_bind_address(bind_address)
+    if port is not None:
+        if not 1 <= port <= 65535:
+            raise ValueError("Published port must be between 1 and 65535")
+        values["TREASURE_PORT"] = str(port)
     if not values:
         return False
     if output.is_symlink() or not stat.S_ISREG(output.stat().st_mode):

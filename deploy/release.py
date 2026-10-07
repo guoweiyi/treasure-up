@@ -24,6 +24,16 @@ VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 REGISTRY_VERSION = r"(treasure-up-(?:backend|web):)[0-9]+\.[0-9]+\.[0-9]+"
 
 
+def release_changes(subjects):
+    """Use user-facing commit subjects; leave CI/version bookkeeping out of release notes."""
+    changes = []
+    for subject in subjects.splitlines():
+        match = re.fullmatch(r"(?:feat|fix|perf|refactor)(?:\([^)]*\))?!?:\s*(.+)", subject.strip())
+        if match and match[1] not in changes:
+            changes.append(match[1])
+    return "\n".join(f"- {change}" for change in changes) or "- 更新安装与使用体验。"
+
+
 def resolve_version(root, mode, requested=""):
     """Choose a monotonic version; retry only names an already-existing tag."""
     requested = requested.removeprefix("v")
@@ -115,11 +125,17 @@ def prepare(root, version, channel, *, automatic_notes=False):
             previous = subprocess.run(["git", "describe", "--tags", "--match", "v*", "--abbrev=0"],
                                       cwd=root, capture_output=True, text=True)
             revision_range = [f"{previous.stdout.strip()}..HEAD"] if previous.returncode == 0 else ["HEAD", "-20"]
-            changes = subprocess.check_output(["git", "log", "--no-merges", "--format=- %s (%h)",
-                                               *revision_range], cwd=root, text=True).strip()
-            planned[notes] = (f"# Treasure Up v{version}\n\n{changes or '- 发布当前通过验证的版本。'}\n\n"
-                              "升级前请备份数据库、.env 和媒体卷；保留原 .env 后更新镜像，不要删除数据卷。\n\n"
-                              "iOS 附件为未签名真机 IPA，需要自行签名后安装；详见 IOS-INSTALL.md。\n")
+            subjects = subprocess.check_output(["git", "log", "--no-merges", "--format=%s",
+                                                *revision_range], cwd=root, text=True, encoding="utf-8")
+            namespace = os.environ.get("DOCKERHUB_NAMESPACE", "yunyunjuan")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,38}", namespace):
+                raise ValueError("Invalid Docker Hub namespace")
+            planned[notes] = (f"# Treasure Up v{version}\n\n{release_changes(subjects)}\n\n"
+                              "Docker 安装，无需下载源码或 ZIP：\n\n```sh\n"
+                              "docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock "
+                              f"-v treasure-up-config:/config docker.io/{namespace}/treasure-up-backend:{version} python /app/install.py\n```\n\n"
+                              f"iPhone / iPad 请下载 `treasure-up-v{version}-ios-unsigned.ipa`，自行签名后安装；步骤见附件 `IOS-INSTALL.md`。\n\n"
+                              "升级前请备份数据库和配置，保留原数据卷，不要执行 `docker compose down -v`。\n")
         else:
             planned[notes] = f"# Treasure Up v{version}\n\n<!-- RELEASE_NOTES_REQUIRED -->\n\n填写本版变更和升级说明，再推送版本标签。\n"
     for path, content in planned.items():

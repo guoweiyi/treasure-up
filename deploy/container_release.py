@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 COMPONENTS = ("backend", "web")
 ARCHES = ("amd64", "arm64")
@@ -64,6 +65,17 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def verify_public_images(images):
+    """A successful authenticated push must not publish an installer users cannot pull."""
+    with tempfile.TemporaryDirectory(prefix="treasure-public-pull-") as anonymous_config:
+        for value in images.values():
+            try:
+                command("docker", "--config", anonymous_config, "manifest", "inspect",
+                        f"{value['image']}@{value['digest']}")
+            except ValueError:
+                raise ValueError("Anonymous Docker Hub pull failed; make both image repositories Public and retry") from None
+
+
 def push_candidates(ctx, arch, output):
     if arch not in ARCHES:
         raise ValueError("Unsupported platform")
@@ -77,6 +89,7 @@ def push_candidates(ctx, arch, output):
         command("docker", "tag", f"treasure-up-{component}:{ctx['tag'][1:]}", candidate)
         command("docker", "push", candidate)
         images[component] = {"image": image, "digest": inspect_digest(candidate)}
+    verify_public_images(images)
     write_json(output / f"{arch}.json", {**ctx, "arch": arch, "images": images})
 
 
@@ -216,6 +229,7 @@ def reuse_published_images(ctx, output):
             raise ValueError("Existing version belongs to another source revision; publish a new version")
         images[name] = {"image": image, "digest": digest, "reference": f"{image}@{digest}",
                         "platforms": [f"linux/{arch}" for arch in ARCHES]}
+    verify_public_images(images)
     write_json(output, {**ctx, "images": images})
     return True
 
@@ -224,6 +238,7 @@ def promote(ctx, path, channel):
     if channel not in {"preview", "stable"}:
         raise ValueError("Invalid release channel")
     data = read_images(path, ctx)
+    verify_public_images(data["images"])
     version = ctx["tag"][1:]
     # Preflight every immutable version before changing either image.
     for value in data["images"].values():

@@ -46,7 +46,6 @@
 		BE99ADD2E4EC3C8E3778BB20 /* PlaybackQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B57CE3535EB4078C12487F13 /* PlaybackQueueTests.swift */; };
 		C6F2CD5F02BAC5ECC221F94C /* AdminSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55F1B7BE3013F9A938AFA4A /* AdminSupport.swift */; };
 		CF038D291F8DB5C416396298 /* PlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9DF7300701A329C819838D6 /* PlaybackTests.swift */; };
-		CF2E51B6FBB211634AF66A30 /* NativeSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */; };
 		D1C8CF19C43CAC3BDCC2270F /* OfflinePlayerInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC895FD496E27459C64367BB /* OfflinePlayerInteractionTests.swift */; };
 		D34E4535478B448BB0DE3BA7 /* PlaybackCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75C82F42FB25F757AB436C02 /* PlaybackCoordinator.swift */; };
 		D665BB811019D3188E91A74E /* AdminLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1083D7D0490215656759582E /* AdminLists.swift */; };
@@ -75,7 +74,6 @@
 
 /* Begin PBXFileReference section */
 		1283D56F42A241D1B76E1902 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
-		062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSmokeTests.swift; sourceTree = "<group>"; };
 		093E2A40D0F44EEA0508C121 /* PlayerSeekBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerSeekBar.swift; sourceTree = "<group>"; };
 		1083D7D0490215656759582E /* AdminLists.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminLists.swift; sourceTree = "<group>"; };
 		12CFAE0CA7424F9CE6D64632 /* AdminEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminEditor.swift; sourceTree = "<group>"; };
@@ -247,7 +245,6 @@
 		BCB1CCC84388954AC2BE0D98 /* TreasureUpUITests */ = {
 			isa = PBXGroup;
 			children = (
-				062FF2A49DC866B725A7E778 /* NativeSmokeTests.swift */,
 				BC895FD496E27459C64367BB /* OfflinePlayerInteractionTests.swift */,
 			);
 			path = TreasureUpUITests;
@@ -446,7 +443,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CF2E51B6FBB211634AF66A30 /* NativeSmokeTests.swift in Sources */,
 				D1C8CF19C43CAC3BDCC2270F /* OfflinePlayerInteractionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

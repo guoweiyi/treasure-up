@@ -1,3 +1,4 @@
+FROM docker:28.5.2-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d AS docker-cli
 FROM python:3.12-slim-trixie@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg postgresql-client ca-certificates \
@@ -9,6 +10,10 @@ RUN pip install --no-compile --no-cache-dir -r requirements.lock
 COPY --chown=treasure:treasure backend/ /app/
 COPY --chown=treasure:treasure deploy/worker_healthcheck.py /app/worker_healthcheck.py
 COPY --chown=treasure:treasure deploy/setup.py /app/setup.py
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+COPY --chown=treasure:treasure deploy/install.py /app/install.py
+COPY --chown=treasure:treasure compose.yaml compose.light.yaml release.json /app/install/
 RUN mkdir -p /data/media /data/scratch /backups && chown -R treasure:treasure /data /backups
 USER treasure
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

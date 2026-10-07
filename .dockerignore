@@ -5,6 +5,9 @@
 !frontend/**
 !deploy/
 !deploy/**
+!compose.yaml
+!compose.light.yaml
+!release.json
 **/__pycache__/
 **/.pytest_cache/
 **/node_modules/

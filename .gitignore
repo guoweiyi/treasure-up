@@ -15,20 +15,7 @@ __pycache__/
 !.env.example
 frontend/dist/
 frontend/node_modules/
-docs/*.jpg
-docs/*.png
 runtime/
-# Retained local research prototype; not part of the formal application.
-/src/
-/web/
-/scripts/
-/test/
-/package.json
-/package-lock.json
 .npm-cache/
-/docs/test-results.md
-/docs/research.md
-/docs/player-components.md
-/docs/danmaku-settings.md
 # User supplied reference archive may contain media and credentials.
 /下载.zip

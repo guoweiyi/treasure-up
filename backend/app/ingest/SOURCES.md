@@ -1,20 +1,13 @@
-# Ingestion provenance and verification boundaries
+# 音视频采集参考
 
-Reviewed 2026-10-04. All source requests in automated tests are mocked. No account credentials from the supplied reference ZIP were read or used.
+采集使用账号有权访问的 B 站网页接口，并通过 yt-dlp 获取音视频流。这些接口可能变化；权限不足、格式缺失或校验失败时，任务会报告失败，不以低规格文件冒充所选原档。
 
-The user-provided `下载.zip` contains 3,230 entries (298,230,431 uncompressed bytes), including a virtual environment, executables, manifests and sample media. Only ten named source/documentation files were initially extracted into ignored `.tools/dolby-reference` for static inspection. No archive script or executable was run. The package root has no LICENSE file; its implementation was not copied into this project. Container parsing examples informed the questions to verify against primary sources.
+- [yt-dlp Bilibili 提取器](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/bilibili.py)：DASH 视频、普通 / Dolby 音轨及 FLAC 的获取方式。
+- [yt-dlp FFmpeg 合并器](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/postprocessor/ffmpeg.py)：通过 stream copy 合并音视频。本项目另加取消、超时、大小限制和媒体校验。
+- [FFmpeg stream copy](https://ffmpeg.org/ffmpeg.html#Streamcopy)：复制压缩包而不重新编码。兼容转码另存为副本，原档保留。
+- [FFmpeg MP4 muxer](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/movenc.c) 与 [DOVI 结构](https://github.com/FFmpeg/FFmpeg/blob/master/libavutil/dovi_meta.h)：Dolby Vision 配置与颜色元数据。
+- [FFmpeg E-AC-3 解析器](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/ac3_parser.c) 与 [ffprobe](https://ffmpeg.org/ffprobe.html)：音轨、声道和 Atmos / JOC 信号检测。
 
-- [yt-dlp Bilibili extractor](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/bilibili.py): extracts accessible DASH video, ordinary/Dolby audio and FLAC; quality 126 is a source DV candidate. These are reverse-engineered public web interfaces, not Bilibili's promised API contract.
-- [yt-dlp FFmpeg merger](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/postprocessor/ffmpeg.py): original streams are mapped and merged using stream copy. Treasure Up wraps the merge with cancellation, timeout and size checks, and verifies packet hashes for Dolby candidates.
-- [yt-dlp license](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE): Unlicense for its own code; dependency/distribution licenses are separate.
-- [FFmpeg stream copy](https://ffmpeg.org/ffmpeg.html#Streamcopy): copying compressed packets does not re-encode. Archive media is retained; any compatibility transcode is a separate asset.
-- [FFmpeg MP4 muxer](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/movenc.c): DOVI configuration box writing requires unofficial compliance; use `-strict unofficial` and preserve color signaling rather than discarding DV metadata.
-- [FFmpeg DOVI metadata definition](https://github.com/FFmpeg/FFmpeg/blob/master/libavutil/dovi_meta.h): source of configuration fields including profile, level and RPU/base/enhancement-layer flags.
-- [FFmpeg E-AC-3 parser](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/ac3_parser.c) and [decoder](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/ac3dec.c): Atmos profile depends on the E-AC-3 extension-type-A/JOC signaling, not just codec name or channel count. We demux and probe a bounded elementary-audio sample, independent of the MP4 label.
-- [FFmpeg profiles](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/profiles.c) and [ffprobe documentation](https://ffmpeg.org/ffprobe.html): exact reported E-AC-3 Atmos profile and structured stream/side-data inspection. FFmpeg source files cited above carry LGPL notices; the installed binary's enabled components determine its full distribution obligations.
+`dolby_vision` 依据 DOVI profile 与 RPU 标记；`dolby_atmos` 依据有界 E-AC-3 音频样本的 Atmos 检测结果。HEVC、E-AC-3 或多声道名称本身不足以设置这些标识。容器信号保留和兼容音轨规则见 [Atmos 处理](../playback/ATMOS.md)。
 
-`dolby_vision=true` means a DOVI configuration with nonzero profile and RPU-present flag was detected. `dolby_atmos=true` means FFmpeg identified the Atmos profile in an elementary E-AC-3 sample (up to the first 10 seconds). These observations do not certify every frame, the hardware output route, a browser's support, or spatial/head-tracked playback. `spatial_audio_output_verified` therefore remains false. HEVC, E-AC-3, 5.1 channels and source quality labels alone never set these booleans.
-
-The existing SDR compatibility path intentionally rejects HDR/wide-gamut conversion until a tested tone-mapping route is implemented. Original HDR/DV assets and color metadata remain available.
-
-Offline acceptance additionally extracted exactly two media-only entries from the supplied ZIP into ignored `.tools/dolby-reference/samples`. The files were not downloaded from the source site. The actual archive pipeline, FFmpeg MP4 stream copy, DOVI/RPU configuration, elementary E-AC-3 JOC profile, and both tracks' pre/post packet hashes passed in the existing collector container using an isolated temporary SQLite database. Source file SHA-256 values: video `4fef9efb210b355261ca2b6d7e8c96a07466c3d466b3a192342525ba380496c8`; audio `a9e8b9e910845a9674ee90660603a5af9f9a23b474a68d89e63fc610eb54b44d`. The optional test requires an explicit `TREASURE_TEST_DOLBY_SAMPLES` directory and never executes package code or accesses the network.
+依赖按各自许可使用：[yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE)、[FFmpeg](https://ffmpeg.org/legal.html)。FFmpeg 二进制的许可还取决于构建时启用的组件。

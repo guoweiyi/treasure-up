@@ -1,90 +1,63 @@
 <p align="center"><img src="frontend/public/brand/logo-lockup.png" width="220" alt="Treasure Up" /></p>
-
 <h1 align="center">Treasure Up</h1>
-
 <p align="center"><b>一个 B 站视频归档库</b></p>
 
-<p align="center">
-  <a href="https://github.com/guoweiyi/treasure-up/releases">下载版本</a> ·
-  <a href="docs/installation.md">安装与升级</a> ·
-  <a href="native/apple/INSTALL.md">iPhone / iPad 安装</a> ·
-  <a href="docs/publishing.md">发版指南</a>
-</p>
+## 前言
 
-## 为什么做这个项目
-
-你是否也遇到过这些问题？
+你是否遇到过这些问题？
 
 - 给 UP 主充电后看过的视频，想重温时发现包月已经到期。
-- 喜欢的视频被删除了，即使找到补档，原来的弹幕和精彩评论也不在了。
-- 担心平台后续调整画质，想留住现在能看到的版本。
+- 视频被删除了，找到了补档，却找不回原来的弹幕和精彩评论。
+- 担心平台调整画质，想留住现在能看到的版本。
 
-Treasure Up 是一个自部署的 B 站视频归档库。趁视频仍然可以访问时，把账号有权限观看的内容保存下来，再用自己的网页或 iOS 客户端浏览。保存质量取决于来源实际提供的音视频规格，不会凭空提高画质。
+Treasure Up 可以把账号有权限观看的视频保存到自己的存储里，连同弹幕、评论和作者资料一起留下，随时用网页或 iPhone / iPad 观看。
 
-## 能做什么
+## 功能
 
-- **收藏夹与 UP 主自动备份**：发现新收藏、新投稿；支持首次全量、最近若干条或只追踪新增，也可以在浏览器用油猴脚本选择视频。
-- **视频之外也留一份**：封面、作者资料、标签、弹幕、评论与置顶评论；定时更新播放、点赞等统计，并记录来源失效状态。
-- **保留音画规格**：多 P、充电视频、杜比视界与杜比全景声；提供分片播放和兼容音轨，实际播放能力取决于设备、浏览器及素材。
-- **自己的存储**：本地目录、阿里云 OSS、腾讯云 COS、华为云 OBS、又拍云、七牛、S3 兼容服务，以及 OneDrive / SharePoint（含世纪互联）；支持副本同步、节点选择和对象存储直连。
-- **日常观看与管理**：搜索、UP 主页、播放列表、星标、弹幕设置、评论图片预览；后台管理采集、存储、备份和权限。
-- **账号与访问控制**：默认登录后访问，支持密码和通行密钥；管理员可以开启访客浏览。采集账号凭据由服务端保存。
-
-服务端运行在 Docker 中。电脑、平板和手机均可通过网页访问，iPhone / iPad 另有原生客户端。Windows / macOS 当前使用网页，没有单独的桌面安装包。
+- 备份收藏夹、UP 主投稿，定时发现新视频；也支持用油猴脚本勾选采集。
+- 保存封面、标签、作者资料、弹幕、评论及置顶评论，更新视频统计和失效状态。
+- 支持多 P、充电视频、杜比视界和杜比全景声，提供分片播放与兼容音轨。
+- 支持本地、OSS、COS、OBS、又拍云、七牛、S3 兼容存储、OneDrive 和 SharePoint，可同步副本、切换播放节点。
+- 支持搜索、播放列表、星标、弹幕设置、账号权限和备份恢复。
 
 ## 快速开始
 
-准备好 **Docker Engine / Docker Desktop 与 Docker Compose v2**，无需安装 Python、Node.js 或数据库。支持 Linux `amd64` / `arm64`；Windows 使用 Docker Desktop 的 Linux 容器模式。
+先安装并启动 Docker。支持 Linux `amd64` / `arm64`，Windows、macOS 使用 Docker Desktop。
 
-1. 在 [Releases](https://github.com/guoweiyi/treasure-up/releases) 下载目标版本的 `treasure-up-vX.Y.Z-docker.zip`，解压并进入目录。
-2. 生成本机配置：
+```sh
+docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock -v treasure-up-config:/config yunyunjuan/treasure-up-backend:latest python /app/install.py
+```
 
-   ```bash
-   # Linux / NAS：以当前用户身份创建配置文件
-   docker compose -f compose.setup.yaml run --rm --user "$(id -u):$(id -g)" setup
-   ```
+命令会拉取镜像、生成配置并启动服务。完成后打开 **<http://localhost:8788>**，使用终端显示的 `admin` 和随机密码登录。
 
-   ```powershell
-   # Windows PowerShell / macOS Docker Desktop
-   docker compose -f compose.setup.yaml run --rm setup
-   ```
+安装时临时挂载 Docker socket，用于创建服务容器；安装结束即退出，业务容器不保留这个挂载。密码和配置保存在 `treasure-up-config` 数据卷中。
 
-3. 启动服务：
+<details>
+<summary>部署在 NAS，或需要从其他设备访问</summary>
 
-   ```bash
-   docker compose pull
-   docker compose up -d --wait --wait-timeout 180
-   ```
+把下面的 `192.168.1.20` 换成服务器 IP：
 
-打开 **<http://localhost:8788>**，使用 `admin` 和初始化终端显示的随机密码登录。密码同时保存在本机 `.env`，首次登录后请修改。
+```sh
+docker run --rm -it --pull always --user 0 -v /var/run/docker.sock:/var/run/docker.sock -v treasure-up-config:/config yunyunjuan/treasure-up-backend:latest python /app/install.py --origin http://192.168.1.20:8788 --bind-address 0.0.0.0
+```
 
-以上命令适用于包含 `compose.setup.yaml` 的新部署包；旧版附件请按该版本的 Release 说明安装。部署包固定对应版本的镜像摘要，不会在重新启动时悄悄升级。镜像发布到 Docker Hub：[`yunyunjuan/treasure-up-backend`](https://hub.docker.com/r/yunyunjuan/treasure-up-backend) 与 [`yunyunjuan/treasure-up-web`](https://hub.docker.com/r/yunyunjuan/treasure-up-web)。
+使用反向代理时，把 `--origin` 改为实际 HTTPS 域名。iOS App 和通行密钥登录请使用 HTTPS 域名。
 
-**NAS、其他设备或公网访问**需要额外设置访问地址和监听地址，见[安装说明](docs/installation.md)。资源有限可选择[轻量模式](docs/installation.md#轻量模式)。
+</details>
 
-## 第一次使用
+登录后，在后台添加 B 站账号、存储位置和备份来源。升级时再次运行安装命令即可，原配置和数据保留。旧版 Compose 用户先看[迁移说明](docs/installation.md)。
 
-1. 在后台添加 B 站账号并验证凭据；需要的充电、会员权限应属于该账号。
-2. 添加本地或对象存储，完成连接检测。
-3. 在自动备份中选择收藏夹 / UP 主，设定保存范围与更新周期；也可在后台安装油猴脚本进行单次采集。
-4. 等待任务完成，在视频库观看。元数据先到、视频仍在下载时，页面会显示对应状态。
+## iPhone / iPad
 
-iPhone / iPad 用户从同一 Release 下载 `treasure-up-vX.Y.Z-ios-unsigned.ipa`，按[自签名安装指引](native/apple/INSTALL.md)安装，首次打开填写自己的服务地址并登录。IPA 是真机包，需要自行签名后才能安装；模拟器产物仅用于开发测试。
+从 [Releases](https://github.com/guoweiyi/treasure-up/releases) 下载 `ios-unsigned.ipa` 附件，按[自签名指引](native/apple/INSTALL.md)安装。首次打开填写自己的服务器地址并登录。支持 iOS / iPadOS 18 及以上。
 
-## 升级与数据
+## 文档
 
-下载新版部署包，先备份，再用新文件更新原部署目录，**保留 `.env` 和原数据卷**，重新执行 `docker compose pull` 与启动命令。完整步骤见[安装与升级](docs/installation.md#升级与备份)。
+- [安装、升级与反向代理](docs/installation.md)
+- [开发](docs/development.md) · [手动发版](docs/publishing.md) · [iOS 工程](native/README.md)
 
-数据库、视频、备份和队列均有持久卷。`.env` 中的加密密钥必须妥善保存；普通停止使用 `docker compose stop`，日常升级不要运行会删除数据卷的 `docker compose down -v`。
-
-## 开发与发版
-
-- [开发指南](docs/development.md)：目录、源码启动、测试和协作约定。
-- [发布指南](docs/publishing.md)：配置 Docker Hub Secrets，在 Actions 手动升版、构建和发布。
-- [iOS 工程](native/README.md)：本地 Xcode 构建和真机调试。
-
-技术栈：Vue 3 / TypeScript / Artplayer / hls.js，FastAPI，PostgreSQL 17，Celery / Redis，FFmpeg；iOS 使用 SwiftUI。
+技术栈：Vue 3 / TypeScript、FastAPI、PostgreSQL、Celery / Redis、FFmpeg、SwiftUI。
 
 ## 致谢
 
-播放器基于 [Artplayer](https://github.com/zhw2590582/ArtPlayer) 及其弹幕插件，下载使用 [yt-dlp](https://github.com/yt-dlp/yt-dlp)。
+播放器使用 [Artplayer](https://github.com/zhw2590582/ArtPlayer) 及其弹幕插件，视频下载使用 [yt-dlp](https://github.com/yt-dlp/yt-dlp)。

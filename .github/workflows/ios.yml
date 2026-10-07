@@ -46,7 +46,7 @@ jobs:
       - name: Run unit and offline player interaction tests
         run: |
           # Ad-hoc signing is required by the Keychain regression tests.
-          # Explicit test selectors exclude the online SmokeTests suite.
+          # Run hosted unit tests and the generated-media UI fixture without a server.
           xcodebuild -project TreasureUp.xcodeproj -scheme TreasureUp \
             -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
             -derivedDataPath build -resultBundlePath "build/TestResults-${{ matrix.device }}.xcresult" \
