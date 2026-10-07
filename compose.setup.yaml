@@ -1,0 +1,16 @@
+# Run once before the main Compose file: this service needs no existing .env.
+# Linux: add --user "$(id -u):$(id -g)" so .env belongs to your current user.
+# Windows / macOS Docker Desktop: the default container user can write the mount.
+services:
+  setup:
+    image: ${TREASURE_BACKEND_IMAGE:-docker.io/${DOCKERHUB_NAMESPACE:-yunyunjuan}/treasure-up-backend:0.3.4}
+    entrypoint: [python, /app/setup.py]
+    working_dir: /setup
+    volumes:
+      - type: bind
+        source: .
+        target: /setup
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

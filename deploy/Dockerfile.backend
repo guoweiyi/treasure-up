@@ -8,6 +8,7 @@ COPY backend/requirements.lock /app/requirements.lock
 RUN pip install --no-compile --no-cache-dir -r requirements.lock
 COPY --chown=treasure:treasure backend/ /app/
 COPY --chown=treasure:treasure deploy/worker_healthcheck.py /app/worker_healthcheck.py
+COPY --chown=treasure:treasure deploy/setup.py /app/setup.py
 RUN mkdir -p /data/media /data/scratch /backups && chown -R treasure:treasure /data /backups
 USER treasure
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

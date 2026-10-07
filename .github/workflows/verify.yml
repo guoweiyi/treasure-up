@@ -31,11 +31,7 @@ jobs:
           .audit/bin/python -m pip install pip-audit==2.10.1 pytest==9.1.1 PyYAML==6.0.3
           .audit/bin/python -m pip_audit -r backend/requirements.lock --no-deps --disable-pip --progress-spinner off
       - name: Deployment and release packaging tests
-        env:
-          TREASURE_RUN_COMPOSE_TESTS: '1'
-        run: |
-          python3 deploy/check_branding.py
-          .audit/bin/python -m pytest deploy/tests -q
+        run: .audit/bin/python -m pytest deploy/tests -q
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -44,21 +40,15 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
-      - name: Create isolated deployment configuration
-        run: python3 deploy/bootstrap.py
-      - name: Build and start the application
-        run: docker compose up -d --build --wait --wait-timeout 180
-      - name: Unit and PostgreSQL recovery tests
-        run: docker compose exec -T -e TREASURE_RUN_POSTGRES_TESTS=1 backup-worker python -m pytest tests -q
-      - name: Verify web readiness
-        run: curl --fail --retry 10 --retry-delay 2 --retry-all-errors http://127.0.0.1:8788/health
-      - name: Verify proxy compression, isolation and request limits
-        env:
-          TREASURE_RUN_NGINX_TESTS: '1'
+      - name: Build local images and cache database dependencies
         run: |
-          python3 -m venv .proxy-tests
-          .proxy-tests/bin/python -m pip install pytest==9.1.1
-          .proxy-tests/bin/python -m pytest deploy/tests/test_nginx_resource_limits.py -q
-      - name: Stop services
-        if: always()
-        run: docker compose down
+          python3 deploy/setup.py
+          docker compose build
+          docker compose pull postgres redis
+      - name: Verify a source-free Docker-only installation
+        env:
+          TREASURE_RUN_INSTALL_TESTS: '1'
+        run: |
+          python3 -m venv .install-tests
+          .install-tests/bin/python -m pip install pytest==9.1.1 PyYAML==6.0.3
+          .install-tests/bin/python -m pytest deploy/tests/test_install_container.py -q

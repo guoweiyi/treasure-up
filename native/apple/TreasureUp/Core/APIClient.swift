@@ -26,6 +26,7 @@ enum APIError: LocalizedError, Sendable {
 @MainActor @Observable
 final class APIClient {
     private(set) var baseURL: URL
+    private(set) var hasConfiguredServer: Bool
     private(set) var user: ArchiveUser?
     private(set) var csrfToken = ""
     private(set) var siteName = "Treasure Up"
@@ -49,11 +50,14 @@ final class APIClient {
         self.defaults = defaults
         self.sessionConfiguration = sessionConfiguration
         self.persistSession = persistSession
-        self.baseURL = baseURL
+        let configuredServer = baseURL
             ?? defaults.string(forKey: Self.serverDefaultsKey).flatMap { try? Self.normalizedServer($0) }
-            ?? URL(string: "https://test-tp.gwy.fun")!
+        // Keep URL consumers non-optional without contacting an example or personal
+        // server. All requests remain disabled until the user selects a server.
+        self.baseURL = configuredServer ?? URL(string: "https://unconfigured.invalid")!
+        self.hasConfiguredServer = configuredServer != nil
         session = Self.makeSession(configuration: sessionConfiguration)
-        if persistSession {
+        if persistSession && hasConfiguredServer {
             do { cookies = try vault.load(for: self.baseURL) }
             catch { persistenceWarning = error.localizedDescription }
         }
@@ -94,12 +98,14 @@ final class APIClient {
             allowGuestAccess = false
         }
         defaults.set(candidate.absoluteString, forKey: Self.serverDefaultsKey)
+        hasConfiguredServer = true
         isConnected = true
         await loadDisplaySettings()
     }
 
     /// A 401 is a valid guest state. Network failures remain visible to the caller.
     func restoreSession() async throws {
+        guard hasConfiguredServer else { return }
         let capabilities: ServerCapabilities = try await get("/server")
         guard capabilities.application == "treasure-up", capabilities.apiVersion == 1 else {
             throw APIError.invalidServer("该地址不是兼容的 Treasure Up 服务器。")
@@ -216,6 +222,9 @@ final class APIClient {
     }
 
     private func performURL(_ url: URL, method: String, body: [String: JSONValue]?) async throws -> Data {
+        guard hasConfiguredServer else {
+            throw APIError.invalidServer("请先连接自己的 Treasure Up 服务器。")
+        }
         let revision = sessionRevision
         let requestSession = session
         let ownOrigin = Self.sameOrigin(url, baseURL)
@@ -318,7 +327,7 @@ final class APIClient {
               parts.user == nil, parts.password == nil,
               parts.query == nil, parts.fragment == nil,
               parts.path.isEmpty || parts.path == "/" else {
-            throw APIError.invalidServer("请输入服务器根地址，例如 https://test-tp.gwy.fun。")
+            throw APIError.invalidServer("请输入服务器根地址，例如 https://video.example.com。")
         }
         parts.scheme = scheme
         parts.host = host

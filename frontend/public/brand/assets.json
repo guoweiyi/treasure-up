@@ -1,6 +1,4 @@
 {
-  "source": "assets/branding/logo-original.png",
-  "master": "assets/branding/logo-transparent.png",
   "assets": {
     "logo-mark.png": {
       "width": 1024,

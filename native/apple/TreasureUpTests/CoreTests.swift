@@ -65,6 +65,81 @@ final class CoreTests: XCTestCase {
         return defaults
     }
 
+    @MainActor
+    func testFreshInstallWaitsForServerWithoutMakingNetworkRequests() async throws {
+        let recorder = RequestRecorder()
+        MockURLProtocol.store.set { request in
+            recorder.append(request)
+            return .init(body: "{}")
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(defaults: isolatedDefaults(), sessionConfiguration: configuration, persistSession: false)
+        XCTAssertFalse(client.hasConfiguredServer)
+        try await client.restoreSession()
+        XCTAssertFalse(client.isConnected)
+        do {
+            let _: JSONValue = try await client.get("/server")
+            XCTFail("Unconfigured clients must not contact a default server")
+        } catch let error as APIError {
+            guard case .invalidServer = error else { return XCTFail("Expected missing server error") }
+        }
+        XCTAssertTrue(recorder.requests.isEmpty)
+    }
+
+    @MainActor
+    func testSavedServerSurvivesUpgradeAndInvalidSettingStaysOffline() async throws {
+        let defaults = isolatedDefaults()
+        defaults.set("https://saved.example.test/", forKey: "treasure.native.server")
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let recorder = RequestRecorder()
+        MockURLProtocol.store.set { request in
+            recorder.append(request)
+            switch request.url?.path {
+            case "/api/v1/server": return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}")
+            case "/api/v1/auth/me": return .init(status: 401, body: "{}")
+            default: return .init(body: "{\"site_name\":\"Saved Archive\"}")
+            }
+        }
+        let client = APIClient(defaults: defaults, sessionConfiguration: configuration, persistSession: false)
+        XCTAssertTrue(client.hasConfiguredServer)
+        try await client.restoreSession()
+        XCTAssertTrue(client.isConnected)
+        XCTAssertEqual(Set(recorder.requests.compactMap { $0.url?.host }), ["saved.example.test"])
+        defaults.set("https://saved.example.test/api/v1", forKey: "treasure.native.server")
+        let invalid = APIClient(defaults: defaults, sessionConfiguration: configuration, persistSession: false)
+        XCTAssertFalse(invalid.hasConfiguredServer)
+        let count = recorder.requests.count
+        try await invalid.restoreSession()
+        XCTAssertEqual(recorder.requests.count, count)
+    }
+
+    @MainActor
+    func testFreshInstallOnlyStoresACompatibleExplicitlySelectedServer() async throws {
+        let defaults = isolatedDefaults()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.store.set { request in
+            if request.url?.host == "wrong.example.test" { return .init(body: "{\"application\":\"other-app\",\"api_version\":1}") }
+            if request.url?.path == "/api/v1/server" { return .init(body: "{\"application\":\"treasure-up\",\"api_version\":1}") }
+            return .init(body: "{\"site_name\":\"My Archive\"}")
+        }
+        let client = APIClient(defaults: defaults, sessionConfiguration: configuration, persistSession: false)
+        do {
+            try await client.connect("https://wrong.example.test")
+            XCTFail("An incompatible server cannot initialize the app")
+        } catch let error as APIError {
+            guard case .invalidServer = error else { return XCTFail("Expected incompatible server error") }
+        }
+        XCTAssertFalse(client.hasConfiguredServer)
+        XCTAssertNil(defaults.string(forKey: "treasure.native.server"))
+        try await client.connect("https://my.example.test")
+        XCTAssertTrue(client.hasConfiguredServer)
+        XCTAssertTrue(client.isConnected)
+        XCTAssertEqual(defaults.string(forKey: "treasure.native.server"), client.baseURL.absoluteString)
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

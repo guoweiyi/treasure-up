@@ -1,4 +1,4 @@
-"""Publish tested GHCR images, validate platform manifests and protect released tags."""
+"""Publish tested Docker Hub images and protect immutable releases and channel tags."""
 import argparse
 import json
 import os
@@ -19,20 +19,24 @@ def command(*args):
     return result.stdout.strip()
 
 
-def context(tag, repository, revision, run_id):
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+def context(tag, repository, revision, run_id, namespace=None):
+    if not tag.startswith("v") or not VERSION.fullmatch(tag[1:]):
         raise ValueError("Invalid release tag")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Invalid repository")
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or not re.fullmatch(r"[0-9]+", run_id):
         raise ValueError("Invalid source revision or workflow run")
-    return {"tag": tag, "repository": repository.lower(), "revision": revision, "run_id": run_id}
+    namespace = namespace or os.environ.get("DOCKERHUB_NAMESPACE", "")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,38}", namespace):
+        raise ValueError("Set DOCKERHUB_NAMESPACE to your Docker Hub username or organization")
+    return {"tag": tag, "repository": repository.lower(), "revision": revision, "run_id": run_id,
+            "namespace": namespace}
 
 
 def image_name(ctx, component):
     if component not in COMPONENTS:
         raise ValueError("Unexpected image component")
-    return f"ghcr.io/{ctx['repository']}-{component}"
+    return f"docker.io/{ctx['namespace']}/treasure-up-{component}"
 
 
 def require_digest(value):
@@ -196,6 +200,26 @@ def read_images(path, ctx):
     return data
 
 
+def reuse_published_images(ctx, output):
+    """Retry a failed release using its existing immutable images, never rebuild over them."""
+    existing = {name: inspect_digest(f"{image_name(ctx, name)}:{ctx['tag'][1:]}", missing=True)
+                for name in COMPONENTS}
+    if not any(existing.values()):
+        return False
+    if not all(existing.values()):
+        raise ValueError("Only part of this version was promoted; rerun failed jobs in the original workflow")
+    images = {}
+    for name, digest in existing.items():
+        image = image_name(ctx, name)
+        metadata = inspect_release_metadata(ctx, image, digest)
+        if metadata["version"] != ctx["tag"][1:] or metadata["revision"] != ctx["revision"]:
+            raise ValueError("Existing version belongs to another source revision; publish a new version")
+        images[name] = {"image": image, "digest": digest, "reference": f"{image}@{digest}",
+                        "platforms": [f"linux/{arch}" for arch in ARCHES]}
+    write_json(output, {**ctx, "images": images})
+    return True
+
+
 def promote(ctx, path, channel):
     if channel not in {"preview", "stable"}:
         raise ValueError("Invalid release channel")
@@ -225,24 +249,30 @@ def promote(ctx, path, channel):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("push", "merge", "promote"))
+    parser.add_argument("action", choices=("push", "merge", "promote", "reuse"))
     parser.add_argument("--tag", required=True)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--revision", required=True)
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+    parser.add_argument("--namespace", default=os.environ.get("DOCKERHUB_NAMESPACE", ""))
     parser.add_argument("--arch", choices=ARCHES)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
     args = parser.parse_args()
     try:
-        ctx = context(args.tag, args.repository, args.revision, args.run_id)
+        ctx = context(args.tag, args.repository, args.revision, args.run_id, args.namespace)
         if args.action == "push" and args.arch and args.output:
             push_candidates(ctx, args.arch, args.output)
         elif args.action == "merge" and args.input and args.output:
             merge(ctx, args.input, args.output)
         elif args.action == "promote" and args.input:
             promote(ctx, args.input, args.channel)
+        elif args.action == "reuse" and args.output:
+            reused = reuse_published_images(ctx, args.output)
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                    output.write(f"reused={str(reused).lower()}\n")
         else:
             parser.error("Required action arguments missing")
     except (ValueError, OSError, subprocess.CalledProcessError) as error:

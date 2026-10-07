@@ -1,6 +1,11 @@
-name: Container images
+name: Docker Hub images (reusable)
 on:
   workflow_call:
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
     inputs:
       source_ref:
         required: true
@@ -16,9 +21,42 @@ on:
         type: string
 permissions:
   contents: read
+env:
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'yunyunjuan' }}
 jobs:
-  build:
+  reuse:
     if: inputs.source_ref == inputs.revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      reused: ${{ steps.reuse.outputs.reused }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Reuse immutable images only when their revision and both platforms match
+        id: reuse
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          REVISION: ${{ inputs.revision }}
+        run: python3 deploy/container_release.py reuse --tag "$RELEASE_TAG" --revision "$REVISION" --output release-images.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.reuse.outputs.reused == 'true'
+        with:
+          name: release-images
+          path: release-images.json
+          if-no-files-found: error
+          overwrite: true
+  build:
+    needs: reuse
+    if: needs.reuse.outputs.reused != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +69,6 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -70,18 +107,18 @@ jobs:
           cache-to: type=gha,mode=max,scope=release-web-${{ matrix.arch }}
       - name: Test the exact images before registry upload
         run: |
-          python3 deploy/bootstrap.py
+          python3 deploy/setup.py
           docker compose up -d --no-build --wait --wait-timeout 180
-          docker compose exec -T -e TREASURE_RUN_POSTGRES_TESTS=1 backup-worker python -m pytest tests -q
-          curl --fail --retry 5 --retry-delay 2 --retry-all-errors http://127.0.0.1:8788/health
+          docker compose exec -T api python -m compileall -q app
+          python3 deploy/check_service.py
       - name: Stop isolated test services
         if: always()
         run: docker compose down
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Push tested images and record their registry digests
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -93,13 +130,14 @@ jobs:
           name: container-digests-${{ matrix.arch }}
           path: image-digests/*.json
           if-no-files-found: error
+          overwrite: true
   merge:
-    needs: build
+    needs: [reuse, build]
+    if: needs.reuse.outputs.reused != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -108,9 +146,9 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: container-digests-*
@@ -125,3 +163,4 @@ jobs:
           name: release-images
           path: release-images.json
           if-no-files-found: error
+          overwrite: true

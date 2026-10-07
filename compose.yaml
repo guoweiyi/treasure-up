@@ -10,7 +10,7 @@ x-backend: &backend
   image: treasure-up-backend:0.3.4
   restart: unless-stopped
   environment: &environment
-    TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}@postgres:5432/treasure
+    TREASURE_DATABASE_URL: postgresql+psycopg://treasure:${POSTGRES_PASSWORD:?Run the setup service first to create .env}@postgres:5432/treasure
     TREASURE_REDIS_URL: redis://redis:6379/0
     TREASURE_MEDIA_ROOT: /data/media
     TREASURE_SCRATCH_DIR: /data/scratch
@@ -43,7 +43,7 @@ services:
     environment:
       POSTGRES_USER: treasure
       POSTGRES_DB: treasure
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run deploy/bootstrap.py first}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run the setup service first to create .env}
     volumes:
       - database:/var/lib/postgresql/data
     healthcheck:
@@ -147,7 +147,7 @@ services:
       dockerfile: deploy/Dockerfile.web
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${TREASURE_PORT:-8788}:80"
+      - "${TREASURE_BIND_ADDRESS:-127.0.0.1}:${TREASURE_PORT:-8788}:80"
     volumes:
       - media:/data/media:ro
     depends_on:

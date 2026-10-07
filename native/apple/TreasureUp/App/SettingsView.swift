@@ -34,7 +34,7 @@ struct ServerConnectionView: View {
             if let message = error ?? initialError { Section { Text(appPrompt(message)).foregroundStyle(.red).accessibilityLabel(appPrompt("连接失败：\(message)")) } }
         }
         .navigationTitle("连接资料库")
-        .onAppear { address = api.baseURL.absoluteString }
+        .onAppear { address = api.hasConfiguredServer ? api.baseURL.absoluteString : "" }
         .disabled(busy)
     }
 }

@@ -32,7 +32,6 @@ httpcore==1.0.9
 httptools==0.8.0
 httpx==0.28.1
 idna==3.20
-iniconfig==2.3.0
 jmespath==1.1.0
 kombu==5.6.2
 Mako==1.4.3
@@ -40,7 +39,6 @@ MarkupSafe==3.0.4
 opentelemetry-api==1.45.0
 oss2==2.19.1
 packaging==26.3
-pluggy==1.6.0
 prompt_toolkit==3.0.53
 psycopg==3.3.6
 psycopg-binary==3.3.6
@@ -49,8 +47,6 @@ pycryptodome==3.23.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
-Pygments==2.21.0
-pytest==9.1.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4
 PyYAML==6.0.3

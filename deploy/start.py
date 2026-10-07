@@ -1,10 +1,10 @@
-"""One entry point for a new local/full or light deployment. Existing secrets stay intact."""
+"""Developer checkout helper; end users can install a release with Docker Compose alone."""
 import argparse
 from pathlib import Path
 import subprocess
 import sys
 
-from bootstrap import configure_origin, create_environment
+from setup import configure_site, create_environment
 
 
 def compose_command(root, env_file, *, light=False, prebuilt=False):
@@ -46,15 +46,16 @@ def main():
     parser.add_argument("--env-file", type=Path, default=root / ".env")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--origin", help="Set the external HTTPS origin, including on an existing deployment; other settings stay intact")
+    parser.add_argument("--bind-address", help="Set the web listener IPv4 interface; defaults to 127.0.0.1 on first install")
     parser.add_argument("--allow-http", action="store_true", help="Explicitly allow an HTTP tunnel without passkeys; HTTPS remains recommended")
     parser.add_argument("--prebuilt", action="store_true", help="Pull published registry images, then start without a local build (also works with --light)")
     parser.add_argument("--no-build", action="store_true", help="Use only already available local images; with --prebuilt, the registry pull still runs")
     args = parser.parse_args()
     try:
         created = create_environment(args.env_file, origin=args.origin or f"http://localhost:{args.port}", port=args.port,
-                                     allow_http=args.allow_http)
-        if not created and args.origin:
-            configure_origin(args.env_file, args.origin, allow_http=args.allow_http)
+                                     bind_address=args.bind_address or "127.0.0.1", allow_http=args.allow_http)
+        if not created and (args.origin or args.bind_address):
+            configure_site(args.env_file, origin=args.origin, bind_address=args.bind_address, allow_http=args.allow_http)
     except ValueError as error:
         parser.error(str(error))
     try:
