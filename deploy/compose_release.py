@@ -7,10 +7,73 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import yaml
 
 from compose_config import production_compose
+
+MAX_COMPOSE_BYTES = 192 * 1024
+
+
+class RegistryRedirect(urllib.request.HTTPRedirectHandler):
+    """Registry blobs may redirect to HTTPS CDNs, without registry authorization."""
+    max_redirections = 3
+    max_repeats = 1
+
+    def __init__(self, *, allow=True):
+        self.allow = allow
+        self.count = 0
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        self.count += 1
+        target = urllib.parse.urlsplit(new_url)
+        if (not self.allow or self.count > 3 or target.scheme != "https" or not target.hostname
+                or target.username is not None or target.password is not None or target.port not in (None, 443)):
+            raise ValueError("Unexpected registry redirect")
+        redirected = super().redirect_request(request, response, code, message, headers, new_url)
+        if redirected is not None:
+            for values in (redirected.headers, redirected.unredirected_hdrs):
+                for key in tuple(values):
+                    if key.lower() == "authorization":
+                        del values[key]
+        return redirected
+
+
+def public_compose_blob(ctx, reference, digest, size):
+    """Fetch only this public Docker Hub repository's digest-addressed blob."""
+    namespace = ctx.get("namespace", "")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,38}", namespace):
+        raise ValueError("Invalid Compose repository namespace")
+    repository = f"{namespace}/treasure-up"
+    if not re.fullmatch(rf"docker\.io/{re.escape(repository)}@sha256:[a-f0-9]{{64}}", reference):
+        raise ValueError("Compose blob reference is outside the release repository")
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest) or type(size) is not int or not 0 < size <= MAX_COMPOSE_BYTES:
+        raise ValueError("Invalid Compose blob descriptor")
+    query = urllib.parse.urlencode({"service": "registry.docker.io", "scope": f"repository:{repository}:pull"})
+    try:
+        auth = urllib.request.build_opener(RegistryRedirect(allow=False))
+        with auth.open("https://auth.docker.io/token?" + query, timeout=15) as response:
+            encoded = response.read(16385)
+        if len(encoded) > 16384:
+            raise ValueError("Registry token response exceeded the size limit")
+        credentials = json.loads(encoded)
+        token = credentials.get("token") if isinstance(credentials, dict) else None
+        if not isinstance(token, str) or not token or re.search(r"[\s\x00-\x1f]", token):
+            raise ValueError("Invalid anonymous registry token")
+        request = urllib.request.Request(f"https://registry-1.docker.io/v2/{repository}/blobs/{digest}",
+                                         headers={"Authorization": "Bearer " + token, "Accept-Encoding": "identity"})
+        registry = urllib.request.build_opener(RegistryRedirect())
+        with registry.open(request, timeout=15) as response:
+            payload = response.read(size + 1)
+        if len(payload) != size:
+            raise ValueError("Registry Compose blob size does not match its descriptor")
+        return payload
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        # Never put the short-lived bearer token or CDN signed URL into logs.
+        raise ValueError("Unable to fetch the public Compose blob from Docker Hub") from None
 
 
 def validate_compose(config):
@@ -59,8 +122,8 @@ def release_compose(root, ctx, images):
     return yaml.safe_dump(config, sort_keys=False, allow_unicode=True).encode("utf-8")
 
 
-def read_payload(manifest):
-    """Read the embedded OCI layer, never ask Compose to evaluate remote includes."""
+def read_payload(manifest, fetch_blob=None):
+    """Read inline or digest-addressed content without evaluating remote Compose."""
     layers = manifest.get("layers", [])
     if (manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json"
             or manifest.get("config", {}).get("mediaType") != "application/vnd.docker.compose.config.empty.v1+json"
@@ -69,12 +132,21 @@ def read_payload(manifest):
     layer = layers[0]
     if (layer.get("mediaType") != "application/vnd.docker.compose.file+yaml"
             or layer.get("annotations", {}).get("com.docker.compose.file") != "compose.yaml"
-            or not isinstance(layer.get("data"), str) or len(layer["data"]) > 256 * 1024):
-        raise ValueError("Unexpected Compose layer or missing embedded content")
-    try:
-        payload = base64.b64decode(layer["data"], validate=True)
-    except ValueError as error:
-        raise ValueError("Invalid embedded Compose content") from error
+            or type(layer.get("size")) is not int or not 0 < layer["size"] <= MAX_COMPOSE_BYTES
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(layer.get("digest", "")))):
+        raise ValueError("Unexpected Compose layer or invalid content descriptor")
+    if "data" in layer:
+        if not isinstance(layer["data"], str) or len(layer["data"]) > 256 * 1024:
+            raise ValueError("Invalid embedded Compose content")
+        try:
+            payload = base64.b64decode(layer["data"], validate=True)
+        except ValueError as error:
+            raise ValueError("Invalid embedded Compose content") from error
+    elif fetch_blob is not None:
+        # Ignore descriptor urls: a manifest cannot choose the download host.
+        payload = fetch_blob(layer["digest"], layer["size"])
+    else:
+        raise ValueError("Compose content requires a registry blob reader")
     if layer.get("size") != len(payload) or layer.get("digest") != "sha256:" + hashlib.sha256(payload).hexdigest():
         raise ValueError("Compose content differs from its OCI digest")
     return payload
@@ -82,7 +154,8 @@ def read_payload(manifest):
 
 def inspect_compose(ctx, reference):
     from container_release import command
-    payload = read_payload(json.loads(command("docker", "buildx", "imagetools", "inspect", reference, "--raw")))
+    payload = read_payload(json.loads(command("docker", "buildx", "imagetools", "inspect", reference, "--raw")),
+                           lambda digest, size: public_compose_blob(ctx, reference, digest, size))
     config = yaml.safe_load(payload)
     validate_compose(config)
     metadata = config["x-treasure-release"]

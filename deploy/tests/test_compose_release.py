@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import urllib.request
 from unittest.mock import patch
 
 import pytest
@@ -65,6 +66,56 @@ def test_embedded_compose_content_must_match_manifest_digest():
     manifest["layers"][0]["digest"] = "sha256:" + "b" * 64
     with pytest.raises(ValueError, match="OCI digest"):
         oci.read_payload(manifest)
+
+
+def test_standard_external_layer_uses_only_digest_and_checks_downloaded_bytes():
+    content = oci.release_compose(ROOT, CTX, IMAGES)
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    manifest = {"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"mediaType": "application/vnd.docker.compose.config.empty.v1+json"},
+                "layers": [{"mediaType": "application/vnd.docker.compose.file+yaml", "size": len(content),
+                            "digest": digest, "urls": ["http://127.0.0.1/private"],
+                            "annotations": {"com.docker.compose.file": "compose.yaml", "com.docker.compose.version": "2.38.2"}}]}
+    calls = []
+    def download(value, size):
+        calls.append((value, size))
+        return content
+    assert oci.read_payload(manifest, download) == content
+    assert calls == [(digest, len(content))]
+    with pytest.raises(ValueError, match="OCI digest"):
+        oci.read_payload(manifest, lambda *_: content[:-1] + b"x")
+    with pytest.raises(ValueError, match="OCI digest"):
+        oci.read_payload(manifest, lambda *_: content[:-1])
+    manifest["layers"][0]["size"] = oci.MAX_COMPOSE_BYTES + 1
+    with pytest.raises(ValueError, match="descriptor"):
+        oci.read_payload(manifest, lambda *_: pytest.fail("Oversized blob must not be requested"))
+
+
+def test_registry_redirect_removes_bearer_and_limits_hops():
+    request = urllib.request.Request("https://registry-1.docker.io/v2/test/blob",
+                                     headers={"Authorization": "Bearer private-sentinel"})
+    handler = oci.RegistryRedirect()
+    for index in range(3):
+        redirected = handler.redirect_request(request, None, 302, "Found", {}, f"https://cdn.example/{index}")
+        assert not any(key.lower() == "authorization" for key in redirected.headers)
+        assert not any(key.lower() == "authorization" for key in redirected.unredirected_hdrs)
+    with pytest.raises(ValueError, match="redirect"):
+        handler.redirect_request(request, None, 302, "Found", {}, "https://cdn.example/fourth")
+
+
+@pytest.mark.parametrize("url", ["http://cdn.example/blob", "https://user:password@cdn.example/blob", "https://cdn.example:8443/blob"])
+def test_registry_redirect_rejects_insecure_or_credentialed_destinations(url):
+    request = urllib.request.Request("https://registry-1.docker.io/v2/test/blob")
+    with pytest.raises(ValueError, match="redirect"):
+        oci.RegistryRedirect().redirect_request(request, None, 302, "Found", {}, url)
+
+
+def test_auth_endpoint_cannot_redirect_or_fetch_another_repository():
+    request = urllib.request.Request("https://auth.docker.io/token")
+    with pytest.raises(ValueError, match="redirect"):
+        oci.RegistryRedirect(allow=False).redirect_request(request, None, 302, "Found", {}, "https://cdn.example/token")
+    with pytest.raises(ValueError, match="outside"):
+        oci.public_compose_blob(CTX, "docker.io/other/treasure-up@sha256:" + "a" * 64, "sha256:" + "a" * 64, 10)
 
 
 def test_artifact_digest_uses_buildx_descriptor_output():
