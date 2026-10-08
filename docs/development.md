@@ -20,7 +20,7 @@ python deploy/start.py
 
 前端开发使用 Node.js 22，在 `frontend` 目录执行 `npm ci` 和 `npm run dev`。iOS 需要 macOS 与 Xcode，见 [原生工程](../native/README.md)。
 
-提交前执行与改动有关的检查。前端使用 `npm run test`、`npm run build`；安装流程在独立 Docker 项目中验证；iOS 由 macOS Actions 构建和测试。账号、Cookie、`.env`、媒体与构建产物不提交。
+提交前执行与改动有关的检查。前端使用 `npm run test`、`npm run build`；发版镜像在独立 Docker 项目中验证；iOS 由 macOS Actions 打包，原生测试按需在 Xcode 运行。账号、Cookie、`.env`、媒体与构建产物不提交。
 
 ## 提交与发版
 

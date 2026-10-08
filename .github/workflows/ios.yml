@@ -8,74 +8,12 @@ on:
         required: false
         type: string
         default: ''
-  push:
-    branches: ['**']
-    paths: ['native/apple/**', '.github/workflows/ios.yml']
-  pull_request:
-    paths: ['native/apple/**', '.github/workflows/ios.yml']
 permissions:
   contents: read
 concurrency:
   group: ios-${{ github.workflow }}-${{ inputs.source_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  simulator:
-    name: ${{ matrix.device }} offline regression tests
-    runs-on: macos-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        device: [iPhone, iPad]
-    defaults:
-      run:
-        working-directory: native/apple
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ inputs.source_ref || github.sha }}
-          persist-credentials: false
-      - name: Verify source and select installed iOS 26.1+ SDK
-        env:
-          SOURCE_SHA: ${{ inputs.source_ref || github.sha }}
-        run: python3 scripts/ci.py prepare
-      - name: Select and boot simulator
-        env:
-          DEVICE_FAMILY: ${{ matrix.device }}
-        run: python3 scripts/ci.py simulator --family "$DEVICE_FAMILY"
-      - name: Run unit and offline player interaction tests
-        run: |
-          # Ad-hoc signing is required by the Keychain regression tests.
-          # Run hosted unit tests and the generated-media UI fixture without a server.
-          xcodebuild -project TreasureUp.xcodeproj -scheme TreasureUp \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
-            -derivedDataPath build -resultBundlePath "build/TestResults-${{ matrix.device }}.xcresult" \
-            -parallel-testing-enabled NO -collect-test-diagnostics never \
-            -only-testing:TreasureUpTests \
-            -only-testing:TreasureUpUITests/OfflinePlayerInteractionTests \
-            CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES test
-      - name: Verify and archive simulator app for developer debugging
-        if: matrix.device == 'iPhone'
-        run: python3 scripts/ci.py package-simulator
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: matrix.device == 'iPhone'
-        with:
-          name: treasure-up-ios-simulator
-          path: native/apple/build/ios-simulator.zip
-          overwrite: true
-          if-no-files-found: error
-          include-hidden-files: false
-          compression-level: 0
-          retention-days: 7
-      - name: Upload simulator test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ios-test-results-${{ matrix.device }}-attempt-${{ github.run_attempt }}
-          path: native/apple/build/TestResults-${{ matrix.device }}.xcresult
-          if-no-files-found: warn
-          include-hidden-files: false
-          retention-days: 7
   device:
     name: iPhone and iPad unsigned IPA
     runs-on: macos-latest

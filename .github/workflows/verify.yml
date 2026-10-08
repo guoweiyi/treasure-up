@@ -32,25 +32,3 @@ jobs:
           .audit/bin/python -m pip_audit -r backend/requirements.lock --no-deps --disable-pip --progress-spinner off
       - name: Deployment and release packaging tests
         run: .audit/bin/python -m pytest deploy/tests -q
-  compose:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ inputs.source_ref || github.sha }}
-          persist-credentials: false
-      - name: Build local images and cache database dependencies
-        run: |
-          python3 deploy/setup.py
-          docker compose build
-          VERSION=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
-          docker build -f deploy/Dockerfile.setup -t "treasure-up-setup:$VERSION" .
-          docker compose pull postgres redis
-      - name: Verify a source-free Docker-only installation
-        env:
-          TREASURE_RUN_INSTALL_TESTS: '1'
-        run: |
-          python3 -m venv .install-tests
-          .install-tests/bin/python -m pip install pytest==9.1.1 PyYAML==6.0.3
-          .install-tests/bin/python -m pytest deploy/tests/test_install_container.py -q

@@ -29,7 +29,7 @@ env:
   DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'yunyunjuan' }}
 jobs:
   reuse:
-    if: inputs.source_ref == inputs.revision
+    if: inputs.reuse_existing && inputs.source_ref == inputs.revision
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -61,7 +61,10 @@ jobs:
           overwrite: true
   build:
     needs: reuse
-    if: needs.reuse.outputs.reused != 'true'
+    if: >-
+      always() && !cancelled() && inputs.source_ref == inputs.revision &&
+      (needs.reuse.result == 'success' || needs.reuse.result == 'skipped') &&
+      needs.reuse.outputs.reused != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -156,7 +159,7 @@ jobs:
           overwrite: true
   merge:
     needs: [reuse, build]
-    if: needs.reuse.outputs.reused != 'true'
+    if: always() && !cancelled() && needs.build.result == 'success' && needs.reuse.outputs.reused != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

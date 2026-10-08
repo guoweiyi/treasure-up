@@ -11,13 +11,49 @@
 
 Treasure Up 可以把视频保存起来，连同弹幕、评论和作者资料一起留下，随时观看。
 
-## 功能
+## ✨ 亮点
 
 - 备份收藏夹、UP 主投稿，定时发现新视频；也支持用油猴脚本勾选采集。
 - 保存封面、标签、作者资料、弹幕、评论及置顶评论，更新视频统计和失效状态。
 - 支持多 P、充电视频、杜比视界和杜比全景声，提供分片播放与兼容音轨。
 - 支持本地、阿里云OSS、腾讯云COS、又拍云、七牛、S3 兼容存储、OneDrive 和 SharePoint，可同步副本、切换播放节点。
 - 支持搜索、播放列表、星标、弹幕设置和备份恢复。
+
+## 预览
+
+<table>
+    <tr>
+        <td width="50%" align="center">
+            <strong>视频库首页</strong><br /><br />
+            <img src="./docs/assets/main.png" alt="视频库" />
+        </td>
+        <td width="50%" align="center">
+            <strong>采集视频预览</strong><br /><br />
+            <img src="./docs/assets/viedo.png" alt="采集视频预览" />
+        </td>
+    </tr>
+    <tr>
+        <td width="50%" align="center">
+            <strong>多来源采集视频</strong><br /><br />
+            <img src="./docs/assets/back.png" alt="多来源采集视频" />
+        </td>
+        <td width="50%" align="center">
+            <strong>多存储源</strong><br /><br />
+            <img src="./docs/assets/cunchu.png" width="220" alt="多存储源" />
+        </td>
+    </tr>
+    <tr>
+        <td width="50%" align="center">
+            <strong>ios视频页</strong><br /><br />
+            <img src="./docs/assets/ios.png" alt="ios视频页" />
+        </td>
+        <td width="50%" align="center">
+            <strong>ios后台管理</strong><br /><br />
+            <img src="./docs/assets/ios2.png" alt="ios后台管理" />
+        </td>
+    </tr>
+</table>
+
 
 ## 快速开始
 

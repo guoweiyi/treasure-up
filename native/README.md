@@ -4,7 +4,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/guoweiyi/treasure-up/releases) 下载 `treasure-up-v版本号-ios-unsigned.ipa`，按照[自签名安装指引](apple/INSTALL.md)使用自己的 Apple 账号签名并安装。它是真实设备的 arm64 包；Actions 中的模拟器 ZIP 仅供开发测试，不能安装到手机或平板。
+从 [Releases](https://github.com/guoweiyi/treasure-up/releases) 下载 `treasure-up-v版本号-ios-unsigned.ipa`，按照[自签名安装指引](apple/INSTALL.md)使用自己的 Apple 账号签名并安装。它是支持 iPhone 和 iPad 的 arm64 真机包。
 
 ## 开发
 
@@ -34,6 +34,6 @@ python3 scripts/package_device.py
 
 产物位于 `build/distribution/`：`ios-unsigned.ipa` 与 `ios-device-build.json`，后者记录源码提交、版本、SDK、架构和校验值。打包脚本拒绝模拟器、签名材料或平台不符的 App；安装仍需用户重新签名。
 
-[iOS Actions](../.github/workflows/ios.yml) 对 iPhone / iPad 分别执行单元测试和离线播放器 UI 测试。模拟器运行使用 `CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES` 临时签名，以支持 Keychain；不要把真机打包的禁用签名选项用于模拟器测试。
+[iOS Actions](../.github/workflows/ios.yml) 只构建并校验真机 IPA，不运行模拟器测试或生成模拟器包。修改原生功能后，在 Xcode 中选择模拟器并使用 Product → Test 运行现有测试；命令行测试使用 `CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES` 临时签名，以支持 Keychain。
 
-CI 成功表示编译与所列测试通过，不代表所有设备上的 HDR、Atmos、自签名安装或后台播放都已验收。原生注册和登录通行密钥尚未实现，目前使用服务器账号密码登录。
+构建成功表示 IPA 编译与打包校验通过，设备上的 HDR、Atmos、自签名安装和后台播放仍需实机验证。原生注册和登录通行密钥尚未实现，目前使用服务器账号密码登录。

@@ -60,7 +60,7 @@ docker compose up -d --pull always --force-recreate
 docker compose -f oci://docker.io/yunyunjuan/treasure-up:latest up -d --pull always --force-recreate
 ```
 
-稳定版入口随发版更新。需要固定版本时，把 `latest` 换成版本号，例如 `0.3.8`。Release 中的 YAML 已固定镜像摘要。不要通过旧版文件直接降级，数据库回退应使用升级前的完整备份。
+稳定版入口随发版更新。需要固定版本时，把 `latest` 换成版本号，例如 `0.3.9`。Release 中的 YAML 已固定镜像摘要。不要通过旧版文件直接降级，数据库回退应使用升级前的完整备份。
 
 主配置保存在 `treasure-up-config` 卷，数据库、媒体等保存在 `treasure-up_database`、`treasure-up_media` 等卷。备份时一起保存，特别是主配置中的加密密钥。日常升级不要执行 `docker compose down -v`。
 
