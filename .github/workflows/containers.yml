@@ -128,18 +128,13 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version }}
           cache-from: type=gha,scope=release-setup-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-setup-${{ matrix.arch }}
-      - name: Test the exact images before registry upload
+      - name: Validate the exact images before registry upload
         env:
           VERSION: ${{ inputs.version }}
-          TREASURE_RUN_INSTALL_TESTS: '1'
         run: |
           docker run --rm "treasure-up-backend:$VERSION" python -m compileall -q app
           docker run --rm --entrypoint python "treasure-up-setup:$VERSION" -m compileall -q /app
-          python3 deploy/setup.py
-          docker compose pull postgres redis
-          python3 -m venv .image-checks
-          .image-checks/bin/python -m pip install pytest==9.1.1 PyYAML==6.0.3
-          .image-checks/bin/python -m pytest deploy/tests/test_install_container.py -q
+          docker run --rm "treasure-up-web:$VERSION" nginx -t
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: docker.io

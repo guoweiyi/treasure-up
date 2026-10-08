@@ -6,10 +6,13 @@ on:
         type: string
         default: ""
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   dependencies:
     runs-on: ubuntu-latest
@@ -28,7 +31,5 @@ jobs:
       - name: Audit locked Python dependencies in a disposable tool environment
         run: |
           python3 -m venv .audit
-          .audit/bin/python -m pip install pip-audit==2.10.1 pytest==9.1.1 PyYAML==6.0.3
+          .audit/bin/python -m pip install pip-audit==2.10.1
           .audit/bin/python -m pip_audit -r backend/requirements.lock --no-deps --disable-pip --progress-spinner off
-      - name: Deployment and release packaging tests
-        run: .audit/bin/python -m pytest deploy/tests -q

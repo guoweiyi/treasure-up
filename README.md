@@ -98,7 +98,7 @@ TREASURE_BIND_ADDRESS=0.0.0.0
 ## 文档
 
 - [安装、升级与反向代理](docs/installation.md)
-- [开发](docs/development.md) · [手动发版](docs/publishing.md) · [iOS 工程](native/README.md)
+- [开发与发版](docs/development.md) · [Release Actions](https://github.com/guoweiyi/treasure-up/actions/workflows/release.yml) · [iOS 工程](native/README.md)
 
 技术栈：Vue 3 / TypeScript、FastAPI、PostgreSQL、Celery / Redis、FFmpeg、SwiftUI。
 
