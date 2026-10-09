@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.ingest.client import safe_source_url
+from app.ingest.creator_scope import listing_creator_role, video_has_creator
 from app.ingest.errors import IngestError
 from app.jobs import enqueue
 from app.library_deletion import is_suppressed
@@ -127,8 +128,7 @@ def latest_page(db, creator_id, account_id, page, paid, *, refresh=False):
                 bvid = row.get("bvid")
                 if not isinstance(bvid, str) or not re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid):
                     continue  # An inaccessible listing can intentionally hide its BV.
-                if row.get("mid") is not None and str(row["mid"]) != person.uid:
-                    raise IngestError("UP 投稿作者不匹配", code="invalid_response")
+                listing_creator_role(row, person.uid)
                 if bvid in seen:
                     raise IngestError("UP 投稿返回重复视频", code="invalid_pagination")
                 seen.add(bvid)
@@ -169,7 +169,7 @@ def capture(creator_id: str, body: CreatorCaptureInput, response: Response,
     _, person = _creator(db, creator_id)
     account = _account(db, body.account_id)
     accepted, skipped = [], []
-    # Validate the authoritative video owner before enqueueing any work. A BV
+    # Validate the authoritative owner/staff before enqueueing any work. A BV
     # from another page, forged checkbox or stale paid hint cannot broaden scope.
     with _client(db, account) as (client, _nav):
         for bvid in body.bvids:
@@ -179,7 +179,7 @@ def capture(creator_id: str, body: CreatorCaptureInput, response: Response,
             raw = client.view(bvid)
             if not isinstance(raw, dict) or not isinstance(raw.get("owner"), dict):
                 raise IngestError("稿件作者信息无效", code="invalid_response")
-            if raw.get("bvid") != bvid or str(raw["owner"].get("mid")) != person.uid:
+            if raw.get("bvid") != bvid or not video_has_creator(raw, person.uid):
                 raise HTTPException(422, "所选视频不属于当前 UP 主，请刷新投稿列表后重试")
             if not _matches(paid_hint(raw), body.paid):
                 skipped.append({"bvid": bvid, "status": "skipped", "reason": "paid_filter"})

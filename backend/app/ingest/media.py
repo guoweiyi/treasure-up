@@ -469,6 +469,7 @@ def inspect_dolby(path, video, audio, *, guard=lambda: None, repair_scratch=Fals
     config = _dovi_configuration(video)
     evidence = {"dolby_vision": bool(config and config.get("rpu_present_flag") == 1 and (config.get("dv_profile") or 0) > 0),
                 "dovi": config, "dolby_atmos": False, "audio_codec": audio.get("codec_name"),
+                "audio_present": bool(audio),
                 "audio_profile": audio.get("profile"), "audio_channels": audio.get("channels"),
                 "audio_sample_rate": _positive(audio.get("sample_rate")),
                 "atmos_evidence": "not_eac3", "spatial_audio_output_verified": False}
@@ -600,7 +601,7 @@ def _verify_audio_decode(path, timeout, guard):
 
 
 def _audio_compatible_copy(source, output, video, audio, duration, maximum, timeout, guard):
-    """Encode only EC-3 audio; fail closed if the copied picture/signaling changes."""
+    """Encode only incompatible audio; verify the copied picture/signaling."""
     full = probe_media(source, check_active=guard, extended=True)
     videos = [s for s in full["streams"] if s.get("codec_type") == "video"]
     audios = [s for s in full["streams"] if s.get("codec_type") == "audio"]
@@ -643,13 +644,82 @@ def _audio_compatible_copy(source, output, video, audio, duration, maximum, time
     return converted_video, converted_audio, converted_duration, evidence
 
 
+def _video_compatibility(video, *, manual=False):
+    supported = {"h264": {"yuv420p", "yuvj420p"}}
+    if not manual:
+        supported.update(hevc={"yuv420p", "yuvj420p", "yuv420p10le"},
+                         av1={"yuv420p", "yuv420p10le"})
+    codec, pixels = video.get("codec_name"), video.get("pix_fmt")
+    if codec and codec not in supported:
+        return "required"
+    if not codec or not pixels:
+        return "unknown"
+    return "not_needed" if pixels in supported[codec] else "required"
+
+
+def _audio_compatibility(audio):
+    if not audio:
+        return "not_needed"  # Caller must have evidence that no audio exists.
+    codec, profile, channels = audio.get("codec_name"), audio.get("profile"), audio.get("channels")
+    if (codec and codec != "aac") or (profile and profile != "LC"):
+        return "required"
+    if type(channels) is int and channels > 2:
+        return "required"
+    if codec != "aac" or profile != "LC" or type(channels) is not int or channels < 1:
+        return "unknown"
+    return "not_needed"
+
+
+def _probed_compatibility(mime_type, video, audio, *, manual=False):
+    # Automatic capture uses the player's supported original video codecs;
+    # a manual request can still target older H.264-only devices.
+    decisions = [_video_compatibility(video, manual=manual), _audio_compatibility(audio)]
+    if mime_type and mime_type != "video/mp4":
+        return "required"
+    if manual and any(video.get(key) is True or _colour_properties(video)[key] for key in ("hdr", "wide_gamut")):
+        return "required"
+    if "required" in decisions:
+        return "required"
+    return "unknown" if not mime_type or "unknown" in decisions else "not_needed"
+
+
+def playback_requirement(db, part, archive, policy=None):
+    """Three-state decision from measurements of this original, never its title."""
+    asset, video = db.get(Asset, archive.asset_id), db.get(Video, part.video_id)
+    if not asset or not video:
+        return "unknown"
+    properties = ((video.metadata_json or {}).get("media_properties") or {}).get(archive.id) or {}
+    # Codec names alone do not establish bit depth/chroma or audio profile and
+    # channel count. Legacy missing evidence gets a worker probe before action.
+    source_video = {**properties, "codec_name": archive.video_codec}
+    if properties.get("codec_name") != archive.video_codec:
+        source_video.pop("pix_fmt", None)
+    audio = {"codec_name": archive.audio_codec, "profile": properties.get("audio_profile"),
+             "channels": properties.get("audio_channels")}
+    if properties.get("audio_codec") != archive.audio_codec:
+        audio.update(profile=None, channels=None)
+    if not archive.audio_codec and properties.get("audio_present") is False:
+        audio = {}
+    manual = (policy or {}).get("compatibility_request") == "manual"
+    if manual and not all(type(properties.get(key)) is bool for key in ("hdr", "wide_gamut")):
+        return "unknown"
+    return _probed_compatibility(asset.mime_type, source_video, audio, manual=manual)
+
+
 def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
-    """Preserve the archive; prefer picture-preserving AAC for EC-3 audio."""
+    """Preserve the archive; (None, True) means a separate copy is not needed."""
     guard()
+    requirement = playback_requirement(db, part, archive, policy)
+    if requirement == "not_needed":
+        return None, True
+    manual = policy.get("compatibility_request") == "manual"
     audio_key = "video-copy-aac-v2:" + archive.asset_id
     key = "h264-aac-sdr-v2:" + archive.asset_id
     existing = None
-    for candidate_key in ([audio_key] if archive.audio_codec == "eac3" else [audio_key, key]):
+    manual_video = manual and playback_requirement(db, part, archive) == "not_needed"
+    candidate_keys = ([key] if manual_video else
+                      [audio_key] if archive.audio_codec == "eac3" else [audio_key, key])
+    for candidate_key in candidate_keys if requirement == "required" else []:
         candidate = db.scalar(select(MediaVariant).where(MediaVariant.part_id == part.id,
             MediaVariant.kind == "playback", MediaVariant.format_key == candidate_key))
         if candidate:
@@ -678,8 +748,14 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
         vstream, astream, duration = _probe(source)
         source_stream = vstream
         colors = _colour_properties(vstream)
-        _record_source_properties(db, part, archive, vstream)
-        audio_only = astream.get("codec_name") == "eac3" and vstream.get("codec_name") in {"h264", "hevc", "av1"}
+        _record_source_properties(db, part, archive, vstream, audio_present=bool(astream),
+            audio_codec=astream.get("codec_name"), audio_profile=astream.get("profile"), audio_channels=astream.get("channels"))
+        requirement = _probed_compatibility(original_asset.mime_type, vstream, astream, manual=manual)
+        if requirement == "not_needed":
+            _record_source_properties(db, part, archive, vstream, compatibility="not_needed")
+            return None, True
+        audio_only = bool(astream) and _audio_compatibility(astream) != "not_needed" and (
+            _video_compatibility(vstream) == "not_needed")
         evidence = {}
         if audio_only:
             key = audio_key
@@ -688,12 +764,6 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
         if not audio_only and (colors["hdr"] or colors["wide_gamut"]):
             _record_source_properties(db, part, archive, vstream, compatibility="hdr_conversion_unsupported")
             raise IngestError("HDR/广色域原档已保留；尚不支持经验证的 SDR 色彩转换", code="hdr_conversion_unsupported", retryable=False)
-        compatible = (original_asset.mime_type == "video/mp4"
-            and vstream.get("codec_name") == "h264"
-            and vstream.get("pix_fmt") in {"yuv420p", "yuvj420p"}
-            and (not astream or (astream.get("codec_name") == "aac"
-                and astream.get("profile") in {None, "LC"}
-                and int(astream.get("channels") or 2) <= 2)))
         if audio_only:
             output = folder / "playback.mp4"
             vstream, astream, duration, evidence = _audio_compatible_copy(
@@ -701,8 +771,6 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
             evidence.update(source_variant_id=archive.id, source_asset_id=archive.asset_id)
             asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"),
                 media_name=media_name_for_part(db, part, variant="playback"))
-        elif compatible:
-            asset = original_asset
         else:
             output = folder / "playback.mp4"
             arguments = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-n", "-xerror", "-i", str(source),
@@ -741,4 +809,4 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
         _record_source_properties(db, part, archive, source_stream, compatibility="ready", playback_variant_id=variant.id)
         _record_source_properties(db, part, variant, vstream,
             **_measured_properties(vstream, astream, duration, asset.size), **evidence, compatibility="ready")
-        return variant, compatible
+        return variant, False

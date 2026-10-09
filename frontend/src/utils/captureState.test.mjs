@@ -31,6 +31,47 @@ test('metadata result keeps polling until the media lane has stopped', () => {
   assert.equal(finishedJob({ kind: 'probe_storage', status: 'succeeded' }), true);
 });
 
+test('unnecessary automatic copy is finished without claiming a copy was generated', () => {
+  const job = {
+    kind: 'create_playback',
+    status: 'succeeded',
+    result: { compatibility: 'not_needed', variant_id: null },
+    checkpoint: { progress: { phase: 'compatible_not_needed' } },
+  };
+  assert.equal(jobStatusLabel(job), '无需兼容副本');
+  assert.equal(jobPhase(job), '无需兼容副本');
+  assert.equal(
+    compatibilityNotice(job),
+    '原档无需自动生成兼容副本，已跳过额外转码；能否播放仍取决于设备对原编码的支持。',
+  );
+  assert.equal(finishedJob(job), true);
+  for (const other of [
+    { ...job, kind: 'download_media' },
+    { ...job, status: 'failed' },
+    { ...job, status: 'running' },
+    { ...job, result: { variant_id: 'created-copy' } },
+  ]) {
+    assert.equal(jobStatusLabel(other), '');
+    assert.equal(compatibilityNotice(other), '');
+  }
+  assert.equal(
+    jobPhase({
+      ...job,
+      checkpoint: {},
+      result: { ...job.result, progress: { phase: 'compatible_not_needed' } },
+    }),
+    '无需兼容副本',
+  );
+  assert.equal(
+    jobPhase({
+      ...job,
+      result: { variant_id: 'created-copy' },
+      checkpoint: { progress: { phase: 'compatible_ready' } },
+    }),
+    '兼容副本已就绪',
+  );
+});
+
 test('unsupported HDR copy is a finished capability result, not a generated copy', () => {
   const job = {
     kind: 'create_playback',

@@ -12,6 +12,10 @@ Atmos 标识依据有界音频样本的 ffprobe 检测结果。MP4 的 `ec-3/dec
 
 ## 兼容播放
 
+自动兼容副本按归档的实际容器、视频和音频格式判断。普通 MP4 中的 H.264、HEVC 或 AV1 视频配合 AAC 单声道或立体声，不自动生成额外副本；这不代表所有浏览器都能解码 HEVC、AV1 或 HDR。旧的自动任务遇到无需副本的原档时，返回 `compatibility=not_needed`、`variant_id=null`，进度为 `compatible_not_needed`。
+
+EC-3、FLAC 等不兼容音频只转为 AAC 并保留原视频流。用户仍可为旧设备手动生成 H.264 兼容副本；HDR 转 SDR 的限制见下文。兼容副本与 HLS 分片是独立流程：普通原档仍按原有时长、体积等播放设置准备 HLS，不因跳过兼容副本而停止分片，也不会因此重新编码原视频。
+
 `video-copy-aac-v2` 副本保留视频压缩包，音频转为 AAC-LC 立体声，目标码率 192 kbit/s。混音使用归一化矩阵和 1 dB 余量；副本记录 `audio_mix_revision=2`、`compatibility_mode=audio_only` 及原轨道关联，`dolby_atmos=false`。它仍占用一份视频存储空间，也仍要求设备支持原视频编码与 HDR 格式。
 
 原档和兼容副本由用户选择。网页优先使用浏览器支持的原生 HLS，否则使用 hls.js。当前 HLS 为单一复用媒体列表，不生成多音轨 master playlist。AAC 转码有音质损失，不能标为 Atmos；播放器能解码 EC-3 也不等于输出设备正在渲染空间音频。

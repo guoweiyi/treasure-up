@@ -8,9 +8,10 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 
 from app.ingest.errors import IngestError
+from app.ingest.creator_scope import listing_creator_role
 from app.models import Collection, CollectionItem, SourceSubscription, Video, VideoCreator
 from app.source_labels import apply_source_title
 
@@ -89,6 +90,8 @@ def _fetch(ctx, collection, page):
         raise IngestError("来源分页提前返回空页", code="invalid_pagination")
     identities = []
     for row in items:
+        if collection.kind == "creator":
+            listing_creator_role(row, collection.source_id)
         identity = _source_id(row.get("id") if collection.kind == "favorite" else row.get("aid"))
         kind = _number(row.get("type", 2)) if collection.kind == "favorite" else 2
         identities.append(f"{kind}:{identity}")
@@ -234,9 +237,16 @@ def _observe(ctx, collection, scan, raw, identity, position, now, enqueue_archiv
     if paid:
         observation["paid"] = True
         scan["counts"]["paid_detected"] += 1
-    if scan.get("creator_id") and not ctx.db.scalar(select(VideoCreator.id).where(VideoCreator.video_id == video.id,
-                VideoCreator.creator_id == scan["creator_id"], VideoCreator.role == "owner")):
-        ctx.db.add(VideoCreator(video_id=video.id, creator_id=scan["creator_id"], role="owner"))
+    if scan.get("creator_id"):
+        role = listing_creator_role(raw, collection.source_id)
+        if role == "staff":
+            # Older scans treated every item in a creator's space as owned by
+            # that creator. Correct only this proven joint-submission mistake.
+            ctx.db.execute(delete(VideoCreator).where(VideoCreator.video_id == video.id,
+                VideoCreator.creator_id == scan["creator_id"], VideoCreator.role == "owner"))
+        if not ctx.db.scalar(select(VideoCreator.id).where(VideoCreator.video_id == video.id,
+                VideoCreator.creator_id == scan["creator_id"], VideoCreator.role == role)):
+            ctx.db.add(VideoCreator(video_id=video.id, creator_id=scan["creator_id"], role=role))
 
     decision = observation.get("archive_decision", "existing")
     # A listing can temporarily hide its BVID. Once available, retry the

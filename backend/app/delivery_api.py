@@ -460,13 +460,24 @@ def compatible(variant_id: str, user=Depends(require_admin), db: Session = Depen
     # Do not duplicate automatic work or implicitly resume an operator pause.
     job = db.scalar(select(Job).where(Job.kind == "create_playback", Job.target_id == variant.id,
         Job.status.in_(("queued", "running", "paused", "blocked"))).order_by(Job.created_at.desc(), Job.id).limit(1))
+    if job and (job.policy or {}).get("compatibility_request") != "manual" and not (job.dedupe_key or "").startswith("compatible-"):
+        from app.ingest.media import playback_requirement
+        part = db.get(VideoPart, variant.part_id)
+        # A queued automatic no-op is not the explicit H.264 request for an old
+        # device. Distinct work remains serialized by the worker's video lock.
+        if part:
+            automatic = playback_requirement(db, part, variant)
+            manual = playback_requirement(db, part, variant, {"compatibility_request": "manual"})
+            if "unknown" in {automatic, manual} or automatic != manual:
+                job = None
     if job is None:
         config = db.get(Setting, "ingest")
-        policy = schemas.IngestPolicy.model_validate(config.value if config else {}).model_dump()
+        policy = {**schemas.IngestPolicy.model_validate(config.value if config else {}).model_dump(),
+                  "compatibility_request": "manual"}
         # A new processing profile can recover old explicitly unsupported HDR
         # results without resetting the successful historical task or archive.
         job = enqueue(db, "create_playback", variant.id, policy=policy, frozen_policy=True,
-                      dedupe_key=f"compatible-v3:{variant.id}:{variant.asset_id}")
+                      dedupe_key=f"compatible-v4:{variant.id}:{variant.asset_id}")
     audit(db, user, "prepare_compatible", "media_variant", variant.id, {"job_id": job.id})
     db.commit()
     return catalog.job_view(job)

@@ -1,14 +1,16 @@
 type Row = Record<string, any>;
 export function compatibilityNotice(job: Row) {
-  return job.kind === 'create_playback' &&
-    job.status === 'succeeded' &&
-    job.result?.compatibility === 'unsupported' &&
+  if (job.kind !== 'create_playback' || job.status !== 'succeeded') return '';
+  if (job.result?.compatibility === 'not_needed')
+    return '原档无需自动生成兼容副本，已跳过额外转码；能否播放仍取决于设备对原编码的支持。';
+  return job.result?.compatibility === 'unsupported' &&
     job.result?.reason === 'hdr_conversion_unsupported'
     ? 'HDR/广色域到 SDR 的兼容副本暂不支持，原档已保留，未生成兼容副本。'
     : '';
 }
 export function jobStatusLabel(job: Row) {
-  if (compatibilityNotice(job)) return '未生成兼容副本';
+  if (compatibilityNotice(job))
+    return job.result?.compatibility === 'not_needed' ? '无需兼容副本' : '未生成兼容副本';
   return job.kind === 'archive_video' && job.status === 'succeeded' ? '资料已完成' : '';
 }
 export function mediaCaptureLabel(job: Row) {
@@ -82,6 +84,7 @@ const phases: Record<string, string> = {
   media_ready: '原档已保存',
   compatible_copy: '生成兼容副本',
   compatible_ready: '兼容副本已就绪',
+  compatible_not_needed: '无需兼容副本',
   compatible_unsupported: '此格式暂不支持生成兼容副本',
   pages: '检查来源分页',
   verify: '核对来源列表',

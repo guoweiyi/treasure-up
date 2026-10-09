@@ -81,6 +81,8 @@ docker compose up -d --force-recreate
 
 后台本地存储路径是容器内路径，默认 `/data/media`。自定义 NAS 挂载需要后端 UID / GID `10001:10001` 可读写、Nginx 可读取和遍历目录。对象存储在后台表单配置，浏览器直连还需设置对应的 CORS 和 HTTPS 域名。
 
+源码目录中的 `compose.yaml` 支持在 `.env` 设置 `TREASURE_MEDIA_PATH`，默认使用 `media` 命名卷；例如 `TREASURE_MEDIA_PATH=Q:/BILI` 会将 Windows 主机目录映射到各媒体读写服务的 `/data/media`，Web 和备份服务保持只读。已有数据时，先停止采集、下载等写入服务，将原媒体卷的全部内容复制到目标目录并校验完整性。若使用 root 复制，需将目标媒体目录及其已有子目录、文件的属主恢复为后端 UID / GID `10001:10001`；此权限调整仅针对目标媒体树。再修改配置，用原来相同的 Compose 文件组合执行 `up -d --force-recreate`。以 `10001:10001` 身份检查已有子目录的访问权限，并通过应用的存储写入方法实际写入和清理测试文件，覆盖后续会写入的已有子目录；仅在 `/data/media` 根目录创建探针不足以证明子目录可写。确认读写和播放正常后再处理旧卷；只修改路径不会自动搬迁已有文件。后台存储路径继续填写 `/data/media`。此设置适用于源码部署，Release 和 OCI 发布的 Compose 仍默认使用命名卷。
+
 ## 查看服务
 
 ```sh

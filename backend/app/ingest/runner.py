@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -27,8 +27,9 @@ from app.models import (Asset, AssetRef, CaptureRun, Collection, CollectionItem,
 from app.security import decrypt_secret
 from app.storage.service import ingest_file
 from .client import BiliClient, clean_raw, safe_source_url, parse_cookies
+from .creator_scope import video_has_creator
 from .errors import IngestDeferred, IngestError, PartialCaptureError
-from .media import archive_media, cleanup_media_scratch, ensure_playback_variant
+from .media import archive_media, cleanup_media_scratch, ensure_playback_variant, playback_requirement
 from .protobuf import decode_danmaku
 from .throttle import AccountPacer, utc
 
@@ -495,12 +496,14 @@ def _metadata(ctx, video):
     requested_uid = ctx.policy.get("capture_creator_uid")
     if requested_uid:
         from app.paid_capture import paid_hint
-        if str((data.get("owner") or {}).get("mid")) != requested_uid:
+        if not video_has_creator(data, requested_uid):
             raise IngestError("稿件作者与采集选择不一致", code="creator_changed", retryable=False)
         paid_filter = ctx.policy.get("capture_paid_filter", "exclude")
         if paid_filter != "all" and paid_hint(data) != (paid_filter == "only"):
             raise IngestError("稿件充电属性已改变，请重新选择采集范围", code="capture_filter_changed", retryable=False)
     from app.library_deletion import check_video_allowed
+    if requested_uid:
+        check_video_allowed(ctx.db, video, uid=requested_uid)
     check_video_allowed(ctx.db, video, uid=str((data.get("owner") or {}).get("mid") or ""))
     video.aid = _id(data.get("aid"))
     video.title, video.description = str(data.get("title") or ""), str(data.get("desc") or "")
@@ -526,6 +529,15 @@ def _metadata(ctx, video):
                 relation = VideoCreator(video_id=video.id, creator_id=creator.id, role=role)
                 ctx.db.add(relation)
             relation.role_title = str(member.get("title") or "UP主")
+    owner = data.get("owner")
+    owner_uid = _id(owner.get("mid"), required=False) if isinstance(owner, dict) else "0"
+    if owner_uid != "0":
+        # View is authoritative: remove legacy owner links created from a
+        # participant's space listing, while retaining all non-owner roles.
+        other_creators = select(Creator.id).join(PlatformUser, PlatformUser.id == Creator.user_id).where(
+            PlatformUser.uid != owner_uid)
+        ctx.db.execute(delete(VideoCreator).where(VideoCreator.video_id == video.id,
+            VideoCreator.role == "owner", VideoCreator.creator_id.in_(other_creators)))
     current = []
     for number, raw in enumerate(data["pages"], start=1):
         cid = _id(raw.get("cid"))
@@ -869,12 +881,16 @@ def _ingest_state(ctx, video, **values):
 def _playback_state(ctx, video, archive, job, status=None):
     state = (video.metadata_json or {}).get("ingest_state", {})
     children = dict(state.get("playback_jobs", {}))
-    status = status or ("unsupported" if job.status == "succeeded" and (job.result or {}).get("compatibility") == "unsupported"
+    status = status or ((job.result or {}).get("compatibility") if job.status == "succeeded"
+                        and (job.result or {}).get("compatibility") in {"unsupported", "not_needed"}
                         else "complete" if job.status == "succeeded" else job.status)
-    children[archive.id] = {"job_id": job.id, "part_id": archive.part_id, "status": status}
+    children[archive.id] = {"job_id": job.id if job else None, "part_id": archive.part_id, "status": status}
     statuses = {item["status"] for item in children.values()}
-    aggregate = next((value for value in ("failed", "partial", "blocked", "cancelled", "paused", "running", "queued", "unsupported") if value in statuses), "complete")
-    _ingest_state(ctx, video, playback=aggregate, playback_job_id=job.id, playback_jobs=children)
+    aggregate = next((value for value in ("failed", "partial", "blocked", "cancelled", "paused", "running", "queued", "unsupported")
+                      if value in statuses), "not_needed" if statuses == {"not_needed"} else "complete")
+    job_id = None if aggregate == "not_needed" else next((item["job_id"] for item in reversed(list(children.values()))
+        if item["status"] == aggregate and item.get("job_id")), None)
+    _ingest_state(ctx, video, playback=aggregate, playback_job_id=job_id, playback_jobs=children)
 
 
 def _profiles(ctx, video):
@@ -1107,9 +1123,13 @@ def _download(ctx, video):
         from app.maintenance import enqueue_variant_preparation
         enqueue_variant_preparation(ctx.db, variant)
         if ctx.policy.get("create_compatible_copy", True):
-            playback = enqueue(ctx.db, "create_playback", variant.id, policy=dict(ctx.policy),
-                dedupe_key="playback:" + variant.id, frozen_policy=True)
-            _playback_state(ctx, video, variant, playback)
+            policy = {**ctx.policy, "compatibility_request": "automatic"}
+            if playback_requirement(ctx.db, part, variant, policy) == "not_needed":
+                _playback_state(ctx, video, variant, None, "not_needed")
+            else:
+                playback = enqueue(ctx.db, "create_playback", variant.id, policy=policy,
+                    dedupe_key="playback:" + variant.id, frozen_policy=True)
+                _playback_state(ctx, video, variant, playback)
             ctx.save()
     if not completed:
         raise IngestError("媒体任务缺少分P检查点", code="invalid_metadata", retryable=False)
@@ -1120,6 +1140,10 @@ def _download(ctx, video):
 
 def _create_playback(db, job):
     ctx = Context(db, job, None)
+    # Older manual jobs predate the explicit internal mode marker. Automatic
+    # playback:<variant> jobs keep the new on-demand behavior after upgrading.
+    if (job.dedupe_key or "").startswith("compatible-"):
+        ctx.policy["compatibility_request"] = "manual"
     preparation = None
     archive = db.get(MediaVariant, job.target_id)
     part = db.get(VideoPart, archive.part_id) if archive else None
@@ -1131,6 +1155,14 @@ def _create_playback(db, job):
         try:
             ctx.stage("compatible_copy", part_id=part.id)
             playback, reused = ensure_playback_variant(db, part, archive, ctx.policy, guard=ctx.guard)
+            if playback is None:
+                _playback_state(ctx, video, archive, job, "not_needed")
+                _ingest_state(ctx, video, playback_error=None, playback_reason="original_supported")
+                ctx.run.status, ctx.run.end_reason, ctx.run.finished_at = "visible_traversal_complete", "compatibility_not_needed", _now()
+                ctx.stage("compatible_not_needed", archive_variant_id=archive.id)
+                return {"video_id": video.id, "archive_variant_id": archive.id, "variant_id": None,
+                        "run_id": ctx.run.id, "compatibility": "not_needed", "reason": "original_supported",
+                        "message": "原档无需兼容转换，未生成额外副本。"}
             _ref(db, playback.asset_id, "media_variant", playback.id, "playback")
             # Every compatible rendition needs its own segmentation/loudness
             # decisions; older H.264 copies must not fall back to giant files.

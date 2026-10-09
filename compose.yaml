@@ -25,7 +25,7 @@ x-backend: &backend
     TREASURE_PASSKEY_RP_NAME: ${TREASURE_PASSKEY_RP_NAME:-Treasure Up}
     TREASURE_PASSKEYS_ENABLED: ${TREASURE_PASSKEYS_ENABLED:-true}
   volumes:
-    - media:/data/media
+    - ${TREASURE_MEDIA_PATH:-media}:/data/media
     - scratch:/data/scratch
   depends_on:
     postgres:
@@ -82,7 +82,7 @@ services:
         condition: service_completed_successfully
     volumes:
       # Administrator connection checks write and remove a small random probe.
-      - media:/data/media
+      - ${TREASURE_MEDIA_PATH:-media}:/data/media
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
       interval: 10s
@@ -135,7 +135,7 @@ services:
       <<: *environment
       TREASURE_BACKUP_KEY: ${TREASURE_BACKUP_KEY:?Set independent backup key}
     volumes:
-      - media:/data/media:ro
+      - ${TREASURE_MEDIA_PATH:-media}:/data/media:ro
       - scratch:/data/scratch
       - backup:/backups
     depends_on:
@@ -150,7 +150,7 @@ services:
     ports:
       - "${TREASURE_BIND_ADDRESS:-127.0.0.1}:${TREASURE_PORT:-8788}:80"
     volumes:
-      - media:/data/media:ro
+      - ${TREASURE_MEDIA_PATH:-media}:/data/media:ro
     depends_on:
       api:
         condition: service_healthy

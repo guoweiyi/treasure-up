@@ -502,7 +502,7 @@ onBeforeUnmount(() => {
               优先杜比全景声</label
             ><label
               ><input v-model="form.policy.create_compatible_copy" type="checkbox" />
-              另存兼容副本</label
+              按需另存兼容副本</label
             >
             <label
               ><input v-model="form.policy.prefer_h264" type="checkbox" />优先 H.264 编码</label
@@ -514,6 +514,11 @@ onBeforeUnmount(() => {
               />包含自动生成字幕</label
             >
           </div>
+          <p class="field-help">
+            普通 MP4（H.264、HEVC 或 AV1 视频，AAC 单声道或立体声）不自动生成兼容副本。 EC-3、FLAC
+            等不兼容音频仅转为 AAC，保留原视频和原档，仍需设备支持视频编码。 旧设备可手动生成 H.264
+            兼容副本；HLS 分片仍按播放设置准备。
+          </p>
         </details>
         <details>
           <summary>采集限制</summary>

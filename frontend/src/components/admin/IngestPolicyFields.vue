@@ -9,7 +9,7 @@ const booleans = [
   ['fetch_danmaku', '保存弹幕'],
   ['fetch_subtitles', '保存字幕'],
   ['include_auto_subtitles', '包含自动字幕'],
-  ['create_compatible_copy', '按需生成浏览器兼容副本'],
+  ['create_compatible_copy', '按需生成兼容副本'],
   ['prefer_h264', '优先 H.264'],
   ['prefer_dolby_vision', '优先杜比视界'],
   ['prefer_dolby_atmos', '优先杜比全景声'],
@@ -28,7 +28,12 @@ const numbers = [
 <template>
   <details class="policy-fields">
     <summary>本次采集策略（可选）</summary>
-    <p class="field-help">未填写的项目沿用系统策略。兼容副本可能需要额外转码和空间，原档保留。</p>
+    <p class="field-help">
+      未填写的项目沿用系统策略。普通 MP4（H.264、HEVC 或 AV1 视频，AAC
+      单声道或立体声）不自动生成兼容副本。 EC-3、FLAC 等不兼容音频仅转为
+      AAC，保留原视频和原档，仍需设备支持视频编码。 旧设备可手动生成 H.264 兼容副本；HLS
+      分片仍按播放设置准备。
+    </p>
     <el-form-item label="画质上限"
       ><el-select v-model="value.quality" clearable placeholder="使用系统设置"
         ><el-option value="best" label="最高可用画质" /><el-option

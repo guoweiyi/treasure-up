@@ -29,6 +29,14 @@ def production_compose(root: Path, images: dict[str, str] | None = None) -> dict
                      "TREASURE_PASSKEY_RP_NAME", "TREASURE_PASSKEYS_ENABLED"}
     for name, service in services.items():
         service.pop("build", None)
+        # Host media paths are a source-checkout option. Published Compose must
+        # remain self-contained and mount only declared named volumes.
+        service["volumes"] = [
+            volume.replace("${TREASURE_MEDIA_PATH:-media}:", "media:", 1)
+            if isinstance(volume, str) and volume.startswith("${TREASURE_MEDIA_PATH:-media}:")
+            else volume
+            for volume in service.get("volumes", [])
+        ]
         if name in {"postgres", "redis", "web"}:
             continue
         service["image"] = images["backend"]
