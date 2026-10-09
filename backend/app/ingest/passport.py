@@ -159,6 +159,9 @@ class BiliPassport:
     """One short-lived protocol client per operation/account; no shared cookie jar."""
     def __init__(self, *, transport=None, clock=time.time):
         self.clock = clock
+        # Only established-account refresh installs a pacing hook. QR login
+        # remains an independent authorization operation.
+        self.before_request = None
         self.http = httpx.Client(timeout=httpx.Timeout(10, connect=5, pool=5),
             follow_redirects=False, trust_env=False, transport=transport,
             headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/", "Accept-Encoding": "identity"})
@@ -172,10 +175,16 @@ class BiliPassport:
     def close(self):
         self.http.close()
 
-    def _request(self, method, url, *, cookies=None, params=None, data=None, html=False):
+    def _request(self, method, url, *, cookies=None, params=None, data=None, html=False, before_send=None):
         fixed = url in {GENERATE, POLL, INFO, REFRESH, CONFIRM, BUVID}
         if not fixed and not re.fullmatch(re.escape(CORRESPOND) + r"[a-f0-9]{256}", url):
             raise _error("不允许的 B站登录接口", code="invalid_request")
+        if self.before_request:
+            self.before_request(url)
+        # Pacing and cancellation must finish before recording an outgoing
+        # credential mutation. A deferred request has not rotated anything.
+        if before_send:
+            before_send()
         token = _private_io.set(True)
         limit = MAX_HTML_BYTES if html else MAX_JSON_BYTES
         started = time.monotonic()
@@ -338,17 +347,22 @@ class BiliPassport:
         matches = re.findall(r'<div\s+id=[\"\']1-name[\"\']\s*>\s*([a-fA-F0-9]{32})\s*</div>', document)
         if len(matches) != 1:
             raise _error("未取得 B站刷新校验值")
-        if before_rotate is not None:
-            before_rotate()
+        sent = False
+        def before_send():
+            nonlocal sent
+            if before_rotate is not None:
+                before_rotate()
+            sent = True
         try:
-            data, headers = self._json("POST", REFRESH, cookies=cookies, data={
+            data, headers = self._json("POST", REFRESH, cookies=cookies, before_send=before_send, data={
                 "csrf": cookies["bili_jct"], "refresh_csrf": matches[0],
                 "refresh_token": refresh_token, "source": "main_web"})
             return self._credential(data, headers, cookies)
         except IngestError as error:
-            error.mutation_started = True
-            if not hasattr(error, "mutation_uncertain"):
-                error.mutation_uncertain = True
+            if sent:
+                error.mutation_started = True
+                if not hasattr(error, "mutation_uncertain"):
+                    error.mutation_uncertain = True
             raise
 
     def confirm_refresh(self, new_cookie_text, old_refresh_token):

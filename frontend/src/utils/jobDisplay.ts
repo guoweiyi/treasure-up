@@ -96,6 +96,7 @@ const sourceCooldownErrors = new Set([
   '源站要求验证，请暂停并检查账号',
   '弹幕源站风控，请稍后恢复',
   '账号仍在源站冷却期',
+  '账号仍在源站冷却期，任务将延后',
 ]);
 export function jobPhase(job: Row, now = Date.now()) {
   // These are server-sanitized domain errors. Do not infer a source cooldown
@@ -105,6 +106,18 @@ export function jobPhase(job: Row, now = Date.now()) {
     return Number.isFinite(availableAt) && availableAt > now
       ? '等待源站冷却后重试'
       : '等待工作进程重试';
+  }
+  if (job.status === 'queued') {
+    if (job.error === '已有视频正在下载，等待串行下载时段') return '等待串行下载';
+    if (
+      [
+        '等待下一次串行视频下载时段',
+        '等待下一次媒体下载时段',
+        '等待同账号下一次媒体下载时段',
+      ].includes(job.error)
+    )
+      return '等待下载间隔';
+    if (job.error === '账号请求正在排队，请稍后重试') return '等待账号请求间隔';
   }
   const phase =
     job.checkpoint?.progress?.phase ||

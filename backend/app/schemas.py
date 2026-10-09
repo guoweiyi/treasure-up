@@ -85,11 +85,11 @@ class IngestPolicy(Input):
     prefer_h264: bool = False
     prefer_dolby_vision: bool = True
     prefer_dolby_atmos: bool = True
-    request_interval_seconds: float = Field(default=3, ge=1, le=120)
+    request_interval_seconds: float = Field(default=8, ge=1, le=120)
     asset_interval_seconds: float = Field(default=0.1, ge=0.05, le=5)
-    video_interval_seconds: float = Field(default=60, ge=10, le=3600)
+    video_interval_seconds: float = Field(default=180, ge=10, le=3600)
     interval_jitter_seconds: float = Field(default=10, ge=0, le=300)
-    risk_cooldown_seconds: int = Field(default=900, ge=60, le=86400)
+    risk_cooldown_seconds: int = Field(default=1800, ge=60, le=86400)
     download_rate_bytes: int | None = Field(default=None, ge=10000, le=1_000_000_000)
     fragment_concurrency: int = Field(default=1, ge=1, le=3)
     refresh_danmaku: bool = False
@@ -107,6 +107,20 @@ class IngestPolicy(Input):
     include_auto_subtitles: bool = True
     max_download_bytes: int = Field(default=30_000_000_000, ge=1_000_000, le=500_000_000_000)
     max_pages: int = Field(default=100, ge=1, le=10000)
+
+    @field_validator("request_interval_seconds", "video_interval_seconds", "risk_cooldown_seconds")
+    @classmethod
+    def conservative_intervals(cls, value, info):
+        # Accept legacy saved policies, but never resume their previous bursts.
+        floors = {"request_interval_seconds": 8, "video_interval_seconds": 180,
+                  "risk_cooldown_seconds": 1800}
+        return max(value, floors[info.field_name])
+
+    @field_validator("fragment_concurrency")
+    @classmethod
+    def serial_fragments(cls, value):
+        # Keep old values parseable while removing parallel downloads.
+        return 1
 
 
 class SourceInput(Input):

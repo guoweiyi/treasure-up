@@ -9,6 +9,7 @@ from app.ingest.client import parse_cookies
 from app.ingest.errors import IngestDeferred, IngestError
 from app.ingest.passport import BiliPassport, validate_refresh_token
 from app.ingest.runner import _lock, credential_lock
+from app.ingest.throttle import AccountPacer
 from app.jobs import enqueue
 from app.models import Job, SourceAccount, utcnow
 from app.security import decrypt_secret, encrypt_secret
@@ -213,7 +214,14 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
             # A previous process died after declaring an outgoing rotation but
             # before saving its result. Reissuing that POST is not safe.
             return failure(expected, "refresh_uncertain", phase="relogin_required")
+        pacer = AccountPacer(db, account, {}, guard)
         with (passport_factory or BiliPassport)() as passport:
+            def before_request(url):
+                pacer.before_request(url)
+                # A wait may overlap an account edit. Recheck the generation
+                # after the slot is acquired and before sending these cookies.
+                write(expected, lambda row: None)
+            passport.before_request = before_request
             if not old_token:
                 def checking(row):
                     row.refresh_phase, row.refresh_error_code = "checking", None
@@ -221,7 +229,10 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
                 guard()
                 try:
                     info = passport.refresh_info(cookie)
+                except IngestDeferred:
+                    raise
                 except IngestError as error:
+                    pacer.failed(error)
                     return failure(expected, error.code, phase="relogin_required" if error.code in
                         {"login_required", "invalid_refresh_token", "invalid_cookie"} else "error",
                         retry_after_seconds=error.retry_after_seconds)
@@ -244,6 +255,7 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
                 except IngestDeferred:
                     raise
                 except IngestError as error:
+                    pacer.failed(error)
                     if error.code in {"account_disabled", "refresh_paused"}:
                         raise
                     ambiguous = bool(getattr(error, "mutation_started", False) and
@@ -277,7 +289,10 @@ def refresh_account(db, account_id, *, manual=False, check_active=None, passport
             write(expected, lambda row: None)
             try:
                 passport.confirm_refresh(cookie, old_token)
+            except IngestDeferred:
+                raise
             except IngestError as error:
+                pacer.failed(error)
                 return failure(expected, "confirm_failed", phase="pending_confirm", pending=True,
                                retry_after_seconds=error.retry_after_seconds)
 

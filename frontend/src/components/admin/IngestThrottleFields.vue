@@ -5,10 +5,16 @@ defineProps<{ value: Row }>();
 </script>
 <template>
   <div class="form-two-columns">
-    <el-form-item label="视频之间的间隔（秒）"
+    <el-form-item label="同账号 API 请求间隔（秒）"
+      ><el-input-number
+        v-model="value.request_interval_seconds"
+        :min="8"
+        :max="120"
+        :step="1" /></el-form-item
+    ><el-form-item label="下载结束后的间隔（秒）"
       ><el-input-number
         v-model="value.video_interval_seconds"
-        :min="10"
+        :min="180"
         :max="3600"
         :step="0.1" /></el-form-item
     ><el-form-item label="随机延迟上限（秒）"
@@ -20,7 +26,7 @@ defineProps<{ value: Row }>();
     ><el-form-item label="风险响应冷却（秒）"
       ><el-input-number
         v-model="value.risk_cooldown_seconds"
-        :min="60"
+        :min="1800"
         :max="86400"
         :step="60" /></el-form-item
     ><el-form-item label="下载限速（字节 / 秒，可留空）"
@@ -32,11 +38,11 @@ defineProps<{ value: Row }>();
         :controls="false"
       />
       <p class="field-help">留空使用未设限速策略。1,000,000 字节 / 秒约为 1 MB/s。</p></el-form-item
-    ><el-form-item label="媒体分片并发"
-      ><el-input-number v-model="value.fragment_concurrency" :min="1" :max="3"
-    /></el-form-item>
+    >
   </div>
   <p class="field-help">
-    间隔与冷却按账号调度；遇到风险响应会暂停该账号的请求。新配置用于之后创建的任务。
+    所有账号的视频下载共用一个串行队列，分片也逐个下载；每个视频或分 P 结束后至少等待 180 秒。
+    同账号 API 请求至少间隔 8 秒；更长的系统间隔也会应用于已排队任务。 遇到限流至少冷却 30
+    分钟，连续受限会延长等待，并遵守源站要求的等待时间。
   </p>
 </template>

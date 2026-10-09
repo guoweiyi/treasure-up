@@ -103,9 +103,9 @@ def _safe_error(error):
     if error.code == "endpoint_login_required":
         return HTTPException(422, "账号登录仍有效，但 B 站暂不允许访问此接口，请稍后重试")
     if isinstance(error, IngestDeferred) or error.code == "rate_limited":
-        return HTTPException(429, "账号正在采集或冷却，请稍后加载来源", headers={
+        return HTTPException(429, "账号请求正在排队或源站冷却中，请按等待时间重新加载来源", headers={
             "Retry-After": str(max(1, min(86400, int(error.retry_after_seconds or 30)))),
-            "X-Source-Error": error.code if error.code in {"resource_busy", "account_cooldown", "rate_limited"} else "account_cooldown"})
+            "X-Source-Error": error.code if error.code in {"resource_busy", "account_cooldown", "rate_limited", "request_interval"} else "account_cooldown"})
     if error.code in {"not_found", "access_denied"}:
         return HTTPException(422, "该账号无法访问此来源，请检查链接和访问权限")
     return HTTPException(502, "B 站来源列表暂时不可用，请稍后重试")
@@ -141,6 +141,7 @@ def _response_cache_key(db, account, client, *parts):
 @contextmanager
 def _client(db, account):
     client, pacer = None, None
+    deadline = time.monotonic() + 75
     try:
         with credential_lock(db, account.id):
             db.refresh(account)
@@ -152,13 +153,16 @@ def _client(db, account):
             initial_generation = _key(account)
         client = BiliClient(secret, interval=0)
         client.credential_generation = initial_generation
-        # Ordinary discovery calls only share actual source rejection cooldown.
-        # Long media transfers and legacy next_request_at do not block them.
+        client.deadline = deadline
+        # Foreground pickers share the same API slots as background jobs, with
+        # bounded waiting so the browser can honor Retry-After instead of hanging.
         def guard():
-            pass
+            if time.monotonic() >= deadline:
+                raise IngestDeferred("来源读取等待时间较长，请稍后分批重试", code="request_interval",
+                                     retry_after_seconds=8)
         system = db.get(Setting, "ingest")
         policy = dict(system.value) if system and isinstance(system.value, dict) else {}
-        pacer = AccountPacer(db, account, policy, guard, jitter=lambda _: 0)
+        pacer = AccountPacer(db, account, policy, guard, jitter=lambda _: 0, max_wait_seconds=20)
         client.before_request = pacer.before_request
         generation, last_sent_generation = None, None
         @contextmanager

@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { api, write, query, errorText, duration, date } from '../api';
+import { api, write, query, errorText, duration, date, sessionRevision } from '../api';
 import type { Creator } from '../types';
+import {
+  submitCreatorCapture,
+  type CaptureCounts,
+  type CaptureProgress,
+} from '../utils/creatorCapture';
 
 type PaidFilter = 'all' | 'only' | 'exclude';
 type LatestVideo = {
@@ -39,9 +44,14 @@ const data = ref<LatestPage | null>(null),
 const loading = ref(false),
   submitting = ref(false),
   error = ref(''),
-  message = ref('');
+  message = ref(''),
+  captureFailure = ref(false),
+  retryAt = ref(0),
+  captureProgress = ref(''),
+  stopAfterBatch = ref(false);
 let generation = 0;
 let controller: AbortController | undefined;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
 const hasAccounts = computed(() => !!options.value?.accounts.length);
 const candidates = computed(
   () => data.value?.items.filter((item) => item.capture_status !== 'complete') ?? [],
@@ -63,6 +73,7 @@ async function open() {
   selected.value = [];
   paid.value = 'all';
   error.value = message.value = '';
+  captureFailure.value = false;
   loading.value = true;
   await nextTick();
   if (n !== generation) return;
@@ -95,6 +106,7 @@ async function latest(page = 1, refresh = false) {
   controller = new AbortController();
   loading.value = true;
   error.value = message.value = '';
+  captureFailure.value = false;
   data.value = null;
   selected.value = [];
   failedCovers.value = new Set();
@@ -110,22 +122,65 @@ async function latest(page = 1, refresh = false) {
     if (n === generation) loading.value = false;
   }
 }
+function captureMessage(result: CaptureProgress) {
+  return `已加入采集 ${result.queued} 个视频${result.reused ? `，${result.reused} 个已有任务` : ''}${result.skipped ? `，${result.skipped} 个无需重复采集` : ''}。`;
+}
 async function capture() {
-  if (submitting.value || loading.value || !selected.value.length) return;
+  if (submitting.value || loading.value || !selected.value.length || retryAt.value) return;
   const n = generation;
+  const creatorId = props.creator.id;
+  const account = accountId.value;
+  const filter = paid.value;
+  const revision = sessionRevision.value;
+  const isCurrent = () =>
+    n === generation &&
+    creatorId === props.creator.id &&
+    account === accountId.value &&
+    filter === paid.value &&
+    revision === sessionRevision.value;
+  stopAfterBatch.value = false;
   submitting.value = true;
+  captureFailure.value = false;
   error.value = message.value = '';
+  captureProgress.value = `正在提交 0/${selected.value.length}…`;
   try {
-    const result = await write<{ queued: number; reused: number; skipped: number }>(
-      `/creators/${props.creator.id}/capture`,
-      { account_id: accountId.value, bvids: [...selected.value], paid: paid.value },
+    const result = await submitCreatorCapture(
+      [...selected.value],
+      (batch) =>
+        write<CaptureCounts>(`/creators/${creatorId}/capture`, {
+          account_id: account,
+          bvids: batch,
+          paid: filter,
+        }),
+      (progress) => {
+        selected.value = [...progress.remaining];
+        captureProgress.value = `正在提交 ${progress.completed.length}/${progress.total}…`;
+        message.value = captureMessage(progress);
+      },
+      isCurrent,
+      () => !stopAfterBatch.value,
     );
-    if (n !== generation) return;
-    selected.value = [];
-    message.value = `已加入采集 ${result.queued} 个视频${result.reused ? `，${result.reused} 个已有任务` : ''}${result.skipped ? `，${result.skipped} 个无需重复采集` : ''}。稍后可在这位 UP 的已保存视频中查看。`;
-    emit('captured');
-  } catch (e) {
-    if (n === generation) error.value = errorText(e);
+    if (!isCurrent()) return;
+    if (result.completed.length) emit('captured');
+    if (result.failure) {
+      captureFailure.value = true;
+      const failure = result.failure as { status?: number; retryAfterSeconds?: number };
+      if (failure.status === 429) {
+        const seconds = Number.isFinite(failure.retryAfterSeconds)
+          ? Math.max(1, failure.retryAfterSeconds!)
+          : 30;
+        retryAt.value = Date.now() + seconds * 1000;
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(() => {
+          retryAt.value = 0;
+        }, seconds * 1000);
+      }
+      error.value = `${errorText(result.failure)}。已停止后续提交，剩余 ${result.remaining.length} 个视频仍被选中。`;
+    } else {
+      message.value = result.cancelled
+        ? `${captureMessage(result)}已停止后续提交，剩余 ${result.remaining.length} 个视频仍被选中。`
+        : `${captureMessage(result)}稍后可在这位 UP 的已保存视频中查看。`;
+    }
   } finally {
     if (n === generation) submitting.value = false;
   }
@@ -134,12 +189,15 @@ watch(
   () => props.creator.id,
   () => {
     resetRead();
+    clearTimeout(retryTimer);
+    retryAt.value = 0;
     dialog.value?.close();
     submitting.value = loading.value = false;
   },
 );
 onBeforeUnmount(() => {
   resetRead();
+  clearTimeout(retryTimer);
   dialog.value?.close();
 });
 </script>
@@ -271,6 +329,7 @@ onBeforeUnmount(() => {
         {{ error }}
         <button
           type="button"
+          v-if="!captureFailure"
           class="text-button"
           :disabled="loading || submitting"
           @click="options ? latest() : open()"
@@ -279,20 +338,36 @@ onBeforeUnmount(() => {
         </button>
       </p>
       <p v-if="message" class="capture-success" role="status">{{ message }}</p>
+      <p v-if="retryAt" role="status">
+        可在 {{ date(new Date(retryAt).toISOString()) }} 后手动继续提交。
+      </p>
       <footer v-if="hasAccounts">
         <p>按所选账号已有权限采集，使用系统的画质与存储配置。</p>
         <button
+          v-if="submitting"
+          type="button"
+          :disabled="stopAfterBatch"
+          @click="
+            stopAfterBatch = true;
+            captureProgress = '正在完成当前批次…';
+          "
+        >
+          停止后续提交
+        </button>
+        <button
           type="button"
           class="primary"
-          :disabled="loading || submitting || !selected.length"
+          :disabled="loading || submitting || !!retryAt || !selected.length"
           @click="capture"
         >
           {{
             submitting
-              ? '正在提交…'
-              : selected.length
-                ? `采集已选 ${selected.length} 个视频`
-                : '先选择视频'
+              ? captureProgress
+              : retryAt
+                ? '等待源站恢复'
+                : selected.length
+                  ? `采集已选 ${selected.length} 个视频`
+                  : '先选择视频'
           }}
         </button>
       </footer>

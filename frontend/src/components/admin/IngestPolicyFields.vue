@@ -15,12 +15,12 @@ const booleans = [
   ['prefer_dolby_atmos', '优先杜比全景声'],
 ] as const;
 const numbers = [
-  { key: 'video_interval_seconds', label: '视频间隔（秒）', min: 10, max: 3600 },
+  { key: 'request_interval_seconds', label: 'API 请求间隔（秒）', min: 8, max: 120 },
+  { key: 'video_interval_seconds', label: '下载结束后的间隔（秒）', min: 180, max: 3600 },
   { key: 'interval_jitter_seconds', label: '随机延迟上限（秒）', min: 0, max: 300 },
-  { key: 'risk_cooldown_seconds', label: '风险冷却（秒）', min: 60, max: 86400 },
+  { key: 'risk_cooldown_seconds', label: '风险冷却（秒）', min: 1800, max: 86400 },
   { key: 'request_budget', label: '每轮请求预算', min: 1, max: 10000 },
   { key: 'max_pages', label: '每轮分页上限', min: 1, max: 10000 },
-  { key: 'fragment_concurrency', label: '媒体分片并发', min: 1, max: 3 },
   { key: 'max_download_bytes', label: '单次下载上限（字节）', min: 1000000, max: 500000000000 },
   { key: 'download_rate_bytes', label: '下载限速（字节/秒）', min: 10000, max: 1000000000 },
 ];
@@ -53,6 +53,7 @@ const numbers = [
     <CommentBudgetFields :value="value" inherit />
     <details>
       <summary>请求与下载限制</summary>
+      <p class="field-help">视频与分片均串行下载；实际间隔采用本次策略与系统设置中较长的值。</p>
       <div class="form-two-columns">
         <el-form-item v-for="item in numbers" :key="item.key" :label="item.label"
           ><el-input-number

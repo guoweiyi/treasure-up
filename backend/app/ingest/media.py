@@ -28,6 +28,7 @@ from app.playback.source import VerifiedSource
 from app.storage.naming import media_name_for_part
 from .client import UA, retry_after
 from .errors import IngestError
+from .diagnostics import canonical_source_endpoint
 
 
 # Normalize the float downmix explicitly: implicit -ac 2 can sum correlated
@@ -270,8 +271,11 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None, author
                 source_request = host == "bilibili.com" or host.endswith(".bilibili.com")
                 scope = client.request_context(url) if source_request and getattr(client, "request_context", None) else nullcontext()
                 with scope:
-                    if source_request and getattr(client, "before_request", None):
+                    if getattr(client, "before_request", None):
+                        # CDN transfers also observe a newly published cooldown;
+                        # the pacer reserves API intervals only for Bili hosts.
                         client.before_request(url)
+                    if source_request:
                         # request_context refreshes rotated credentials under
                         # the account lock; replace the extractor's old jar too.
                         if tuple(client.cookies) != self._treasure_cookies:
@@ -287,7 +291,8 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None, author
                         if error.status in (403, 412, 429):
                             delay = retry_after(error.response.headers.get("retry-after"))
                             error.close()
-                            raise IngestError("媒体源站限流，暂停并等待冷却", code="rate_limited", retry_after_seconds=delay) from None
+                            raise IngestError("媒体源站限流，暂停并等待冷却", code="rate_limited", retry_after_seconds=delay,
+                                              source_endpoint=canonical_source_endpoint(url), http_status=error.status) from None
                         raise
 
             def run_pp(self, pp, info):
@@ -300,8 +305,14 @@ def archive_media(db, client, video, part, policy, *, guard=lambda: None, author
             "cookiefile": str(cookie_path), "noplaylist": True,
             "format": "bestvideo+bestaudio/best", "outtmpl": str(folder / "media.%(ext)s"),
             "merge_output_format": "mp4", "ffmpeg_location": ffmpeg_location,
-            "socket_timeout": 30, "retries": 2, "fragment_retries": 2,
-            "concurrent_fragment_downloads": max(1, min(3, int(policy.get("fragment_concurrency", 1)))), "max_filesize": maximum,
+            "socket_timeout": 30,
+            # The durable job queue schedules retries after a delay. Internal
+            # downloader retries would immediately repeat rejected requests.
+            "retries": 0, "fragment_retries": 0, "extractor_retries": 0,
+            "file_access_retries": 0,
+            # Enforce serial fragments even for old frozen policies requesting
+            # concurrency. The runner separately serializes whole videos.
+            "concurrent_fragment_downloads": 1, "max_filesize": maximum,
             "http_headers": {"User-Agent": UA, "Referer": "https://www.bilibili.com/"},
             "progress_hooks": [hook], "continuedl": True, "keepvideo": True,
             "skip_unavailable_fragments": False,

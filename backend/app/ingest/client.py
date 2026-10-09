@@ -11,9 +11,11 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from .errors import IngestError
+from .errors import IngestDeferred, IngestError
+from .diagnostics import canonical_source_endpoint
 
 API = "https://api.bilibili.com"
+WBI_CACHE_SECONDS = 1800
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
 
@@ -145,6 +147,7 @@ class BiliClient:
         self.last_request = 0
         self.images = None
         self.images_at = 0
+        self.deadline = None
         self.before_request = None
         self.before_video = None
         self.request_context = lambda url: nullcontext()
@@ -159,7 +162,13 @@ class BiliClient:
         with self.request_context(url):
             return self._request_in_context(url, params=params, limit=limit, authenticated=authenticated)
 
+    def _check_deadline(self):
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise IngestDeferred("来源读取等待时间较长，请稍后分批重试", code="request_interval",
+                                 retry_after_seconds=8)
+
     def _request_in_context(self, url, *, params=None, limit=16 * 1024 * 1024, authenticated=False):
+        self._check_deadline()
         if self.before_request:
             self.before_request(url)
         # Public CDN assets carry no Cookie and do not consume the account API
@@ -174,19 +183,28 @@ class BiliClient:
         else:
             self.last_request = time.monotonic()
         headers = {"Cookie": cookie_header(self.cookies, url)} if authenticated and self.cookies else {}
+        self._check_deadline()
+        timeout = self.http.timeout
+        if self.deadline is not None:
+            remaining = max(0.001, self.deadline - time.monotonic())
+            timeout = httpx.Timeout(min(30, remaining), connect=min(10, remaining))
         try:
-            with self.http.stream("GET", url, params=params, headers=headers) as response:
+            with self.http.stream("GET", url, params=params, headers=headers, timeout=timeout) as response:
                 if response.status_code in (403, 412, 429):
-                    raise IngestError("源站限流或风控，请稍后恢复任务", code="rate_limited", retry_after_seconds=retry_after(response.headers.get("retry-after")))
+                    raise IngestError("源站限流或风控，请稍后恢复任务", code="rate_limited",
+                                      retry_after_seconds=retry_after(response.headers.get("retry-after")),
+                                      source_endpoint=canonical_source_endpoint(url), http_status=response.status_code)
                 if asset_request and not authenticated and response.status_code in (404, 410):
                     raise IngestError("源站图片已不存在", code="asset_not_found", retryable=False)
                 if response.status_code != 200:
                     raise IngestError(f"源站 HTTP 请求失败（{response.status_code}）", code="http_error")
                 output = bytearray()
                 for chunk in response.iter_bytes():
+                    self._check_deadline()
                     output.extend(chunk)
                     if len(output) > limit:
                         raise IngestError("源站响应超过允许大小", code="response_too_large", retryable=False)
+                self._check_deadline()
                 return bytes(output), response.headers.get("content-type", "").split(";")[0]
         except httpx.HTTPError:
             raise IngestError("源站连接失败或超时", code="network_error") from None
@@ -195,10 +213,16 @@ class BiliClient:
         if not path.startswith("/x/") or "?" in path or ".." in path:
             raise IngestError("不允许的接口路径", code="invalid_request", retryable=False)
         if wbi:
-            if self.images is None or time.monotonic() - self.images_at > 30:
+            if self.images is None or time.monotonic() - self.images_at > WBI_CACHE_SECONDS:
                 self.nav(allow_anonymous=True)
             params = sign_wbi(params or {}, self.images)
-        body, mime = self._request(API + path, params=params, authenticated=True)
+        # Parse rejection payloads inside the same account scope as HTTP so
+        # another lane sees the cooldown before this response escapes.
+        with self.request_context(API + path):
+            body, mime = self._request_in_context(API + path, params=params, authenticated=True)
+            return self._json_payload(path, body, allow_anonymous_nav=allow_anonymous_nav)
+
+    def _json_payload(self, path, body, *, allow_anonymous_nav=False):
         try:
             payload = json.loads(body)
         except (ValueError, UnicodeError):
@@ -219,7 +243,7 @@ class BiliClient:
         if data is None:
             raise IngestError("源站缺少数据对象", code="invalid_response")
         if isinstance(data, dict) and data.get("v_voucher"):
-            raise IngestError("源站要求验证，请暂停并检查账号", code="rate_limited")
+            raise IngestError("源站要求验证，请暂停并检查账号", code="rate_limited", source_endpoint=path)
         return data
 
     def nav(self, allow_anonymous=False):
@@ -276,10 +300,15 @@ class BiliClient:
             "qn": 127, "fnval": 4048, "fnver": 0, "fourk": 1}, wbi=True)
 
     def segment(self, aid, cid, index):
-        if self.images is None or time.monotonic() - self.images_at > 30:
+        if self.images is None or time.monotonic() - self.images_at > WBI_CACHE_SECONDS:
             self.nav(allow_anonymous=True)
         params = sign_wbi({"type": 1, "pid": aid, "oid": cid, "segment_index": index}, self.images)
-        body, mime = self._request(API + "/x/v2/dm/wbi/web/seg.so", params=params, limit=32 * 1024 * 1024, authenticated=True)
+        url = API + "/x/v2/dm/wbi/web/seg.so"
+        with self.request_context(url):
+            body, mime = self._request_in_context(url, params=params, limit=32 * 1024 * 1024, authenticated=True)
+            return self._segment_payload(body, mime)
+
+    def _segment_payload(self, body, mime):
         if mime == "text/html":
             raise IngestError("弹幕接口返回了错误页面", code="invalid_danmaku")
         # Protobuf's tag 0x0a is ASCII newline and a valid following length may
@@ -294,7 +323,8 @@ class BiliClient:
             else:
                 code = payload.get("code") if isinstance(payload, dict) else None
                 if code in (-352, -401, -403):
-                    raise IngestError("弹幕源站风控，请稍后恢复", code="rate_limited")
+                    raise IngestError("弹幕源站风控，请稍后恢复", code="rate_limited",
+                                      source_endpoint="/x/v2/dm/wbi/web/seg.so", source_code=code)
                 if code == -101:
                     self._confirm_login_failure("/x/v2/dm/wbi/web/seg.so")
                 raise IngestError("弹幕接口返回 JSON 错误响应", code="invalid_danmaku")

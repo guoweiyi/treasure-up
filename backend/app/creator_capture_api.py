@@ -29,8 +29,15 @@ PaidFilter = Literal["all", "only", "exclude"]
 
 class CreatorCaptureInput(Input):
     account_id: str = Field(min_length=1, max_length=36)
-    bvids: list[str] = Field(min_length=1, max_length=30)
+    bvids: list[str] = Field(min_length=1, max_length=3)
     paid: PaidFilter = "exclude"
+
+    @field_validator("bvids", mode="before")
+    @classmethod
+    def bounded_batch(cls, values):
+        if isinstance(values, list) and len(values) > 3:
+            raise ValueError("每次最多提交 3 个视频，请分批串行提交")
+        return values
 
     @field_validator("bvids")
     @classmethod

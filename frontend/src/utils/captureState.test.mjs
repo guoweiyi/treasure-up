@@ -109,6 +109,10 @@ test('source cooldown overrides stale running phase only with a known safe sourc
   };
   assert.equal(jobPhase(job, now), '等待源站冷却后重试');
   assert.equal(jobPhase({ ...job, error: '账号仍在源站冷却期' }, now), '等待源站冷却后重试');
+  assert.equal(
+    jobPhase({ ...job, error: '账号仍在源站冷却期，任务将延后' }, now),
+    '等待源站冷却后重试',
+  );
   assert.equal(jobPhase({ ...job, available_at: '2026-10-05T09:59:00Z' }, now), '等待工作进程重试');
   assert.equal(jobPhase({ ...job, available_at: 'invalid' }, now), '等待工作进程重试');
   assert.equal(jobPhase({ ...job, available_at: null }, now), '等待工作进程重试');
@@ -116,4 +120,16 @@ test('source cooldown overrides stale running phase only with a known safe sourc
   assert.equal(jobPhase({ ...job, status: 'failed' }, now), '保存评论');
   assert.equal(jobPhase({ ...job, error: '网络连接中断' }, now), '保存评论');
   assert.equal(jobPhase({ status: 'queued', available_at: job.available_at }, now), '等待工作进程');
+});
+
+test('normal serial download pacing is distinct from source rejection cooldown', () => {
+  const job = { status: 'queued', checkpoint: { progress: { phase: 'download' } } };
+  assert.equal(jobPhase({ ...job, error: '已有视频正在下载，等待串行下载时段' }), '等待串行下载');
+  assert.equal(jobPhase({ ...job, error: '等待下一次串行视频下载时段' }), '等待下载间隔');
+  assert.equal(jobPhase({ ...job, error: '等待同账号下一次媒体下载时段' }), '等待下载间隔');
+  assert.equal(jobPhase({ ...job, error: '账号请求正在排队，请稍后重试' }), '等待账号请求间隔');
+  assert.equal(
+    jobPhase({ ...job, status: 'running', error: '等待下一次串行视频下载时段' }),
+    '下载原始媒体',
+  );
 });

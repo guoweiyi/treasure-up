@@ -61,10 +61,10 @@ const defaults = {
   create_compatible_copy: false,
   prefer_dolby_vision: true,
   prefer_dolby_atmos: true,
-  request_interval_seconds: 3,
-  video_interval_seconds: 60,
+  request_interval_seconds: 8,
+  video_interval_seconds: 180,
   interval_jitter_seconds: 10,
-  risk_cooldown_seconds: 900,
+  risk_cooldown_seconds: 1800,
   fragment_concurrency: 1,
   request_budget: 100,
   max_pages: 100,
@@ -74,8 +74,8 @@ const defaults = {
   prefer_h264: false,
 };
 const limits = [
-  { key: 'risk_cooldown_seconds', label: '风控冷却（秒）', min: 60, max: 86400 },
-  { key: 'fragment_concurrency', label: '下载分片并发', min: 1, max: 3 },
+  { key: 'request_interval_seconds', label: 'API 请求间隔（秒）', min: 8, max: 120 },
+  { key: 'risk_cooldown_seconds', label: '风控冷却（秒）', min: 1800, max: 86400 },
   { key: 'request_budget', label: '每轮请求预算', min: 1, max: 10000 },
   { key: 'max_pages', label: '每轮分页上限', min: 1, max: 10000 },
   {
@@ -126,6 +126,19 @@ async function edit(item?: Row) {
         include_paid_videos: item?.policy?.include_paid_videos === true,
       },
     });
+    form.policy.request_interval_seconds = Math.max(
+      8,
+      Number(form.policy.request_interval_seconds) || 8,
+    );
+    form.policy.video_interval_seconds = Math.max(
+      180,
+      Number(form.policy.video_interval_seconds) || 180,
+    );
+    form.policy.risk_cooldown_seconds = Math.max(
+      1800,
+      Number(form.policy.risk_cooldown_seconds) || 1800,
+    );
+    form.policy.fragment_concurrency = 1;
     if (form.policy.quality === '8k') form.policy.quality = '4320p';
     if (form.policy.quality === '4k') form.policy.quality = '2160p';
     open.value = true;
@@ -476,10 +489,10 @@ onBeforeUnmount(() => {
                 max="100"
                 required /></label
             ><label
-              >视频间隔（秒）<input
+              >下载结束后的间隔（秒）<input
                 v-model.number="form.policy.video_interval_seconds"
                 type="number"
-                min="10"
+                min="180"
                 max="3600"
                 step="0.1"
                 required /></label
@@ -522,6 +535,9 @@ onBeforeUnmount(() => {
         </details>
         <details>
           <summary>采集限制</summary>
+          <p class="field-help">
+            视频与分片均串行下载；间隔采用此来源与系统设置中较长的值，也适用于已排队任务。
+          </p>
           <div class="source-grid">
             <label v-for="limit in limits" :key="limit.key"
               >{{ limit.label }}

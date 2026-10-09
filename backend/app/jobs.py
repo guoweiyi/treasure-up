@@ -11,7 +11,40 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import Job, JobAttempt, OutboxEvent, Setting, SourceSubscription, Video, utcnow
+from app.models import Job, JobAttempt, OutboxEvent, Setting, SourceAccount, SourceSubscription, Video, utcnow
+
+
+# Only these tasks contact the upstream service. Local playback, storage and
+# deletion work may carry an account_id too and must remain runnable.
+SOURCE_JOB_KINDS = frozenset({"scan_collection", "archive_video", "download_media",
+    "refresh_comments", "refresh_stats", "verify_account", "refresh_credentials"})
+SOURCE_COOLDOWN_MESSAGE = "账号仍在源站冷却期"
+
+
+def _source_cooldown(clock):
+    # Credential-refresh jobs also support the legacy account-in-target form.
+    return select(SourceAccount.cooldown_until).where(
+        or_(SourceAccount.id == Job.account_id,
+            (Job.kind == "refresh_credentials") & Job.account_id.is_(None) &
+            (SourceAccount.id == Job.target_id)),
+        SourceAccount.cooldown_until > clock).correlate(Job).scalar_subquery()
+
+
+def _source_ready(clock):
+    return or_(Job.kind.not_in(SOURCE_JOB_KINDS), _source_cooldown(clock).is_(None))
+
+
+def _defer_source_cooldowns(db, now):
+    """Carry account backoff into the queue before making delivery hints.
+
+    An unrelated task may have extended the shared cooldown after a job was
+    queued. Updating the ledger avoids starting each waiting job just to learn
+    that fact. Attempts, checkpoints and non-queued work remain untouched.
+    """
+    cooldown = _source_cooldown(now)
+    db.execute(update(Job).where(Job.status == "queued", Job.kind.in_(SOURCE_JOB_KINDS),
+        Job.available_at < cooldown).values(available_at=cooldown, error=SOURCE_COOLDOWN_MESSAGE)
+        .execution_options(synchronize_session=False))
 
 
 class LeaseLost(RuntimeError):
@@ -121,7 +154,8 @@ def enqueue(db: Session, kind: str, target_id: str, account_id=None, policy=None
 def claim(db: Session, job_id: str, owner: str, *, attempt=None):
     now = utcnow()
     clock = _lease_clock(db, now)
-    result = db.execute(update(Job).where(Job.id == job_id, Job.status == "queued", Job.available_at <= clock)
+    result = db.execute(update(Job).where(Job.id == job_id, Job.status == "queued", Job.available_at <= clock,
+                                   _source_ready(clock))
                         .values(status="running", lease_owner=owner, lease_expires_at=clock + timedelta(seconds=settings.lease_seconds),
                                 started_at=clock, attempts=Job.attempts + 1, error=None)
                         .execution_options(synchronize_session=False))
@@ -335,9 +369,14 @@ def sync_video_job(db, job, *, owner):
 
 def schedule_due(db):
     now = utcnow()
+    cooldowns = dict(db.execute(select(SourceAccount.id, SourceAccount.cooldown_until)
+        .where(SourceAccount.cooldown_until > now)).all())
     for source in db.scalars(select(SourceSubscription).where(SourceSubscription.enabled.is_(True),
                             or_(SourceSubscription.next_run_at.is_(None), SourceSubscription.next_run_at <= now))
                             .with_for_update(skip_locked=True)):
+        if cooldown := cooldowns.get(source.account_id):
+            source.next_run_at = cooldown
+            continue
         active = db.scalar(select(Job.id).where(Job.kind == "scan_collection", Job.target_id == source.collection_id,
                            Job.status.in_(["queued", "running", "paused", "blocked"])).limit(1))
         if not active:
@@ -376,12 +415,14 @@ def _recover_expired(db, now):
 def recover_and_dispatch(db, send):
     now = utcnow()
     _recover_expired(db, now)
+    _defer_source_cooldowns(db, now)
     # New continuation/retry events obey available_at without the lost-message
     # fallback delay. A conditional DB claim rejects duplicate delivery hints.
     last_publication = select(func.max(OutboxEvent.published_at)).where(OutboxEvent.job_id == Job.id).correlate(Job).scalar_subquery()
     unpublished = select(OutboxEvent.id).where(OutboxEvent.job_id == Job.id,
                                              OutboxEvent.published_at.is_(None)).correlate(Job).exists()
     eligible = select(Job.id, Job.kind).where(Job.status == "queued", Job.available_at <= now,
+                                _source_ready(now),
                                 or_(unpublished, last_publication.is_(None),
                                     last_publication <= now - timedelta(seconds=60)))
     batch = db.execute(eligible.order_by(Job.available_at, Job.created_at, Job.id).limit(100)).all()

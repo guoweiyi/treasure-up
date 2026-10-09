@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException, Response
+from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -109,6 +110,20 @@ class CreatorCollaborationTests(unittest.TestCase):
             result = self.capture()
         self.assertEqual(result["queued"], 1)
         queued.assert_called_once()
+
+    def test_capture_rejects_large_synchronous_batch_before_source_requests(self):
+        with self.assertRaisesRegex(ValidationError, "每次最多提交 3 个视频"):
+            capture_api.CreatorCaptureInput(account_id=self.account.id,
+                bvids=[f"BV{index:010d}" for index in range(30)])
+        self.client.view.assert_not_called()
+
+    def test_rejection_mid_batch_does_not_partially_enqueue_unvalidated_selection(self):
+        self.client.view.side_effect = [details(), IngestError("cooldown", code="rate_limited")]
+        with patch.object(capture_api, "enqueue") as queued, self.assertRaises(IngestError):
+            body = capture_api.CreatorCaptureInput(account_id=self.account.id,
+                bvids=[BVID, "BV0000000001"], paid="all")
+            capture_api.capture(self.creator.id, body, Response(), user=self.user, db=self.db)
+        queued.assert_not_called()
 
     def test_original_owner_can_still_enqueue_without_staff(self):
         self.client.view.return_value = {**details(), "owner": {"mid": int(UID)}, "staff": None}

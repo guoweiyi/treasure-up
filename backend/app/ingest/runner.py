@@ -66,9 +66,83 @@ def _lock(db, name):
         if not connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}):
             raise IngestDeferred("相同账号或视频已有采集任务，稍后重试", code="resource_busy", retry_after_seconds=30)
         try:
-            yield
+            yield connection
         finally:
-            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+            if not connection.closed and not connection.invalidated:
+                connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+
+
+class DownloadLane:
+    """One download across all workers/accounts, with a gap after each attempt.
+
+    The outer advisory lock owns this lane. Account cursors are durable so the
+    gap survives worker restarts; their maximum applies across every account.
+    The lane never holds a source-account row lock while doing network work.
+    """
+    def __init__(self, db, connection=None):
+        self.db = db
+        self.pacer = None
+        self.reserved = False
+        self.connection = connection
+        self.backend_pid = connection.scalar(text("SELECT pg_backend_pid()")) if connection else None
+        self.guard_lock = threading.Lock()
+        self.last_guard = 0
+
+    def check_active(self):
+        if self.connection is None:
+            return
+        with self.guard_lock:
+            if time.monotonic() - self.last_guard < 0.5:
+                return
+            try:
+                # A reconnect has a different backend and no longer owns the
+                # session lock. Stop old transfers before their next request
+                # or progress callback instead of silently running unlocked.
+                owned = (not self.connection.closed and not self.connection.invalidated
+                         and self.connection.scalar(text("SELECT pg_backend_pid()")) == self.backend_pid)
+            except Exception:
+                owned = False
+            if not owned:
+                raise IngestError("下载串行锁连接已断开，任务将延后恢复", code="download_lock_lost")
+            self.last_guard = time.monotonic()
+
+    def before_video(self):
+        if self.reserved:
+            return  # The first part uses the reservation made before nav.
+        self.pacer.check_cooldown()
+        deadline = self.db.scalar(select(func.max(SourceAccount.next_video_at)))
+        remaining = (utc(deadline) - self.pacer.clock()).total_seconds() if deadline else 0
+        if remaining > 0:
+            raise IngestDeferred("等待下一次串行视频下载时段", code="video_interval",
+                                 retry_after_seconds=math.ceil(remaining))
+        self.pacer.before_video(defer=True)
+        self.reserved = True
+
+    def after_video(self):
+        if self.reserved:
+            # Publish the finish-based cursor before releasing the global lock.
+            self.pacer.after_video()
+            self.reserved = False
+
+
+@contextmanager
+def download_lane(db):
+    # Account-only locks allow two different accounts to download concurrently.
+    # A dedicated AUTOCOMMIT connection keeps this session lock across the job's
+    # checkpoint commits without blocking account writes or lease heartbeats.
+    with ExitStack() as stack:
+        try:
+            connection = stack.enter_context(_lock(db, "download:global"))
+        except IngestDeferred as error:
+            if error.code != "resource_busy":
+                raise
+            raise IngestDeferred("已有视频正在下载，等待串行下载时段", code="download_busy",
+                                 retry_after_seconds=30) from None
+        lane = DownloadLane(db, connection)
+        try:
+            yield lane
+        finally:
+            lane.after_video()
 
 
 def _ref(db, asset_id, entity, entity_id, purpose):
@@ -185,6 +259,8 @@ class Context:
         self.run.finished_at = None
 
     def guard(self):
+        if lane := getattr(self, "download_lane", None):
+            lane.check_active()
         if threading.get_ident() != self.owner_thread:
             # yt-dlp can call progress/URL hooks from fragment threads, even
             # when separate video/audio downloads each use one fragment worker.
@@ -1111,6 +1187,9 @@ def _download(ctx, video):
             except PaidConsentRequired:
                 ctx.stage("paid_consent_required")
                 return True
+            finally:
+                if getattr(ctx.client, "after_video", None):
+                    ctx.client.after_video()
             _ref(ctx.db, variant.asset_id, "media_variant", variant.id, "archive")
             completed.append(part_id)
             archives[part_id] = variant.id
@@ -1210,8 +1289,8 @@ def run_job(db, job):
     client, ctx, pacer = None, None, None
     try:
         downloading = job.kind == "download_media"
-        with _lock(db, "download-account:" + account.id) if downloading else nullcontext():
-            # Only bulk downloads hold an account lane. Credential snapshots
+        with download_lane(db) if downloading else nullcontext() as lane:
+            # Bulk downloads share one global lane. Credential snapshots
             # separately share the short mutex used by account updates.
             with credential_lock(db, account.id):
                 db.refresh(account)
@@ -1224,6 +1303,7 @@ def run_job(db, job):
             client.credential_generation = initial_generation
             client.allow_reverification = job.kind == "verify_account"
             ctx = Context(db, job, client)
+            ctx.download_lane = lane
             client.asset_interval = max(0.05, min(5, float(ctx.policy.get("asset_interval_seconds", 0.1))))
             pacer = AccountPacer(db, account, ctx.policy, ctx.guard)
             pacer.check_cooldown()
@@ -1231,14 +1311,15 @@ def run_job(db, job):
             client.media_progress = ctx.media_progress
             def request_context(url):
                 return account_request_scope(db, account, client, pacer, url)
-            def before_video():
-                # download-account already serializes reservations. Never hold
-                # the credential mutex over pacing, guards or capture commits.
-                db.refresh(account, attribute_names=["next_video_at", "cooldown_until", "risk_failures"])
-                pacer.before_video(defer=downloading)
-            client.request_context, client.before_video = request_context, before_video
+            client.request_context = request_context
             ctx.guard()
             ctx.save()
+            if lane is not None:
+                lane.pacer = pacer
+                # Check and reserve before any source call, including nav. A
+                # deferred download must not keep probing the source each time.
+                lane.before_video()
+                client.before_video, client.after_video = lane.before_video, lane.after_video
             # Public endpoints may keep responding after expiry. Verify first so
             # an expired premium session cannot silently become an anonymous job.
             nav = client.nav()
@@ -1321,6 +1402,9 @@ def run_job(db, job):
         if pacer and error.code == "rate_limited" and not getattr(error, "account_backoff_applied", False):
             pacer.failed(error)
         if ctx:
+            from .diagnostics import source_rejection
+            if rejection := source_rejection(error, _now()):
+                ctx.cp["source_rejection"] = rejection
             if job.kind == "refresh_stats" and not ctx.cp.get("stats_done"):
                 video = db.get(Video, job.target_id)
                 if video:
