@@ -9,6 +9,11 @@ services:
     extends:
       file: compose.yaml
       service: collector
+    cpus: 2.0
+    mem_limit: 2g
+    mem_reservation: 512m
+    memswap_limit: 2g
+    pids_limit: 256
     command: [celery, -A, "app.worker:celery", worker, -Q, "download,media", "--concurrency=1", "--loglevel=WARNING"]
     healthcheck:
       test: [CMD, python, /app/worker_healthcheck.py, download, media]

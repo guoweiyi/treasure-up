@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import tempfile
 import uuid
@@ -15,8 +16,8 @@ from app.config import settings
 from app.models import Asset, AssetLocation, StorageProfile
 from app.security import decrypt_secret
 
-from .base import IntegrityError, ObjectMissing, StorageError, content_key, file_digest
-from .local import LocalStorage
+from .base import IntegrityError, ObjectMissing, StorageError, content_key, file_digest, throttled_check
+from .local import LocalStorage, _is_link
 from .locking import content_lock
 from .naming import MediaName, is_managed_key, media_name_for_asset
 
@@ -115,19 +116,79 @@ def _register_location(db, asset, profile, key, info, *, expected_placement):
     return location
 
 
-def ingest_file(db, path: Path, *, kind: str, mime_type: str, profile_id=None, media_name: MediaName | None = None) -> Asset:
+class IngestWorkspace:
+    """An owned generation directory, placed beside local immutable storage.
+
+    Files are generated once on the destination filesystem, verified by the
+    caller, then consumed by ingest_file. Only this active capability permits
+    publication without a copy; general ingest inputs retain copy isolation.
+    """
+    def __init__(self, db, *, profile_id=None, prefix="media-"):
+        self.db, self.requested_profile_id, self.prefix = db, profile_id, prefix
+        self.path = self._temporary = None
+
+    def __enter__(self):
+        if self.path is not None:
+            raise StorageError("Ingest workspace cannot be reused")
+        profile = default_profile(self.db, self.requested_profile_id)
+        self.profile_id = profile.id
+        self.placement = storage_placement(profile.kind, profile.config)
+        self.adapter = get_adapter(profile)
+        if isinstance(self.adapter, LocalStorage):
+            parent = self.adapter.path_for("temporary")
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.adapter.path_for("temporary")
+        else:
+            parent = LocalStorage(settings.scratch_dir).root
+        self._temporary = tempfile.TemporaryDirectory(prefix=self.prefix, dir=parent)
+        self.path = Path(self._temporary.name)
+        return self
+
+    def __exit__(self, *exc):
+        temporary, self._temporary = self._temporary, None
+        return temporary.__exit__(*exc)
+
+    def validate(self, db, path, profile_id):
+        if self._temporary is None or self.db is not db or profile_id not in (None, self.profile_id):
+            raise StorageError("Invalid ingest workspace")
+        path = Path(path).absolute()
+        # Generated outputs are direct children. Do not accept an archive, a
+        # nested traversal, a symlink/junction or a hard-link alias as owned work.
+        if path.parent != self.path or _is_link(self.path) or _is_link(path):
+            raise StorageError("Ingest source is outside its private workspace")
+        if isinstance(self.adapter, LocalStorage):
+            self.adapter.path_for(path.relative_to(self.adapter.root).as_posix())
+        if not path.is_file() or path.stat().st_nlink != 1:
+            raise StorageError("Ingest source must be an exclusive regular file")
+
+
+def ingest_workspace(db, *, profile_id=None, prefix="media-"):
+    return IngestWorkspace(db, profile_id=profile_id, prefix=prefix)
+
+
+def ingest_file(db, path: Path, *, kind: str, mime_type: str, profile_id=None, media_name: MediaName | None = None, workspace=None, check_active=None) -> Asset:
     path = Path(path)
     if not path.is_file() or path.is_symlink():
         raise StorageError("Ingest source must be a regular file")
-    sha, size = file_digest(path)
+    if workspace is not None:
+        if not isinstance(workspace, IngestWorkspace):
+            raise StorageError("Invalid ingest workspace")
+        workspace.validate(db, path, profile_id)
+        profile_id = workspace.profile_id
+    sha, size = file_digest(path, check_active=check_active)
     with content_lock(db, sha):
-        return _ingest_file_locked(db, path, sha, size, kind=kind, mime_type=mime_type, profile_id=profile_id, media_name=media_name)
+        return _ingest_file_locked(db, path, sha, size, kind=kind, mime_type=mime_type, profile_id=profile_id,
+            media_name=media_name, workspace=workspace, check_active=check_active)
 
 
-def _ingest_file_locked(db, path, sha, size, *, kind, mime_type, profile_id, media_name=None):
+def _ingest_file_locked(db, path, sha, size, *, kind, mime_type, profile_id, media_name=None, workspace=None, check_active=None):
     profile = default_profile(db, profile_id)
     expected_placement = storage_placement(profile.kind, profile.config)
     adapter = get_adapter(profile)
+    if workspace is not None and workspace.placement != expected_placement:
+        raise StorageError("Storage placement changed during media generation")
+    guard = check_active or (lambda: None)
+    guard()
     asset = db.scalars(select(Asset).where(Asset.sha256 == sha)).first()
     key = media_name.key(sha, mime_type) if media_name and kind in {"media", "video"} else content_key(sha)
     if asset:
@@ -139,11 +200,17 @@ def _ingest_file_locked(db, path, sha, size, *, kind, mime_type, profile_id, med
         if existing and is_managed_key(existing.object_key, sha):
             key = existing.object_key
     try:
-        info = adapter.verify(key, sha, size)
+        info = adapter.verify(key, sha, size, check_active=guard)
     except ObjectMissing:
-        info = adapter.put_file(path, key, mime_type)
-        # Stored metadata is not evidence: re-read the uploaded bytes.
-        info = adapter.verify(key, sha, size, version_id=info.version_id)
+        if workspace is not None and isinstance(adapter, LocalStorage):
+            workspace.validate(db, path, profile_id)
+            info = adapter.consume_file(path, key, mime_type, sha256=sha, size=size, check_active=guard)
+        else:
+            kwargs = {"check_active": guard} if isinstance(adapter, LocalStorage) else {}
+            info = adapter.put_file(path, key, mime_type, **kwargs)
+            # Stored metadata is not evidence: re-read the uploaded bytes.
+            info = adapter.verify(key, sha, size, version_id=info.version_id, check_active=guard)
+    guard()
     if asset is None:
         try:
             with db.begin_nested():
@@ -204,22 +271,45 @@ def read_asset_bytes(db, asset_id, *, max_bytes=64 * 1024**2):
     raise IntegrityError("No valid readable asset replica")
 
 
-def copy_asset_to(db, asset_id, destination: Path):
+def copy_asset_to(db, asset_id, destination: Path, *, check_active=None):
     asset = db.get(Asset, asset_id)
     if not asset:
         raise ObjectMissing("Asset does not exist")
-    for location, profile in asset_locations(db, asset_id):
+    guard = throttled_check(check_active)
+    cancelled = False
+    def check():
+        nonlocal cancelled
         try:
-            get_adapter(profile).download_to(location.object_key, destination, version_id=location.version_id, max_bytes=asset.size)
-            if file_digest(destination) == (asset.sha256, asset.size):
+            guard()
+        except BaseException:
+            cancelled = True
+            raise
+    for location, profile in asset_locations(db, asset_id):
+        check()
+        try:
+            if _is_link(Path(destination)):
+                raise StorageError("Copy destination cannot be a link")
+            with get_adapter(profile).reader(location.object_key, version_id=location.version_id) as source, Path(destination).open("wb") as target:
+                count = 0
+                while block := source.read(min(1024 * 1024, asset.size - count + 1)):
+                    check()
+                    count += len(block)
+                    if count > asset.size:
+                        raise IntegrityError("Object exceeds registered size")
+                    target.write(block)
+                target.flush()
+                os.fsync(target.fileno())
+            if file_digest(destination, check_active=check) == (asset.sha256, asset.size):
+                check()
                 return
         except Exception:
-            pass
+            if cancelled:
+                raise
     raise IntegrityError("No valid readable asset replica")
 
 
-def materialize_asset(db, asset_id, path: Path) -> Path:
-    """Materialize verified bytes in the configured scratch tree, without overwrite."""
+def materialize_asset(db, asset_id, path: Path, *, check_active=None) -> Path:
+    """Download once to private scratch, verify, then publish without overwrite."""
     asset = db.get(Asset, asset_id)
     if not asset:
         raise ObjectMissing("Asset does not exist")
@@ -230,13 +320,12 @@ def materialize_asset(db, asset_id, path: Path) -> Path:
         raise StorageError("Materialization target must be inside scratch directory") from None
     destination = store.path_for(key)
     if destination.exists():
-        store.verify(key, asset.sha256, asset.size)
+        store.verify(key, asset.sha256, asset.size, check_active=check_active)
         return destination
     with tempfile.TemporaryDirectory(prefix="materialize-", dir=store.root) as directory:
         temporary = Path(directory) / "asset"
-        copy_asset_to(db, asset_id, temporary)
-        store.put_file(temporary, key, asset.mime_type)
-    store.verify(key, asset.sha256, asset.size)
+        copy_asset_to(db, asset_id, temporary, check_active=check_active)
+        store.consume_file(temporary, key, asset.mime_type, sha256=asset.sha256, size=asset.size, check_active=check_active)
     return destination
 
 

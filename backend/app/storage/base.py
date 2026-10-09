@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,18 +39,35 @@ def safe_key(key: str) -> str:
     return key
 
 
-def file_digest(path: Path) -> tuple[str, int]:
+def throttled_check(check_active, *, interval=0.5):
+    """Bound cancellation latency without a database query for every MiB."""
+    deadline = 0.0
+    def check(*, force=False):
+        nonlocal deadline
+        now = time.monotonic()
+        if force or now >= deadline:
+            if check_active is not None:
+                check_active()
+            deadline = now + interval
+    return check
+
+
+def file_digest(path: Path, *, check_active=None) -> tuple[str, int]:
     with Path(path).open("rb") as stream:
-        return stream_digest(stream)
+        return stream_digest(stream, check_active=check_active)
 
 
-def stream_digest(stream: BinaryIO, *, max_bytes: int | None = None) -> tuple[str, int]:
+def stream_digest(stream: BinaryIO, *, max_bytes: int | None = None, check_active=None) -> tuple[str, int]:
+    guard = throttled_check(check_active)
+    guard()
     digest, count = hashlib.sha256(), 0
     while block := stream.read(min(1024 * 1024, max_bytes - count + 1) if max_bytes is not None else 1024 * 1024):
+        guard()
         count += len(block)
         if max_bytes is not None and count > max_bytes:
             raise IntegrityError("Object exceeds registered size")
         digest.update(block)
+    guard(force=True)
     return digest.hexdigest(), count
 
 
@@ -81,12 +99,12 @@ class Storage:
     def put_file(self, path: Path, key: str, mime_type: str, *, checkpoint=None, on_checkpoint=None) -> ObjectInfo:
         raise NotImplementedError
 
-    def verify(self, key: str, sha256: str, size: int, *, version_id: str | None = None) -> ObjectInfo:
+    def verify(self, key: str, sha256: str, size: int, *, version_id: str | None = None, check_active=None) -> ObjectInfo:
         info = self.head(key, version_id=version_id)
         if info.size != size:
             raise IntegrityError("Stored object size does not match")
         with self.reader(key, version_id=version_id) as stream:
-            actual = stream_digest(stream, max_bytes=size)
+            actual = stream_digest(stream, max_bytes=size, check_active=check_active)
         if actual != (sha256, size):
             raise IntegrityError("Stored object SHA256 does not match")
         return info

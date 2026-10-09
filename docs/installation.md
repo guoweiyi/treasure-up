@@ -83,6 +83,13 @@ docker compose up -d --force-recreate
 
 源码目录中的 `compose.yaml` 支持在 `.env` 设置 `TREASURE_MEDIA_PATH`，默认使用 `media` 命名卷；例如 `TREASURE_MEDIA_PATH=Q:/BILI` 会将 Windows 主机目录映射到各媒体读写服务的 `/data/media`，Web 和备份服务保持只读。已有数据时，先停止采集、下载等写入服务，将原媒体卷的全部内容复制到目标目录并校验完整性。若使用 root 复制，需将目标媒体目录及其已有子目录、文件的属主恢复为后端 UID / GID `10001:10001`；此权限调整仅针对目标媒体树。再修改配置，用原来相同的 Compose 文件组合执行 `up -d --force-recreate`。以 `10001:10001` 身份检查已有子目录的访问权限，并通过应用的存储写入方法实际写入和清理测试文件，覆盖后续会写入的已有子目录；仅在 `/data/media` 根目录创建探针不足以证明子目录可写。确认读写和播放正常后再处理旧卷；只修改路径不会自动搬迁已有文件。后台存储路径继续填写 `/data/media`。此设置适用于源码部署，Release 和 OCI 发布的 Compose 仍默认使用命名卷。
 
+
+源码部署还可设置 `TREASURE_SCRATCH_PATH=Q:/BILI-tmp`，将下载断点、兼容转换和手动播放准备的临时目录移出 Docker Desktop 的系统盘。它与 `TREASURE_MEDIA_PATH` 分别映射到 `/data/scratch` 和 `/data/media`。迁移时先停止使用临时目录的 worker 和调度器，保留并校验已有 `downloads` 断点及导入文件，为目标目录设置 `10001:10001` 可读写，再重建服务；确认新挂载后才能清理旧临时卷。不要删除数据库、正式媒体卷或正在使用的下载断点。
+
+worker 默认设置 CPU、内存、进程数硬上限，且不额外使用 swap：媒体处理和轻量部署合并 worker 为 2 CPU / 2 GiB；下载和备份为 1 CPU / 1 GiB；资料采集为 1 CPU / 768 MiB。健康检查间隔为 120 秒。需要调整时可通过 Compose override 覆盖这些值。响度分析和 HLS 分片默认关闭，可按具体视频手动准备；已有显式开启设置需要在后台关闭。关闭自动准备不会删除已有分片。
+
+Docker Desktop 中删除临时文件或构建缓存，可能只释放虚拟磁盘内部空间。应同时检查宿主 C 盘空闲；若需收缩 VHDX，先停止 Docker Desktop，再使用 Windows 支持的虚拟磁盘压缩工具处理已确认的 Docker 数据盘。不要用填零写满系统盘的方式回收空间。
+
 ## 查看服务
 
 ```sh

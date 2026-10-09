@@ -203,20 +203,8 @@ def run_job_id(job_id: str):
                     location = operation(db, job.target_id)
                     result = {"location_id": location.id, "state": location.state}
             elif job.kind == "prepare_media":
-                from app.playback import analyze_variant, package_variant
-                from app.playback.source import VerifiedSource
-                check = lambda: ensure_active(db, job_id, owner)
-                with VerifiedSource(db, check_active=check) as source:
-                    if job.policy.get("analyze_loudness"):
-                        result["loudness"] = analyze_variant(db, job.target_id, check_active=check, source_provider=source)
-                        # Analysis is an independently complete derivative. Its
-                        # fenced commit survives a later packaging failure while
-                        # this task retains the same verified temporary source.
-                        db.commit()
-                    if job.policy.get("package"):
-                        packaged = package_variant(db, job.target_id, check_active=check, source_provider=source,
-                                                   segment_seconds=job.policy.get("segment_seconds", 6))
-                        result["variant_id"] = packaged.id
+                from app.maintenance import run_media_preparation
+                result = run_media_preparation(db, job, check_active=lambda: ensure_active(db, job_id, owner))
             else:
                 from app.ingest.runner import run_job
                 result = run_job(db, job) or {}

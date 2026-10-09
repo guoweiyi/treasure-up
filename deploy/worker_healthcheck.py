@@ -15,8 +15,12 @@ def worker_ready(app, expected_queues, hostname=None):
 
 def main():
     try:
-        from app.worker import celery
-        return 0 if worker_ready(celery, sys.argv[1:]) else 1
+        # The health probe needs only the control client, not task registration
+        # and its database/storage/media imports in every worker every interval.
+        from celery import Celery
+        from app.config import settings
+        client = Celery("healthcheck", broker=settings.redis_url)
+        return 0 if worker_ready(client, sys.argv[1:]) else 1
     except Exception:
         # Health logs must never include broker/database connection strings.
         print("Worker queue readiness check failed", file=sys.stderr)

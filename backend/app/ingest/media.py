@@ -22,7 +22,9 @@ from app.config import settings
 from app.models import Asset, MediaVariant, Video
 from app.playback.ec3 import ec3_configuration, elementary_joc_complexity, preserve_ec3_configuration
 from app.playback.tools import MAX_TOOL_OUTPUT, PlaybackError, probe_media
-from app.storage.service import ingest_file, materialize_asset, resolve_asset
+from app.storage.service import ingest_file, ingest_workspace, resolve_asset
+from app.storage.base import StorageError
+from app.playback.source import VerifiedSource
 from app.storage.naming import media_name_for_part
 from .client import UA, retry_after
 from .errors import IngestError
@@ -453,6 +455,7 @@ def _dovi_configuration(stream):
 
 
 def _packet_hash(path, kind, guard):
+    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="treasure-payload-", dir=settings.scratch_dir) as directory:
         output = Path(directory) / "payload.sha256"
         command = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-i", str(path), "-map",
@@ -737,12 +740,12 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
     timeout = int(policy.get("transcode_timeout_seconds", 7200))
     if maximum < 1 or timeout < 1:
         raise IngestError("播放副本预算无效", code="invalid_policy", retryable=False)
-    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="treasure-playback-", dir=settings.scratch_dir) as temporary:
-        folder = Path(temporary)
+    with (ingest_workspace(db, profile_id=policy.get("storage_profile_id"), prefix="playback-") as workspace,
+          VerifiedSource(db, check_active=guard) as provider):
+        folder = workspace.path
         try:
-            source = materialize_asset(db, archive.asset_id, folder / "source.media")
-        except Exception:
+            source = provider(archive.asset_id)
+        except (StorageError, PlaybackError, OSError):
             raise IngestError("原始媒体无法读取或校验失败", code="archive_unavailable") from None
         guard()
         vstream, astream, duration = _probe(source)
@@ -769,8 +772,9 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
             vstream, astream, duration, evidence = _audio_compatible_copy(
                 source, output, vstream, astream, duration, maximum, timeout, guard)
             evidence.update(source_variant_id=archive.id, source_asset_id=archive.asset_id)
+            provider(archive.asset_id)  # Source identity must still match before publication.
             asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"),
-                media_name=media_name_for_part(db, part, variant="playback"))
+                media_name=media_name_for_part(db, part, variant="playback"), workspace=workspace, check_active=guard)
         else:
             output = folder / "playback.mp4"
             arguments = [str(settings.ffmpeg_path), "-nostdin", "-v", "error", "-n", "-xerror", "-i", str(source),
@@ -795,8 +799,9 @@ def ensure_playback_variant(db, part, archive, policy, *, guard=lambda: None):
                 audio_transcoded=bool(astream), audio_decode_verified=bool(converted_audio))
             if converted_audio:
                 evidence.update(audio_downmix="normalized_stereo", audio_headroom_db=1, audio_mix_revision=2)
+            provider(archive.asset_id)  # Source identity must still match before publication.
             asset = ingest_file(db, output, kind="media", mime_type="video/mp4", profile_id=policy.get("storage_profile_id"),
-                media_name=media_name_for_part(db, part, variant="playback"))
+                media_name=media_name_for_part(db, part, variant="playback"), workspace=workspace, check_active=guard)
             vstream, astream, duration = converted_video, converted_audio, converted_duration
         variant = existing or MediaVariant(part_id=part.id, kind="playback", format_key=key)
         variant.asset_id, variant.quality = asset.id, archive.quality

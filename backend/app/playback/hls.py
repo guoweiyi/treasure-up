@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -13,7 +12,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models import Asset, AssetRef, MediaVariant
-from app.storage.service import ingest_file, read_asset_bytes
+from app.storage.service import ingest_file, ingest_workspace, read_asset_bytes
 from .source import source_scope
 from .tools import PlaybackError, probe_media, run_tool
 from .ec3 import ec3_configuration, preserve_ec3_configuration
@@ -213,10 +212,9 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
     if existing:
         load_hls_index(db, existing.asset_id)
         return existing
-    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
-    with (tempfile.TemporaryDirectory(prefix="hls-", dir=settings.scratch_dir) as directory,
+    with (ingest_workspace(db, profile_id=profile_id, prefix="hls-") as workspace,
           source_scope(db, source_provider=source_provider, check_active=guard) as provider):
-        folder = Path(directory)
+        folder = workspace.path
         guard()
         source = provider(source_variant.asset_id)
         probe = probe_media(source, check_active=guard)
@@ -312,11 +310,12 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
         if abs(duration - original_duration) > 2:
             raise PlaybackError("HLS package duration does not match the source")
         guard()
-        initialization = ingest_file(db, folder / init_name, kind="hls_init", mime_type="video/mp4", profile_id=profile_id)
+        provider(source_variant.asset_id)  # Recheck the protected source before publication.
+        initialization = ingest_file(db, folder / init_name, kind="hls_init", mime_type="video/mp4", profile_id=profile_id, workspace=workspace, check_active=guard)
         rows = []
         for sequence, segment in enumerate(segments):
             guard()
-            asset = ingest_file(db, folder / segment["filename"], kind="hls_segment", mime_type="video/iso.segment", profile_id=profile_id)
+            asset = ingest_file(db, folder / segment["filename"], kind="hls_segment", mime_type="video/iso.segment", profile_id=profile_id, workspace=workspace, check_active=guard)
             rows.append({"sequence": sequence, "asset_id": asset.id, "duration": segment["duration"]})
         index = {"schema": "treasure.hls.v1", "source_asset_id": source_variant.asset_id, "stream_copy": True,
             "init_asset_id": initialization.id, "segments": rows, "target_duration": math.ceil(max(s["duration"] for s in rows)),
@@ -325,7 +324,7 @@ def package_variant(db, variant_id, *, profile_id=None, segment_seconds=6, check
             "fragment_target_seconds": 1, "packaging_version": 3}
         index_path = folder / "index.json"
         index_path.write_text(json.dumps(index, ensure_ascii=True, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-        index_asset = ingest_file(db, index_path, kind="hls_index", mime_type="application/json", profile_id=profile_id)
+        index_asset = ingest_file(db, index_path, kind="hls_index", mime_type="application/json", profile_id=profile_id, workspace=workspace, check_active=guard)
         for asset_id, purpose in [(source_variant.asset_id, "hls_source"), (initialization.id, "hls_init"), *[(row["asset_id"], "hls_segment") for row in rows]]:
             if not db.scalar(select(AssetRef).where(AssetRef.asset_id == asset_id, AssetRef.entity_type == "asset", AssetRef.entity_id == index_asset.id, AssetRef.purpose == purpose)):
                 db.add(AssetRef(asset_id=asset_id, entity_type="asset", entity_id=index_asset.id, purpose=purpose))

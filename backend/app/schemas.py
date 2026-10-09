@@ -189,12 +189,17 @@ class PurgeLocationInput(Input):
 
 
 class PlaybackSettings(Input):
-    package_long_videos: bool = True
+    package_long_videos: bool = False
     min_duration_seconds: int = Field(default=300, ge=0, le=86400)
     min_size_mb: int = Field(default=64, ge=32, le=4096)
     segment_seconds: int = Field(default=6, ge=2, le=20)
-    analyze_loudness: bool = True
+    analyze_loudness: bool = False
     probe_bytes: int = Field(default=65536, ge=16384, le=131072)
+
+
+class MediaPreparationInput(Input):
+    package: bool = True
+    analyze_loudness: bool = False
 
 
 class ProgressInput(Input):

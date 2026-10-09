@@ -169,8 +169,8 @@ async function load() {
     if (key === request) busy.value = false;
   }
 }
-async function run(path: string, body?: unknown, method = 'POST') {
-  actionBusy.value = path;
+async function run(path: string, body?: unknown, method = 'POST', actionKey = path) {
+  actionBusy.value = actionKey;
   error.value = '';
   try {
     queued.value = await write(path, body, method);
@@ -431,9 +431,29 @@ onMounted(async () => {
             <el-button
               size="small"
               :disabled="!!actionBusy"
-              :loading="actionBusy === `/admin/variants/${variant.id}/prepare`"
-              @click="run(`/admin/variants/${variant.id}/prepare`)"
-              >准备分片与分析</el-button
+              :loading="actionBusy === `/admin/variants/${variant.id}/prepare:hls`"
+              @click="
+                run(
+                  `/admin/variants/${variant.id}/prepare`,
+                  { package: true, analyze_loudness: false },
+                  'POST',
+                  `/admin/variants/${variant.id}/prepare:hls`,
+                )
+              "
+              >准备 HLS 分片</el-button
+            ><el-button
+              size="small"
+              :disabled="!!actionBusy"
+              :loading="actionBusy === `/admin/variants/${variant.id}/prepare:loudness`"
+              @click="
+                run(
+                  `/admin/variants/${variant.id}/prepare`,
+                  { package: false, analyze_loudness: true },
+                  'POST',
+                  `/admin/variants/${variant.id}/prepare:loudness`,
+                )
+              "
+              >分析音量</el-button
             ><el-button
               v-if="variant.kind === 'archive'"
               size="small"
@@ -446,8 +466,10 @@ onMounted(async () => {
         </div>
       </div>
       <p class="field-help">
-        分片与分析只做封装和分析，不重编码原码流，也不承诺浏览器支持所有杜比或 HDR
-        格式。分片按需读取，完整观看仍消耗原码率流量。
+        原档可直接播放，无需预先执行这两项操作。HLS
+        分片不重编码原码流，但会额外保存接近原文件大小的数据；
+        音量分析需读取并解码整条音轨，不生成新音频。两项可分别按需执行，也不承诺浏览器支持所有杜比或
+        HDR 格式。
       </p>
       <p class="field-help">
         兼容副本会保留原档。EC-3 音轨优先保留原视频画面，仅将声音转换为 AAC 立体声，不含

@@ -58,11 +58,11 @@ const form = reactive<Row>({
     refresh_comments: true,
   },
   playback: {
-    package_long_videos: true,
+    package_long_videos: false,
     min_duration_seconds: 300,
     min_size_mb: 64,
     segment_seconds: 6,
-    analyze_loudness: true,
+    analyze_loudness: false,
     probe_bytes: 65536,
   },
   backup: { destination: '', key_id: '', interval_hours: 12, retention_days: 30, enabled: false },
@@ -245,8 +245,11 @@ onMounted(load);
     <section class="admin-panel">
       <h2>播放与分发</h2>
       <div class="settings-switches">
-        <el-checkbox v-model="form.playback.package_long_videos">自动准备原码流分片</el-checkbox
-        ><el-checkbox v-model="form.playback.analyze_loudness">分析音量平衡参数</el-checkbox>
+        <el-checkbox v-model="form.playback.package_long_videos"
+          >自动准备大视频分片（额外占用空间）</el-checkbox
+        ><el-checkbox v-model="form.playback.analyze_loudness"
+          >自动分析全片音量（耗时）</el-checkbox
+        >
       </div>
       <div class="form-two-columns">
         <el-form-item label="分片准备的视频时长下限（秒）"
@@ -273,7 +276,10 @@ onMounted(load);
         /></el-form-item>
       </div>
       <p class="field-help">
-        达到时长或体积任一条件即准备分片，原档与兼容版本均适用。使用原码流，改善起播与跳转，不会自动降画质。音量分析不修改原始文件；播放器可选衰减，空间音频或多声道音频绕过。
+        两项默认关闭，原档可直接播放。只有开启自动分片后，达到时长或体积任一条件才会准备分片；
+        分片不降画质，但会额外保存接近原文件大小的数据。音量分析需要读取并解码整条音轨，不修改原文件。
+        可在“存储副本”中针对单个版本分别执行，建议仅在起播、跳转或音量需要改善时使用。
+        关闭自动设置会阻止新的任务及尚未开始的自动处理；正在处理的任务可在任务中心暂停。
       </p>
     </section>
     <section class="admin-panel">

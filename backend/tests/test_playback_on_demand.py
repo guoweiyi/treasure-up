@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -27,6 +28,8 @@ class PlaybackOnDemandTests(unittest.TestCase):
         self.folder = Path(self.tmp.name)
         self.scratch = patch.object(settings, "scratch_dir", self.folder)
         self.scratch.start()
+        self.media_root = patch.object(settings, "media_root", self.folder / "media")
+        self.media_root.start()
         self.video = Video(bvid="BV1234567890", title="Original", metadata_json={})
         self.db.add(self.video)
         self.db.flush()
@@ -36,6 +39,7 @@ class PlaybackOnDemandTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
         self.scratch.stop()
+        self.media_root.stop()
         self.tmp.cleanup()
 
     def asset(self, mime="video/mp4"):
@@ -97,7 +101,7 @@ class PlaybackOnDemandTests(unittest.TestCase):
         self.assertEqual(prepare.call_count, 3)  # Only each original's normal preparation.
         self.assertEqual(self.video.metadata_json["ingest_state"]["playback"], "not_needed")
         for part, archive in originals:
-            with patch.object(media, "materialize_asset") as materialize:
+            with patch.object(media, "VerifiedSource") as materialize:
                 self.assertEqual(media.ensure_playback_variant(self.db, part, archive, {}), (None, True))
             materialize.assert_not_called()
         self.assertEqual(list(self.db.scalars(select(MediaVariant).where(MediaVariant.kind == "playback"))), [])
@@ -125,7 +129,7 @@ class PlaybackOnDemandTests(unittest.TestCase):
                               format_key="h264-aac-sdr-v2:" + archive.asset_id)
         self.db.add(legacy)
         self.db.flush()
-        with patch.object(media, "materialize_asset", return_value=self.folder / "source") as materialize, \
+        with patch.object(media, "VerifiedSource", return_value=nullcontext(Mock(return_value=self.folder / "source"))) as materialize, \
              patch.object(media, "_probe", return_value=self.conversion_source("av1")) as probe, \
              patch.object(media, "_run_ffmpeg") as convert, patch.object(media, "ingest_file") as ingest:
             self.assertEqual(media.ensure_playback_variant(self.db, part, archive, {}), (None, True))
@@ -182,7 +186,7 @@ class PlaybackOnDemandTests(unittest.TestCase):
         def transcode(args, output, *unused):
             self.assertEqual(args[args.index("-c:v") + 1], "libx264")
             output.write_bytes(b"converted")
-        with patch.object(media, "materialize_asset", return_value=self.folder / "source"), \
+        with patch.object(media, "VerifiedSource", return_value=nullcontext(Mock(return_value=self.folder / "source"))), \
              patch.object(media, "_probe", side_effect=[self.conversion_source("av1"), self.conversion_source()]), \
              patch.object(media, "_run_ffmpeg", side_effect=transcode) as convert, \
              patch.object(media, "_verify_audio_decode"), patch.object(media, "ingest_file", return_value=converted):
@@ -198,7 +202,7 @@ class PlaybackOnDemandTests(unittest.TestCase):
             color_primaries="bt2020", side_data_list=[{"side_data_type": "DOVI configuration record",
                 "dv_profile": 8, "rpu_present_flag": 1}])
         output = self.asset()
-        with patch.object(media, "materialize_asset", return_value=self.folder / "source"), \
+        with patch.object(media, "VerifiedSource", return_value=nullcontext(Mock(return_value=self.folder / "source"))), \
              patch.object(media, "_probe", return_value=source), \
              patch.object(media, "_audio_compatible_copy", return_value=(source[0], self.conversion_source()[1], 1,
                  {"compatibility_mode": "audio_only", "video_stream_copy": True})) as audio_copy, \
@@ -275,7 +279,7 @@ class PlaybackOnDemandTests(unittest.TestCase):
                              media._packet_hash(path, "video", lambda: None))
             published.append(path.stat().st_size)
             return stored
-        with patch.object(media, "materialize_asset", return_value=source), \
+        with patch.object(media, "VerifiedSource", return_value=nullcontext(Mock(return_value=source))), \
              patch.object(media, "ingest_file", side_effect=ingest):
             playback, _ = media.ensure_playback_variant(self.db, part, archive, {})
         self.assertEqual(len(published), 1)

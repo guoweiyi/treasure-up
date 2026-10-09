@@ -17,9 +17,11 @@ def production_compose(root: Path, images: dict[str, str] | None = None) -> dict
     services = {name: deepcopy(service) for name, service in source["services"].items()}
     # Collection remains independent; download and media preparation share one
     # worker by default, as in the existing light deployment.
-    services.pop("media-worker")
+    media_resources = services.pop("media-worker")
     services.pop("download-worker")
     services["worker"] = deepcopy(services["collector"])
+    for key in ("cpus", "mem_limit", "mem_reservation", "memswap_limit", "pids_limit"):
+        services["worker"][key] = media_resources[key]
     services["worker"]["command"] = ["celery", "-A", "app.worker:celery", "worker", "-Q",
                                       "download,media", "--concurrency=1", "--loglevel=WARNING"]
     services["worker"]["healthcheck"]["test"] = ["CMD", "python", "/app/worker_healthcheck.py", "download", "media"]
@@ -31,12 +33,13 @@ def production_compose(root: Path, images: dict[str, str] | None = None) -> dict
         service.pop("build", None)
         # Host media paths are a source-checkout option. Published Compose must
         # remain self-contained and mount only declared named volumes.
-        service["volumes"] = [
-            volume.replace("${TREASURE_MEDIA_PATH:-media}:", "media:", 1)
-            if isinstance(volume, str) and volume.startswith("${TREASURE_MEDIA_PATH:-media}:")
-            else volume
-            for volume in service.get("volumes", [])
-        ]
+        for variable, volume_name in (("TREASURE_MEDIA_PATH", "media"), ("TREASURE_SCRATCH_PATH", "scratch")):
+            prefix = "${" + variable + ":-" + volume_name + "}:"
+            service["volumes"] = [
+                volume.replace(prefix, volume_name + ":", 1)
+                if isinstance(volume, str) and volume.startswith(prefix) else volume
+                for volume in service.get("volumes", [])
+            ]
         if name in {"postgres", "redis", "web"}:
             continue
         service["image"] = images["backend"]

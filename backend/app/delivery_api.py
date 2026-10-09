@@ -439,14 +439,35 @@ def purge(location_id: str, body: schemas.PurgeLocationInput, user=Depends(requi
 
 
 @router.post("/admin/variants/{variant_id}/prepare", status_code=202)
-def prepare(variant_id: str, user=Depends(require_admin), db: Session = Depends(get_db)):
+def prepare(variant_id: str, body: schemas.MediaPreparationInput | None = None,
+            user=Depends(require_admin), db: Session = Depends(get_db)):
     variant = required(db, MediaVariant, variant_id)
     if variant.kind == "hls":
         raise HTTPException(422, "请选择原档或兼容副本")
+    request = body or schemas.MediaPreparationInput()
+    if not request.package and not request.analyze_loudness:
+        raise HTTPException(422, "请选择分片或音量分析")
     config = db.get(Setting, "playback")
     segment_seconds = schemas.PlaybackSettings.model_validate(config.value if config else {}).segment_seconds
-    job = enqueue(db, "prepare_media", variant.id, policy={"package": True, "analyze_loudness": True, "segment_seconds": segment_seconds})
-    audit(db, user, "prepare", "media_variant", variant.id)
+    policy = {**request.model_dump(), "segment_seconds": segment_seconds, "preparation_request": "manual"}
+    job = None
+    for candidate in db.scalars(select(Job).where(Job.kind == "prepare_media", Job.target_id == variant.id,
+            Job.status.in_(("queued", "running", "paused", "blocked"))).order_by(Job.created_at, Job.id)):
+        effective = candidate.policy or {}
+        automatic = effective.get("preparation_request") == "automatic" or (
+            effective.get("preparation_request") != "manual" and (candidate.dedupe_key or "").startswith("prepare:"))
+        if automatic:
+            continue  # A later opt-out must never withdraw this explicit request.
+        if (all(not policy[action] or effective.get(action) for action in ("package", "analyze_loudness"))
+                and (not request.package or effective.get("segment_seconds", 6) == segment_seconds)):
+            job = candidate
+            break
+    if job is None:
+        key = (f"prepare-manual:v1:{variant.id}:{variant.asset_id}:{segment_seconds}:"
+               f"{int(request.package)}:{int(request.analyze_loudness)}")
+        job = enqueue(db, "prepare_media", variant.id, policy=policy, dedupe_key=key)
+    audit(db, user, "prepare", "media_variant", variant.id, {"job_id": job.id,
+          "package": request.package, "analyze_loudness": request.analyze_loudness})
     db.commit()
     return catalog.job_view(job)
 
